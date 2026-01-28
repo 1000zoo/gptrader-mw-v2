@@ -1,0 +1,2 @@
+TEST=True
+THRESHOLD=0.5
