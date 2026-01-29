@@ -45,7 +45,7 @@ class OrderEventHandler:
 
     @staticmethod
     def _extract_qty(order: Dict) -> Optional[float]:
-        for key in ("z", "l", "q"):
+        for key in ("z", "l", "q", "aq"):
             if key in order and order[key] is not None:
                 try:
                     return float(order[key])
@@ -56,6 +56,15 @@ class OrderEventHandler:
     @staticmethod
     def _extract_fee(order: Dict) -> Optional[float]:
         value = order.get("n")
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _safe_float(value: Optional[object]) -> Optional[float]:
         if value is None:
             return None
         try:
@@ -90,8 +99,8 @@ class OrderEventHandler:
     async def execute(self, message: Dict):
         logger.info(f"execute:: {message}")
         order = message[KeyEnum.ORDER_INFO.value]
-        ot = order[KeyEnum.ORIGIN_ORDER_TYPE.value]
-        x = order[KeyEnum.ORDER_STATUS.value]
+        order_status = order[KeyEnum.ORDER_STATUS.value]
+        execution_type = order.get(KeyEnum.EXECUTION_TYPE.value)
         symbol_id = order[KeyEnum.SYMBOL.value]
 
         job = await self.jobService.get_open_position_job(symbol_id=symbol_id)
@@ -105,7 +114,7 @@ class OrderEventHandler:
         if client_order_id:
             trade_fill = await self.trade_fill_service.find_by_entry_order_id(client_order_id)
 
-        if x == "FILLED" and client_order_id and job and client_order_id == job.main_order_id:
+        if order_status == "FILLED" and client_order_id and job and client_order_id == job.main_order_id:
             fill_price = self._extract_price(order)
             await self.trade_fill_service.update_entry_fill(
                 client_order_id,
@@ -128,35 +137,7 @@ class OrderEventHandler:
                         payload={"expected": trade_fill.entry_price, "fill": fill_price},
                     )
 
-        if ot in ("TAKE_PROFIT_MARKET", "STOP_MARKET") and x == "FILLED":
-            exit_price = self._extract_price(order)
-            exit_ts = self._parse_ts(order.get(KeyEnum.TRANSACTION_TIME.value))
-            pnl_usd = order.get("rp") or order.get("p")
-            pnl_usd = float(pnl_usd) if pnl_usd is not None else None
-            pnl_pct = None
-            r_multiple = None
-            if trade_fill and trade_fill.entry_price and exit_price:
-                pnl_pct = (exit_price - trade_fill.entry_price) / trade_fill.entry_price
-            if trade_fill and trade_fill.risk_budget_usd and pnl_usd is not None:
-                r_multiple = pnl_usd / float(trade_fill.risk_budget_usd)
-            await self.trade_fill_service.update_exit_fill(
-                entry_order_id=job.main_order_id,
-                exit_order_id=client_order_id,
-                exit_price=exit_price,
-                exit_fee=self._extract_fee(order),
-                exit_ts=exit_ts,
-                pnl_usd=pnl_usd,
-                pnl_pct=pnl_pct,
-                r_multiple=r_multiple,
-                status="CLOSED",
-            )
-            self.execute_close_logic(order)
-            if batch_id:
-                await self.jobService.update_job_run(DefaultJobRunVo(
-                    batch_id=batch_id, symbol_id=symbol_id, job_type='1600'
-                ))
-
-        if order.get("ot") == "LIQUIDATION" or order.get("x") == "LIQUIDATION":
+        if order.get("ot") == "LIQUIDATION" or execution_type == "LIQUIDATION":
             await self._record_anomaly(
                 batch_id=batch_id,
                 symbol_id=symbol_id,
@@ -168,7 +149,7 @@ class OrderEventHandler:
                 payload=order,
             )
 
-        if x == "PARTIALLY_FILLED":
+        if order_status == "PARTIALLY_FILLED":
             filled_qty = self._extract_qty(order) or 0
             orig_qty = float(order.get("q") or 0)
             if orig_qty > 0 and filled_qty / orig_qty < self.partial_fill_ratio:
@@ -200,10 +181,9 @@ class OrderEventHandler:
     async def algo_execute(self, message: Dict):
         logger.info(f"execute:: {message}")
         order = message[KeyEnum.ORDER_INFO.value]
-        o = order[KeyEnum.ORDER_TYPE.value]
-        x = order[KeyEnum.ORDER_STATUS.value]
+        order_type = order[KeyEnum.ORDER_TYPE.value]
+        algo_status = order[KeyEnum.ORDER_STATUS.value]
         symbol_id = order[KeyEnum.SYMBOL.value]
-        pnl = order["p"]
 
         job = await self.jobService.get_open_position_job(symbol_id=symbol_id)
         batch_id = job.batch_id
@@ -218,20 +198,44 @@ class OrderEventHandler:
             price=order["tp"],
             order_id=str(order["aid"]),
             position_side=order["ps"],
-            order_type=o,
-            execution_type=x,
-            pnl=pnl,
-            attr1=order["caid"]
+            order_type=order_type,
+            execution_type=algo_status,
+            order_status=algo_status,
+            client_order_id=order.get("caid"),
         ))
 
-        if x == 'FILLED':
-            self.execute_close_logic(order)
-            if batch_id:
-                await self.jobService.update_job_run(DefaultJobRunVo(
-                    batch_id=batch_id, symbol_id=symbol_id, job_type='1600'
-                ))
+        if algo_status == "FINISHED" and order_type in ("TAKE_PROFIT", "TAKE_PROFIT_MARKET", "STOP_MARKET", "STOP"):
+            exit_price = self._extract_price(order)
+            exit_qty = self._extract_qty(order)
+            if exit_price and exit_qty:
+                pnl_usd = self._safe_float(order.get("p"))
+                pnl_pct = None
+                r_multiple = None
+                if job and batch_id:
+                    trade_fill = await self.trade_fill_service.find_by_entry_order_id(job.main_order_id)
+                    if trade_fill and trade_fill.entry_price:
+                        pnl_pct = (exit_price - trade_fill.entry_price) / trade_fill.entry_price
+                    if trade_fill and trade_fill.risk_budget_usd and pnl_usd is not None:
+                        r_multiple = pnl_usd / float(trade_fill.risk_budget_usd)
+                    await self.trade_fill_service.update_exit_fill(
+                        entry_order_id=job.main_order_id,
+                        exit_order_id=order.get("caid"),
+                        exit_price=exit_price,
+                        exit_fee=None,
+                        exit_ts=self._parse_ts(message.get(KeyEnum.TRANSACTION_TIME.value)),
+                        pnl_usd=pnl_usd,
+                        pnl_pct=pnl_pct,
+                        r_multiple=r_multiple,
+                        status="CLOSED",
+                    )
+                self.execute_close_logic(order)
+                if batch_id:
+                    await self.jobService.update_job_run(DefaultJobRunVo(
+                        batch_id=batch_id, symbol_id=symbol_id, job_type='1600'
+                    ))
 
-
+    async def account_update(self, message: Dict):
+        logger.info(f"account_update:: {message}")
 
     def execute_close_logic(self, order: Dict):
         symbol = order[KeyEnum.SYMBOL.value]

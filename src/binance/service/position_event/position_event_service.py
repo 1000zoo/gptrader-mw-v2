@@ -22,13 +22,14 @@ def _to_position_event_vo(message: Dict[str, Any]) -> DefaultPositionEventVo:
     order = message.get("o", {})
     reg_ymd = reg_ymd_now()
     symbol_id = order.get("s")
-    order_id = order.get("i")   ## 여기 바꿔야함
+    order_id = order.get("i")
     client_order_id = order.get("c")
     batch_id = message.get("batch_id")
     # batch_id = f"{symbol_id}{reg_ymd}{order_id}" if batch_id is None else None
 
     qty = order.get("l") if order.get("l") not in (None, "0") else order.get("q")
     price = order.get("L") or order.get("ap") or order.get("p")
+    order_type = order.get("o") or order.get("ot")
 
     return DefaultPositionEventVo(
         reg_ymd=reg_ymd,
@@ -41,9 +42,10 @@ def _to_position_event_vo(message: Dict[str, Any]) -> DefaultPositionEventVo:
         order_id=str(order_id) if order_id is not None else None,
         position_side=order.get("ps"),
         execution_type=order.get("x"),
-        order_type=order.get("ot"),
+        order_type=order_type,
+        order_status=order.get("X"),
+        client_order_id=client_order_id,
         pnl=_to_float(order.get("rp")),
-        attr1=client_order_id
     )
 
 
