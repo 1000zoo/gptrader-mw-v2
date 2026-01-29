@@ -313,6 +313,8 @@ CREATE TABLE position_event (
     position_side   VARCHAR(20),     -- 'BOTH', 'LONG', 'SHORT'
     order_type      VARCHAR(30),     -- 'LIMIT', 'MARKET'
     execution_type  VARCHAR(30),     -- 'TAKE_PROFIT', ...
+    order_status	VARCHAR(30), 	 -- 'FILLED',...
+    client_order_id VARCHAR(80),
     pnl             NUMERIC(18, 8),
     attr1           TEXT,
     attr2           TEXT,
@@ -327,5 +329,4 @@ CREATE TABLE position_event (
     reg_dt          TIMESTAMPTZ DEFAULT NOW(),
     upd_dt          TIMESTAMPTZ
 );
-
 commit;
