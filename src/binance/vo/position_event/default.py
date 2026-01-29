@@ -18,6 +18,8 @@ class DefaultPositionEventVo(Vo):
     position_side: Optional[str] = None
     order_type: Optional[str] = None
     execution_type: Optional[str] = None
+    order_status: Optional[str] = None
+    client_order_id: Optional[str] = None
     pnl: Optional[float] = None
 
     class Config:
