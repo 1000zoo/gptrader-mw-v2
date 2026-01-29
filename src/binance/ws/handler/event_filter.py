@@ -17,3 +17,6 @@ class EventFilter:
 
         if message["e"] == 'ALGO_UPDATE':
             return await self.orderEventHandler.algo_execute(message)
+
+        if message["e"] == 'ACCOUNT_UPDATE':
+            return await self.orderEventHandler.account_update(message)
