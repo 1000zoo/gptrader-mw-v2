@@ -17,6 +17,7 @@ class JobRunService:
 
     async def create_job_run(self, vo: DefaultJobRunVo) -> int:
         try:
+            vo.started_at = datetime.now(timezone.utc)
             return await self.repository.insert_job_run(vo)
         except (SQLAlchemyError, ValueError) as e:
             raise RepositoryError("Failed to create job run.") from e

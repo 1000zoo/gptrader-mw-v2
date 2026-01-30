@@ -231,7 +231,7 @@ class OrderEventHandler:
                 self.execute_close_logic(order)
                 if batch_id:
                     await self.jobService.update_job_run(DefaultJobRunVo(
-                        batch_id=batch_id, symbol_id=symbol_id, job_type='1600'
+                        batch_id=batch_id, symbol_id=symbol_id, job_type='1600', finished_at=datetime.now(timezone.utc)
                     ))
 
     async def account_update(self, message: Dict):

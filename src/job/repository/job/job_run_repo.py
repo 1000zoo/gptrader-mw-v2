@@ -98,6 +98,7 @@ class JobRunRepository:
             SELECT * FROM {self.TABLE_NAME}
             WHERE 1=1
                 AND reg_dt <= now() - INTERVAL '1 hour'
+                AND job_type < '1600'
         """)
         async with SessionLocal() as session:
             result = await session.execute(sql)
