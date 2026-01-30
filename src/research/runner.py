@@ -6,11 +6,15 @@ from statistics import mean, pstdev
 from typing import Optional
 
 from loguru import logger
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
+from src.binance.service.ohlcv.ohlcv_service import OhlcvService
+from src.binance.service.symbol.symbol_service import SymbolService
 from src.common.db.connection import SessionLocal
 from src.research.service.backtest_result.backtest_result_service import BacktestResultService
 from src.research.vo.backtest_result.default import DefaultBacktestResultVo
+
+REPLAY_DONE_STATUS = "REPLAY_DONE"
 
 
 @dataclass
@@ -24,25 +28,37 @@ class ReplayConfig:
 class ResearchRunner:
     def __init__(self):
         self.backtest_service = BacktestResultService()
+        self.symbol_service = SymbolService()
+        self.ohlcv_service = OhlcvService()
 
-    async def _fetch_signal_logs(self, config: ReplayConfig):
+    async def _resolve_symbol_ids(self, config: ReplayConfig) -> list[str]:
+        if config.symbol_id:
+            return [config.symbol_id]
+        symbols = await self.symbol_service.find_use_symbols()
+        return [symbol.symbol_id for symbol in symbols if symbol.symbol_id]
+
+    async def _fetch_signal_logs(self, config: ReplayConfig, symbol_ids: list[str]):
+        if not symbol_ids:
+            return []
         sql = text(
             """
             SELECT * FROM signal_log
             WHERE raw_position != 'WAIT'
-              AND (:symbol_id IS NULL OR symbol_id = :symbol_id)
+              AND (replay_status IS NULL OR replay_status != :replay_status)
+              AND symbol_id IN :symbol_ids
               AND c_interval = :c_interval
             ORDER BY base_ts DESC
             LIMIT :limit
             """
-        )
+        ).bindparams(bindparam("symbol_ids", expanding=True))
         async with SessionLocal() as session:
             result = await session.execute(
                 sql,
                 {
-                    "symbol_id": config.symbol_id,
+                    "symbol_ids": symbol_ids,
                     "c_interval": config.c_interval,
                     "limit": config.limit,
+                    "replay_status": REPLAY_DONE_STATUS,
                 },
             )
             return result.mappings().all()
@@ -69,6 +85,37 @@ class ResearchRunner:
                 },
             )
             return result.mappings().all()
+
+    async def _ensure_ohlcv_window(self, symbol_id: str, c_interval: str, base_ts: datetime, limit: int):
+        candles = await self._fetch_ohlcv_window(symbol_id, c_interval, base_ts, limit)
+        if len(candles) >= limit:
+            return candles
+        batch_id = f"replay-{symbol_id}-{base_ts.strftime('%Y%m%d%H%M%S')}"
+        await self.ohlcv_service.load_ohlcv_window(
+            symbol_name=symbol_id,
+            interval=c_interval,
+            limit=limit,
+            batch_id=batch_id,
+            start_time=base_ts,
+        )
+        return await self._fetch_ohlcv_window(symbol_id, c_interval, base_ts, limit)
+
+    async def _mark_replay_done(self, signal_ids: list[int]):
+        if not signal_ids:
+            return
+        sql = text(
+            """
+            UPDATE signal_log
+            SET replay_status = :replay_status
+            WHERE id IN :signal_ids
+            """
+        ).bindparams(bindparam("signal_ids", expanding=True))
+        async with SessionLocal() as session:
+            await session.execute(
+                sql,
+                {"replay_status": REPLAY_DONE_STATUS, "signal_ids": signal_ids},
+            )
+            await session.commit()
 
     @staticmethod
     def _simulate_trade(signal, candles):
@@ -105,10 +152,12 @@ class ResearchRunner:
         return pnl_pct
 
     async def run_replay(self, config: ReplayConfig):
-        signals = await self._fetch_signal_logs(config)
+        symbol_ids = await self._resolve_symbol_ids(config)
+        signals = await self._fetch_signal_logs(config, symbol_ids)
         returns = []
+        processed_signal_ids = []
         for signal in signals:
-            candles = await self._fetch_ohlcv_window(
+            candles = await self._ensure_ohlcv_window(
                 signal["symbol_id"],
                 signal["c_interval"],
                 signal["base_ts"],
@@ -117,6 +166,7 @@ class ResearchRunner:
             pnl_pct = self._simulate_trade(signal, candles)
             if pnl_pct is not None:
                 returns.append(pnl_pct)
+            processed_signal_ids.append(signal["id"])
         trades = len(returns)
         winrate = sum(1 for r in returns if r > 0) / trades if trades else 0.0
         pnl_usd = sum(returns)
@@ -147,6 +197,7 @@ class ResearchRunner:
                 turnover=0.0,
             )
         )
+        await self._mark_replay_done(processed_signal_ids)
         logger.info(f"research replay stored trades={trades} pnl_usd={pnl_usd}")
 
 

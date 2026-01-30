@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import List, Dict
 
 from src.binance.api.ohlcv.ohlcv_api import OHLCVApi
@@ -10,6 +11,31 @@ from src.common.exception.external_api_error import ExternalApiError
 from src.common.exception.invalid_response_exception import InvalidResponseException
 from src.common.exception.repository_error import RepositoryError
 from sqlalchemy.exc import SQLAlchemyError
+
+_INTERVAL_MS = {
+    "m": 60 * 1000,
+    "h": 60 * 60 * 1000,
+    "d": 24 * 60 * 60 * 1000,
+    "w": 7 * 24 * 60 * 60 * 1000,
+    "M": 30 * 24 * 60 * 60 * 1000,
+}
+
+
+def _interval_to_ms(interval: str) -> int:
+    if not interval:
+        raise ValueError("Interval is required.")
+    unit = interval[-1]
+    value = int(interval[:-1])
+    if unit not in _INTERVAL_MS:
+        raise ValueError(f"Unsupported interval unit: {unit}")
+    return value * _INTERVAL_MS[unit]
+
+
+def _to_epoch_ms(dt: datetime) -> int:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return int(dt.timestamp() * 1000)
+
 
 def _to_vo_list(data: List[Dict], batch_id: str) -> List[DefaultOhlcvVo]:
     reg_ymd = reg_ymd_now()
@@ -52,6 +78,36 @@ class OhlcvService:
             await self.repository.insert_ohlcv_bulk(vo=vo)
         except (SQLAlchemyError, ValueError) as e:
             raise RepositoryError("Failed to insert OHLCV data.") from e
+        return vo
+
+    async def load_ohlcv_window(
+        self,
+        symbol_name: str,
+        interval: str,
+        limit: int,
+        batch_id: str,
+        start_time: datetime,
+    ) -> List[DefaultOhlcvVo]:
+        interval_ms = _interval_to_ms(interval)
+        start_ms = _to_epoch_ms(start_time)
+        end_ms = start_ms + interval_ms * limit
+        try:
+            data = self.api.get_ohlcv_klines(
+                symbol=symbol_name,
+                interval=interval,
+                limit=limit,
+                startTime=start_ms,
+                endTime=end_ms,
+            )
+        except (ExternalApiError, InvalidResponseException) as e:
+            raise ExternalApiError("Failed to fetch OHLCV window data.") from e
+        if not data:
+            raise DataNotFoundException(f"OHLCV window data not found for {symbol_name}.")
+        vo = _to_vo_list(data, batch_id)
+        try:
+            await self.repository.insert_ohlcv_bulk(vo=vo)
+        except (SQLAlchemyError, ValueError) as e:
+            raise RepositoryError("Failed to insert OHLCV window data.") from e
         return vo
 
 

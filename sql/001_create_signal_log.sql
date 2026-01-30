@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS signal_log (
     calibrated_confidence   NUMERIC(10, 4),
     dynamic_threshold_used  NUMERIC(10, 4),
     final_action            VARCHAR(20),
+    replay_status           VARCHAR(20),
     analyze_result_id       BIGINT,
     analyze_action_id       BIGINT,
     created_at              TIMESTAMPTZ DEFAULT NOW()
