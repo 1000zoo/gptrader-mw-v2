@@ -10,8 +10,6 @@ class DefaultSystemStateVo(Vo):
     reason: Optional[str] = None
     since_ts: Optional[datetime] = None
     updated_by: Optional[str] = None
-    reg_dt: Optional[datetime] = None
-    upd_dt: Optional[datetime] = None
 
     class Config:
         from_attributes = True

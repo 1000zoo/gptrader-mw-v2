@@ -31,7 +31,6 @@ class DefaultSignalLogVo(Vo):
     replay_status: Optional[str] = None
     analyze_result_id: Optional[int] = None
     analyze_action_id: Optional[int] = None
-    created_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
