@@ -11,7 +11,19 @@ CREATE TABLE IF NOT EXISTS execution_anomaly (
     signal_log_id   BIGINT,
     trade_fill_id   BIGINT,
     order_id        VARCHAR(50),
-    payload         JSONB
+    payload         JSONB,
+    attr1                       TEXT,
+    attr2                       TEXT,
+    attr3                       TEXT,
+    attr4                       TEXT,
+    attr5                       TEXT,
+    attr6                       TEXT,
+    attr7                       TEXT,
+    attr8                       TEXT,
+    attr9                       TEXT,
+    attr10                      TEXT,
+    reg_dt                      TIMESTAMPTZ DEFAULT NOW(),
+    upd_dt                      TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_exec_anomaly_run_id

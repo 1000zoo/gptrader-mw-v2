@@ -24,8 +24,6 @@ class DefaultTradeFillVo(Vo):
     slippage_est: Optional[float] = None
     status: Optional[str] = None
     risk_budget_usd: Optional[float] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

@@ -14,7 +14,19 @@ CREATE TABLE IF NOT EXISTS confidence_calibration (
     ev                  NUMERIC(18, 8),
     avg_r               NUMERIC(18, 8),
     pf                  NUMERIC(18, 8),
-    recommended_threshold NUMERIC(10, 4)
+    recommended_threshold NUMERIC(10, 4),
+    attr1                       TEXT,
+    attr2                       TEXT,
+    attr3                       TEXT,
+    attr4                       TEXT,
+    attr5                       TEXT,
+    attr6                       TEXT,
+    attr7                       TEXT,
+    attr8                       TEXT,
+    attr9                       TEXT,
+    attr10                      TEXT,
+    reg_dt                      TIMESTAMPTZ DEFAULT NOW(),
+    upd_dt                      TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_conf_calibration_interval_symbol
