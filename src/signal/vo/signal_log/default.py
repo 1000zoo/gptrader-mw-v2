@@ -28,6 +28,7 @@ class DefaultSignalLogVo(Vo):
     calibrated_confidence: Optional[float] = None
     dynamic_threshold_used: Optional[float] = None
     final_action: Optional[str] = None
+    replay_status: Optional[str] = None
     analyze_result_id: Optional[int] = None
     analyze_action_id: Optional[int] = None
     created_at: Optional[datetime] = None
