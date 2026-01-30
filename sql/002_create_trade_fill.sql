@@ -21,8 +21,18 @@ CREATE TABLE IF NOT EXISTS trade_fill (
     slippage_est    NUMERIC(18, 8),
     status          VARCHAR(20),
     risk_budget_usd NUMERIC(18, 8),
-    created_at      TIMESTAMPTZ DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ
+    attr1                       TEXT,
+    attr2                       TEXT,
+    attr3                       TEXT,
+    attr4                       TEXT,
+    attr5                       TEXT,
+    attr6                       TEXT,
+    attr7                       TEXT,
+    attr8                       TEXT,
+    attr9                       TEXT,
+    attr10                      TEXT,
+    reg_dt                      TIMESTAMPTZ DEFAULT NOW(),
+    upd_dt                      TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS idx_trade_fill_signal_log_id

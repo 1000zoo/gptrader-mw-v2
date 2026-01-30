@@ -25,10 +25,20 @@ CREATE TABLE IF NOT EXISTS signal_log (
     calibrated_confidence   NUMERIC(10, 4),
     dynamic_threshold_used  NUMERIC(10, 4),
     final_action            VARCHAR(20),
-    replay_status           VARCHAR(20),
     analyze_result_id       BIGINT,
     analyze_action_id       BIGINT,
-    created_at              TIMESTAMPTZ DEFAULT NOW()
+    attr1                       TEXT,
+    attr2                       TEXT,
+    attr3                       TEXT,
+    attr4                       TEXT,
+    attr5                       TEXT,
+    attr6                       TEXT,
+    attr7                       TEXT,
+    attr8                       TEXT,
+    attr9                       TEXT,
+    attr10                      TEXT,
+    reg_dt                      TIMESTAMPTZ DEFAULT NOW(),
+    upd_dt                      TIMESTAMPTZ
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_signal_log_decision
@@ -40,4 +50,6 @@ CREATE INDEX IF NOT EXISTS idx_signal_log_symbol_interval_base_ts
 CREATE INDEX IF NOT EXISTS idx_signal_log_run_id
     ON signal_log (run_id);
 
+
 commit;
+
