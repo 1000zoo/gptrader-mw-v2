@@ -1,54 +1,79 @@
 import asyncio
 import os
+from datetime import datetime
 from typing import Optional
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from loguru import logger
 
 from src.common.logger.logger_config import setup_logging
+from src.research.runner import run_from_env
 from src.scheduler.executor import execute as scheduler_execute
 
-INTERVAL_SECONDS=600
-
-class SchedulerRunner:
-    def __init__(self, interval_seconds: int = INTERVAL_SECONDS):
-        self.interval_seconds = interval_seconds
-        self._stop_event = asyncio.Event()
-
-    async def run_once(self):
-        return await scheduler_execute()
-
-    async def execute(self):
-        logger.info("scheduler started")
-        while not self._stop_event.is_set():
-            try:
-                await self.run_once()
-            except Exception as exc:
-                logger.exception(f"scheduler execution failed: {exc}")
-
-            try:
-                await asyncio.wait_for(self._stop_event.wait(), timeout=self.interval_seconds)
-            except asyncio.TimeoutError:
-                continue
-
-    def stop(self):
-        self._stop_event.set()
+DEFAULT_EXECUTE_INTERVAL_SECONDS = 3600
+DEFAULT_RESEARCH_INTERVAL_SECONDS = 3600
 
 
-def _get_interval_seconds() -> int:
-    raw_value: Optional[str] = os.getenv("SCHEDULER_INTERVAL_SECONDS")
+def tznow(scheduler: AsyncIOScheduler) -> datetime:
+    return datetime.now(scheduler.timezone)
+
+
+def _get_interval_seconds(env_key: str, default_value: int) -> int:
+    raw_value: Optional[str] = os.getenv(env_key)
     if not raw_value:
-        return INTERVAL_SECONDS
+        return default_value
     try:
         return max(1, int(raw_value))
     except ValueError:
-        logger.warning(f"invalid SCHEDULER_INTERVAL_SECONDS: {raw_value}. using default 60s")
-        return INTERVAL_SECONDS
+        logger.warning(f"invalid {env_key}: {raw_value}. using default {default_value}s")
+        return default_value
 
 
-async def _main():
-    runner = SchedulerRunner(interval_seconds=_get_interval_seconds())
-    await runner.execute()
+async def setup_scheduler() -> None:
+    scheduler = AsyncIOScheduler(
+        timezone="Asia/Seoul",
+        job_defaults={
+            "coalesce": False,
+            "misfire_grace_time": 120,
+            "max_instances": 1,
+        },
+    )
+    logger.info("scheduler setup start")
+
+    execute_interval = _get_interval_seconds(
+        "SCHEDULER_EXECUTE_INTERVAL_SECONDS",
+        DEFAULT_EXECUTE_INTERVAL_SECONDS,
+    )
+    research_interval = _get_interval_seconds(
+        "RESEARCH_JOB_INTERVAL_SECONDS",
+        DEFAULT_RESEARCH_INTERVAL_SECONDS,
+    )
+
+    scheduler.add_job(
+        scheduler_execute,
+        "interval",
+        seconds=execute_interval,
+        id="execute_job",
+        next_run_time=tznow(scheduler),
+        coalesce=True,
+        misfire_grace_time=300,
+    )
+
+    scheduler.add_job(
+        run_from_env,
+        "interval",
+        seconds=research_interval,
+        id="research_job",
+        next_run_time=tznow(scheduler),
+        coalesce=True,
+        misfire_grace_time=600,
+    )
+
+    scheduler.start()
+    logger.info("scheduler started")
+
+    await asyncio.Event().wait()
 
 
 if __name__ == "__main__":
@@ -59,4 +84,4 @@ if __name__ == "__main__":
 
     setup_logging(app_name="scheduler", log_dir=LOG_DIR, level=LOG_LEVEL)
 
-    asyncio.run(_main())
+    asyncio.run(setup_scheduler())
