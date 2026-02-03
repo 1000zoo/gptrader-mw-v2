@@ -108,7 +108,12 @@ class SchedulerExecutor:
                 )
             )
             if trade_result:
-                await self._update_job(best_action.batch_id, JOB_TYPE_POSITION_OPEN, JOB_STATUS_DONE)
+                await self._update_job(
+                    best_action.batch_id,
+                    JOB_TYPE_POSITION_OPEN,
+                    JOB_STATUS_DONE,
+                    best_action.symbol_id,
+                )
             else:
                 pass
                 # await self.jobExecutor.delete_job_run(best_action.batch_id)
@@ -142,6 +147,7 @@ class SchedulerExecutor:
                 status=JOB_STATUS_RUNNING,
             )
         )
+        logger.info(f"job progress [{symbol.symbol_id}] {batch_id} {JOB_TYPE_CREATED} {JOB_STATUS_RUNNING}")
 
         ohlcv = await self.ohlcvExecutor.load_ohlcv(
             symbol_name=symbol.symbol_id,
@@ -150,26 +156,26 @@ class SchedulerExecutor:
             batch_id=batch_id,
         )
         if not ohlcv:
-            await self._update_job(batch_id, JOB_TYPE_OHLCV_LOADED, JOB_STATUS_ERROR)
+            await self._update_job(batch_id, JOB_TYPE_OHLCV_LOADED, JOB_STATUS_ERROR, symbol.symbol_id)
             return None
 
-        await self._update_job(batch_id, JOB_TYPE_OHLCV_LOADED, JOB_STATUS_RUNNING)
+        await self._update_job(batch_id, JOB_TYPE_OHLCV_LOADED, JOB_STATUS_RUNNING, symbol.symbol_id)
 
         indicators = await self.indicatorExecutor.cal_insert_indicators(ohlcv, self.indParams)
         if not indicators:
-            await self._update_job(batch_id, JOB_TYPE_INDICATOR_DONE, JOB_STATUS_ERROR)
+            await self._update_job(batch_id, JOB_TYPE_INDICATOR_DONE, JOB_STATUS_ERROR, symbol.symbol_id)
             return None
 
-        await self._update_job(batch_id, JOB_TYPE_INDICATOR_DONE, JOB_STATUS_RUNNING)
-        await self._update_job(batch_id, JOB_TYPE_ANALYZE_RESULT, JOB_STATUS_RUNNING)
+        await self._update_job(batch_id, JOB_TYPE_INDICATOR_DONE, JOB_STATUS_RUNNING, symbol.symbol_id)
+        await self._update_job(batch_id, JOB_TYPE_ANALYZE_RESULT, JOB_STATUS_RUNNING, symbol.symbol_id)
 
         analyze_input = AnalyzeInputDto(ohlcv=ohlcv, indicators=indicators, indParams=self.indParams)
         action = await self.analyzeExecutor.analyze(analyze_input)
         if not action:
-            await self._update_job(batch_id, JOB_TYPE_ANALYZE_RESULT, JOB_STATUS_ERROR)
+            await self._update_job(batch_id, JOB_TYPE_ANALYZE_RESULT, JOB_STATUS_ERROR, symbol.symbol_id)
             return None
 
-        await self._update_job(batch_id, JOB_TYPE_ANALYZE_ACTION, JOB_STATUS_RUNNING)
+        await self._update_job(batch_id, JOB_TYPE_ANALYZE_ACTION, JOB_STATUS_RUNNING, symbol.symbol_id)
         return action
 
     async def _cleanup_unselected(self, actions: List[DefaultAnalyzeActionVo], selected_batch_id: Optional[str]):
@@ -177,9 +183,17 @@ class SchedulerExecutor:
             if action.batch_id and action.batch_id != selected_batch_id:
                 await self.jobExecutor.delete_job_run(action.batch_id)
 
-    async def _update_job(self, batch_id: Optional[str], job_type: str, status: str):
+    async def _update_job(
+        self,
+        batch_id: Optional[str],
+        job_type: str,
+        status: str,
+        symbol_id: Optional[str] = None,
+    ):
         if not batch_id:
             return
+        if symbol_id:
+            logger.info(f"job progress [{symbol_id}] {batch_id} {job_type} {status}")
         await self.jobExecutor.update_job_run(
             DefaultJobRunVo(
                 batch_id=batch_id,

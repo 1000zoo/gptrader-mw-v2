@@ -50,6 +50,19 @@ def _bool_env(name: str, default: bool) -> bool:
     return val.lower() in {"1", "true", "t", "yes", "y"}
 
 
+# ========= SQLAlchemy 로그 최소화 ========= #
+class SqlAlchemyMinimalFilter(logging.Filter):
+    """SQLAlchemy echo 로그에서 트랜잭션/캐시 노이즈 제거."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if msg.startswith("BEGIN") or msg.startswith("COMMIT") or msg.startswith("ROLLBACK"):
+            return False
+        if "cached since" in msg:
+            return False
+        return True
+
+
 # ========= 초기화 함수 ========= #
 def setup_logging(
     app_name: str = "app",
@@ -79,6 +92,8 @@ def setup_logging(
     retention = os.getenv("LOG_RETENTION", retention or "30 days")
     compression = os.getenv("LOG_COMPRESSION", compression or "zip")
     enqueue = _bool_env("LOG_ENQUEUE", True if enqueue is None else enqueue)
+    sql_echo = _bool_env("SQL_ECHO", False)
+    sql_echo_minimal = _bool_env("SQL_ECHO_MINIMAL", True)
 
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 
@@ -129,10 +144,27 @@ def setup_logging(
     logging.root.setLevel(getattr(logging, level, logging.INFO))
 
     # 일반적으로 자주 시끄러운 로거 레벨 조정(필요 시 수정)
-    for noisy in ("uvicorn", "uvicorn.error", "uvicorn.access", "asyncio"):
+    for noisy in (
+        "uvicorn",
+        "uvicorn.error",
+        "uvicorn.access",
+        "asyncio",
+        "sqlalchemy",
+        "sqlalchemy.pool",
+        "sqlalchemy.dialects",
+        "asyncpg",
+    ):
         with suppress(Exception):
             logging.getLogger(noisy).handlers = [InterceptHandler()]
             logging.getLogger(noisy).setLevel(getattr(logging, level, logging.ERROR))
+
+    # SQLAlchemy engine 로그는 SQL_ECHO에 따라 제어
+    with suppress(Exception):
+        engine_logger = logging.getLogger("sqlalchemy.engine.Engine")
+        engine_logger.handlers = [InterceptHandler()]
+        engine_logger.setLevel(logging.INFO if sql_echo else logging.ERROR)
+        if sql_echo and sql_echo_minimal:
+            engine_logger.addFilter(SqlAlchemyMinimalFilter())
 
 
 # ========= FastAPI 전용 미들웨어 ========= #

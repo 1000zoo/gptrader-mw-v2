@@ -30,7 +30,7 @@ class SignalLogRepository:
             SELECT * FROM {self.TABLE_NAME}
             WHERE run_id = :run_id
             {"AND symbol_id = :symbol_id" if symbol_id else ""}
-            ORDER BY created_at DESC
+            ORDER BY reg_dt DESC
             LIMIT 1
             """
         )
