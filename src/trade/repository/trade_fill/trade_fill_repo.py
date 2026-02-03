@@ -96,7 +96,7 @@ class TradeFillRepository:
                 entry_qty = :entry_qty,
                 entry_fee = :entry_fee,
                 entry_ts = :entry_ts,
-                updated_at = NOW()
+                upd_dt = NOW()
             WHERE entry_order_id = :entry_order_id
             """
         )
@@ -137,7 +137,7 @@ class TradeFillRepository:
                 pnl_pct = :pnl_pct,
                 r_multiple = :r_multiple,
                 status = :status,
-                updated_at = NOW()
+                upd_dt = NOW()
             WHERE entry_order_id = :entry_order_id
             """
         )
