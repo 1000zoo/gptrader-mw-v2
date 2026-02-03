@@ -87,6 +87,7 @@ def setup_logging(
 
     # 환경변수 우선 적용
     level = os.getenv("LOG_LEVEL", level)
+    log_tz = os.getenv("LOG_TZ", "Asia/Seoul")
     log_dir = os.getenv("LOG_DIR", str(log_dir))
     rotation = os.getenv("LOG_ROTATION", rotation or "1 day")
     retention = os.getenv("LOG_RETENTION", retention or "30 days")
@@ -94,6 +95,12 @@ def setup_logging(
     enqueue = _bool_env("LOG_ENQUEUE", True if enqueue is None else enqueue)
     sql_echo = _bool_env("SQL_ECHO", False)
     sql_echo_minimal = _bool_env("SQL_ECHO_MINIMAL", True)
+
+    # 로그 타임존 설정 (컨테이너 기본 UTC → KST)
+    if log_tz:
+        os.environ["TZ"] = log_tz
+        if hasattr(time, "tzset"):
+            time.tzset()
 
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 

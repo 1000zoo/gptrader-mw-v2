@@ -618,6 +618,7 @@ CREATE TABLE public.signal_log (
     calibrated_confidence numeric(10,4),
     dynamic_threshold_used numeric(10,4),
     final_action character varying(20),
+    reply_status character varying(20),
     analyze_result_id bigint,
     analyze_action_id bigint,
     attr1 text,
