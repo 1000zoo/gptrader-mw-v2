@@ -7,6 +7,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from loguru import logger
 
+from src.common.exception.exception_handler import handle_top_level_exception
 from src.common.logger.logger_config import setup_logging
 from src.research.runner import run_from_env
 from src.scheduler.executor import execute as scheduler_execute
@@ -84,4 +85,7 @@ if __name__ == "__main__":
 
     setup_logging(app_name="scheduler", log_dir=LOG_DIR, level=LOG_LEVEL)
 
-    asyncio.run(setup_scheduler())
+    try:
+        asyncio.run(setup_scheduler())
+    except Exception as e:
+        asyncio.run(handle_top_level_exception("scheduler", "setup_scheduler", e))

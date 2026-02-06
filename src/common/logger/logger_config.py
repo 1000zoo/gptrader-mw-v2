@@ -179,6 +179,8 @@ def setup_logging(
 from fastapi import FastAPI, Request
 from starlette.responses import Response
 
+from src.common.exception.exception_handler import handle_top_level_exception
+
 
 
 def install_fastapi_middleware(app: FastAPI) -> None:
@@ -207,6 +209,7 @@ def install_fastapi_middleware(app: FastAPI) -> None:
         except Exception as e:  # 미들웨어에서 잡힌 예외도 로깅
             elapsed_ms = (time.perf_counter() - start) * 1000
             logger.exception(f"💥 {method} {url_path} 500 - {elapsed_ms:.2f} ms: {e}")
+            await handle_top_level_exception("web_app", f"{method} {url_path}", e)
             raise
 
 
