@@ -1,11 +1,11 @@
 import asyncio
 import os
-from typing import Optional
 
 from dotenv import load_dotenv
 from loguru import logger
 
 from src.common.logger.logger_config import setup_logging
+from src.common.exception.exception_handler import handle_top_level_exception
 from src.binance.ws.listener.position_listener import PositionListener
 
 async def _main():
@@ -15,6 +15,11 @@ async def _main():
             await pl.start()
         except Exception as e:
             logger.exception(f"[MAIN] PositionListener crashed, restarting in 3s: {e}")
+            await handle_top_level_exception(
+                process_name="websockets",
+                method="PositionListener.start",
+                error=e,
+            )
             await asyncio.sleep(3)
 
 if __name__ == '__main__':
