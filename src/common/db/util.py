@@ -20,7 +20,8 @@ ALLOWED_TABLES = {
     'system_state',
     'confidence_calibration',
     'backtest_result',
-    'execution_anomaly'
+    'execution_anomaly',
+    'slack_setting'
 }
 
 def strip_none(d: Mapping[str, Any],) -> dict[str, Any]:
