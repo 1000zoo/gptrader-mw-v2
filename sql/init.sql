@@ -618,6 +618,7 @@ CREATE TABLE public.signal_log (
     calibrated_confidence numeric(10,4),
     dynamic_threshold_used numeric(10,4),
     final_action character varying(20),
+    replay_status character varying(20),
     analyze_result_id bigint,
     analyze_action_id bigint,
     attr1 text,
@@ -1070,6 +1071,29 @@ CREATE UNIQUE INDEX ux_signal_log_decision ON public.signal_log USING btree (sym
 --
 -- PostgreSQL database dump complete
 --
+
+-- insert default symbols data
+INSERT INTO public.symbols
+(symbol_id, symbol_name, price_precision, quantity_precision, tick_size, step_size, min_price, max_price, min_qty, max_qty, attr1, attr2, attr3, attr4, attr5, attr6, attr7, attr8, attr9, attr10, reg_dt, upd_dt)
+VALUES('BTCUSDT', 'BTCUSDT', NULL, 8, 0.10000000, 0.00100000, 556.80000000, 4529764.00000000, 0.0010000000, 1000.0000000000, 'Y', '0003', '20260129', NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2025-12-18 19:24:31.630', NULL);
+INSERT INTO public.symbols
+(symbol_id, symbol_name, price_precision, quantity_precision, tick_size, step_size, min_price, max_price, min_qty, max_qty, attr1, attr2, attr3, attr4, attr5, attr6, attr7, attr8, attr9, attr10, reg_dt, upd_dt)
+VALUES('ETHUSDT', 'ETHUSDT', NULL, 8, 0.01000000, 0.00100000, 39.86000000, 306177.00000000, 0.0010000000, 10000.0000000000, 'Y', '0003', '20260129', NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2025-12-18 19:24:31.637', NULL);
+INSERT INTO public.symbols
+(symbol_id, symbol_name, price_precision, quantity_precision, tick_size, step_size, min_price, max_price, min_qty, max_qty, attr1, attr2, attr3, attr4, attr5, attr6, attr7, attr8, attr9, attr10, reg_dt, upd_dt)
+VALUES('XRPUSDT', 'XRPUSDT', NULL, 8, 0.00010000, 0.10000000, 0.01430000, 100000.00000000, 0.1000000000, 10000000.0000000000, 'Y', '0003', '20260129', NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2025-12-18 19:24:31.638', NULL);
+INSERT INTO public.symbols
+(symbol_id, symbol_name, price_precision, quantity_precision, tick_size, step_size, min_price, max_price, min_qty, max_qty, attr1, attr2, attr3, attr4, attr5, attr6, attr7, attr8, attr9, attr10, reg_dt, upd_dt)
+VALUES('SOLUSDT', 'SOLUSDT', NULL, 8, 0.01000000, 0.01000000, 0.42000000, 6857.00000000, 0.0100000000, 1000000.0000000000, 'Y', '0003', '20260129', NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2025-12-18 19:24:31.640', NULL);
+
+
+-- insert default indicator_parameter
+INSERT INTO public.indicator_parameter
+("name", tail, col, ma_fast_w, ma_slow_w, ema_fast_w, ema_slow_w, std_w, rsi_w, macd_signal, bollinger_k, atr_w, kd_k_w, kd_d_w, roc_w, momentum_w, mfi_w, donchain_w, keltner_m, linear_regression_slope_w, attr1, attr2, attr3, attr4, attr5, attr6, attr7, attr8, attr9, attr10, reg_dt, upd_dt)
+VALUES('default', 50, 'close', 20, 60, 20, 60, 20, 14, 9, 2.0000, 14, 14, 14, 14, 14, 14, 20, 2.0000, 20, 'Y', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2025-12-25 05:14:56.853', '2025-12-25 05:14:56.853');
+INSERT INTO public.indicator_parameter
+("name", tail, col, ma_fast_w, ma_slow_w, ema_fast_w, ema_slow_w, std_w, rsi_w, macd_signal, bollinger_k, atr_w, kd_k_w, kd_d_w, roc_w, momentum_w, mfi_w, donchain_w, keltner_m, linear_regression_slope_w, attr1, attr2, attr3, attr4, attr5, attr6, attr7, attr8, attr9, attr10, reg_dt, upd_dt)
+VALUES('default_2', 50, 'close', 20, 60, 20, 60, 20, 14, 9, 2.0000, 14, 14, 14, 14, 14, 14, 20, 2.0000, 150, 'Y', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-01-15 21:15:46.844', '2026-01-15 21:15:46.844');
 
 \unrestrict 6Ln0sCSjwcJffIl0xhtvmcdaPctdgGvfCi24J79UHcIELKrvXnxq8yqMoCvKQ0j
 

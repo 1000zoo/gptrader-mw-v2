@@ -1,3 +1,4 @@
+import json
 from typing import Any, Mapping, List, Tuple
 from sqlalchemy import text
 
@@ -19,11 +20,21 @@ ALLOWED_TABLES = {
     'system_state',
     'confidence_calibration',
     'backtest_result',
-    'execution_anomaly'
+    'execution_anomaly',
+    'slack_setting'
 }
 
 def strip_none(d: Mapping[str, Any],) -> dict[str, Any]:
     return {k: v for k, v in d.items() if v is not None}
+
+def normalize_params(d: Mapping[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for k, v in d.items():
+        if isinstance(v, (dict, list)):
+            normalized[k] = json.dumps(v)
+        else:
+            normalized[k] = v
+    return normalized
 
 
 def build_insert_sql(table: str, data: Mapping[str, Any]) -> tuple[Any, dict[str, Any]]:
@@ -38,7 +49,7 @@ def build_insert_sql(table: str, data: Mapping[str, Any]) -> tuple[Any, dict[str
     cols = ", ".join(clean.keys())
     params = ", ".join(f":{k}" for k in clean.keys())
     sql = text(f"INSERT INTO {table} ({cols}) VALUES ({params})")
-    return sql, clean
+    return sql, normalize_params(clean)
 
 def build_select_sql(table: str, condition: Mapping[str, Any]) -> Tuple[Any, dict[str, Any]]:
     if table.lower() not in ALLOWED_TABLES:
@@ -74,7 +85,7 @@ async def common_select(table: str, vo: Vo, vo_cls):
 async def common_insert_bulk(table: str, rows: List[Vo]):
     if not rows:
         return 0
-    data_list = [row.model_dump(exclude_none=True) for row in rows]
+    data_list = [normalize_params(row.model_dump(exclude_none=True)) for row in rows]
     
     sql, _ = build_insert_sql(table, data_list[0])
 
