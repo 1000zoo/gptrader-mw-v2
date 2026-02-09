@@ -104,7 +104,7 @@ class OrderEventHandler:
         symbol_id = order[KeyEnum.SYMBOL.value]
 
         job = await self.jobService.get_open_position_job(symbol_id=symbol_id)
-        batch_id = job.batch_id
+        batch_id = None if not job else job.batch_id
         message["batch_id"] = batch_id
 
         await self.positionService.add_position_event(message)
@@ -136,6 +136,15 @@ class OrderEventHandler:
                         order_id=client_order_id,
                         payload={"expected": trade_fill.entry_price, "fill": fill_price},
                     )
+
+        if order_status == "FILLED" and job and client_order_id not in (job.main_order_id, job.tp_order_id, job.sl_order_id):
+            logger.info(f"{symbol_id} position finished by manual!")
+
+            if batch_id:
+                await self.jobService.update_job_run(DefaultJobRunVo(
+                    batch_id=batch_id, symbol_id=symbol_id, job_type='1600', finished_at=datetime.now(timezone.utc)
+                ))
+
 
         if order.get("ot") == "LIQUIDATION" or execution_type == "LIQUIDATION":
             await self._record_anomaly(

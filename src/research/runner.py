@@ -127,6 +127,8 @@ class ResearchRunner:
         side = signal["raw_position"]
         if tp is None or sl is None:
             return None
+        tp = float(tp)
+        sl = float(sl)
         for candle in candles[1:]:
             high = float(candle["c_high"])
             low = float(candle["c_low"])
