@@ -50,6 +50,19 @@ def _bool_env(name: str, default: bool) -> bool:
     return val.lower() in {"1", "true", "t", "yes", "y"}
 
 
+# ========= SQLAlchemy 로그 최소화 ========= #
+class SqlAlchemyMinimalFilter(logging.Filter):
+    """SQLAlchemy echo 로그에서 트랜잭션/캐시 노이즈 제거."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if msg.startswith("BEGIN") or msg.startswith("COMMIT") or msg.startswith("ROLLBACK"):
+            return False
+        if "cached since" in msg:
+            return False
+        return True
+
+
 # ========= 초기화 함수 ========= #
 def setup_logging(
     app_name: str = "app",
@@ -74,11 +87,20 @@ def setup_logging(
 
     # 환경변수 우선 적용
     level = os.getenv("LOG_LEVEL", level)
+    log_tz = os.getenv("LOG_TZ", "Asia/Seoul")
     log_dir = os.getenv("LOG_DIR", str(log_dir))
     rotation = os.getenv("LOG_ROTATION", rotation or "1 day")
     retention = os.getenv("LOG_RETENTION", retention or "30 days")
     compression = os.getenv("LOG_COMPRESSION", compression or "zip")
     enqueue = _bool_env("LOG_ENQUEUE", True if enqueue is None else enqueue)
+    sql_echo = _bool_env("SQL_ECHO", False)
+    sql_echo_minimal = _bool_env("SQL_ECHO_MINIMAL", True)
+
+    # 로그 타임존 설정 (컨테이너 기본 UTC → KST)
+    if log_tz:
+        os.environ["TZ"] = log_tz
+        if hasattr(time, "tzset"):
+            time.tzset()
 
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 
@@ -129,10 +151,27 @@ def setup_logging(
     logging.root.setLevel(getattr(logging, level, logging.INFO))
 
     # 일반적으로 자주 시끄러운 로거 레벨 조정(필요 시 수정)
-    for noisy in ("uvicorn", "uvicorn.error", "uvicorn.access", "asyncio"):
+    for noisy in (
+        "uvicorn",
+        "uvicorn.error",
+        "uvicorn.access",
+        "asyncio",
+        "sqlalchemy",
+        "sqlalchemy.pool",
+        "sqlalchemy.dialects",
+        "asyncpg",
+    ):
         with suppress(Exception):
             logging.getLogger(noisy).handlers = [InterceptHandler()]
             logging.getLogger(noisy).setLevel(getattr(logging, level, logging.ERROR))
+
+    # SQLAlchemy engine 로그는 SQL_ECHO에 따라 제어
+    with suppress(Exception):
+        engine_logger = logging.getLogger("sqlalchemy.engine.Engine")
+        engine_logger.handlers = [InterceptHandler()]
+        engine_logger.setLevel(logging.INFO if sql_echo else logging.ERROR)
+        if sql_echo and sql_echo_minimal:
+            engine_logger.addFilter(SqlAlchemyMinimalFilter())
 
 
 # ========= FastAPI 전용 미들웨어 ========= #
@@ -140,6 +179,7 @@ def setup_logging(
 from fastapi import FastAPI, Request
 from starlette.responses import Response
 
+from src.common.exception.exception_handler import handle_top_level_exception
 
 
 def install_fastapi_middleware(app: FastAPI) -> None:
@@ -168,6 +208,11 @@ def install_fastapi_middleware(app: FastAPI) -> None:
         except Exception as e:  # 미들웨어에서 잡힌 예외도 로깅
             elapsed_ms = (time.perf_counter() - start) * 1000
             logger.exception(f"💥 {method} {url_path} 500 - {elapsed_ms:.2f} ms: {e}")
+            await handle_top_level_exception(
+                process_name="web_app",
+                method=f"{method} {url_path}",
+                error=e,
+            )
             raise
 
 

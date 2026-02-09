@@ -42,7 +42,7 @@ services:
       POSTGRES_USER: ${PG_USER:-gptrader}
       POSTGRES_PASSWORD: ${PG_PASSWORD:-gptrader}
     ports:
-      - "5432:5432"
+      - "15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./sql/init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
