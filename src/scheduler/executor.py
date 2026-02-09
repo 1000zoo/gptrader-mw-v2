@@ -19,6 +19,7 @@ from src.common.util.date import reg_ymd_now
 from src.indicators.executor.indicator.indicator_executor import IndicatorExecutor
 from src.job.executor.job.job_executor import JobExecutor
 from src.job.vo.job.default import DefaultJobRunVo
+from src.ops.service.system_state.system_state_service import SystemStateService
 from src.common.constants.job_constants import (
     JOB_STATUS_DONE,
     JOB_STATUS_ERROR,
@@ -51,6 +52,11 @@ class SchedulerExecutor:
 
     async def execute(self):
         try:
+            system_state_service = SystemStateService()
+            if not await system_state_service.is_trading_enabled():
+                logger.info("scheduler disabled by ops state.")
+                return None
+
             if await self._has_open_position():
                 # logger.info("skip scheduler: open position already exists.")
                 return None

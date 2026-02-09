@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -29,3 +30,50 @@ class SystemStateService:
             return await self.repository.select_latest_state()
         except (SQLAlchemyError, ValueError) as e:
             raise RepositoryError("Failed to select latest system_state.") from e
+
+    async def enable_trading(
+        self,
+        reason: Optional[str] = None,
+        updated_by: str = "manual",
+        since_ts: Optional[datetime] = None,
+    ) -> int:
+        return await self._create_state(
+            trading_enabled=True,
+            reason=reason,
+            updated_by=updated_by,
+            since_ts=since_ts,
+        )
+
+    async def disable_trading(
+        self,
+        reason: Optional[str] = None,
+        updated_by: str = "manual",
+        since_ts: Optional[datetime] = None,
+    ) -> int:
+        return await self._create_state(
+            trading_enabled=False,
+            reason=reason,
+            updated_by=updated_by,
+            since_ts=since_ts,
+        )
+
+    async def is_trading_enabled(self) -> bool:
+        latest_state = await self.find_latest_state()
+        if latest_state and latest_state.trading_enabled is False:
+            return False
+        return True
+
+    async def _create_state(
+        self,
+        trading_enabled: bool,
+        reason: Optional[str],
+        updated_by: str,
+        since_ts: Optional[datetime],
+    ) -> int:
+        payload = DefaultSystemStateVo(
+            trading_enabled=trading_enabled,
+            reason=reason,
+            since_ts=since_ts or datetime.now(timezone.utc),
+            updated_by=updated_by,
+        )
+        return await self.create_system_state(payload)

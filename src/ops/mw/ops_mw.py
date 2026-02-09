@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException
@@ -10,7 +10,6 @@ from src.common.db.connection import SessionLocal
 from src.ops.service.system_state.system_state_service import SystemStateService
 from src.trade.service.trade_fill.trade_fill_service import TradeFillService
 from src.calibration.calibration_service import CalibrationService
-from src.ops.vo.system_state.default import DefaultSystemStateVo
 
 router = APIRouter(prefix="/ops")
 
@@ -52,14 +51,7 @@ async def enable_state(
 ):
     _validate_ops_token(x_ops_token)
     svc = SystemStateService()
-    await svc.create_system_state(
-        DefaultSystemStateVo(
-            trading_enabled=True,
-            reason=payload.reason,
-            since_ts=datetime.now(timezone.utc),
-            updated_by="manual",
-        )
-    )
+    await svc.enable_trading(reason=payload.reason, updated_by="manual")
     logger.bind(
         run_id=None,
         symbol=None,
@@ -78,14 +70,7 @@ async def disable_state(
 ):
     _validate_ops_token(x_ops_token)
     svc = SystemStateService()
-    await svc.create_system_state(
-        DefaultSystemStateVo(
-            trading_enabled=False,
-            reason=payload.reason,
-            since_ts=datetime.now(timezone.utc),
-            updated_by="manual",
-        )
-    )
+    await svc.disable_trading(reason=payload.reason, updated_by="manual")
     logger.bind(
         run_id=None,
         symbol=None,
