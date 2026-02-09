@@ -19,6 +19,7 @@ from src.common.util.date import reg_ymd_now
 from src.indicators.executor.indicator.indicator_executor import IndicatorExecutor
 from src.job.executor.job.job_executor import JobExecutor
 from src.job.vo.job.default import DefaultJobRunVo
+from src.regime.service.regime_service import RegimePolicy, RegimeService
 from src.common.constants.job_constants import (
     JOB_STATUS_DONE,
     JOB_STATUS_ERROR,
@@ -48,6 +49,7 @@ class SchedulerExecutor:
         self.tradeExecutor = TradeExecutor()
         self.jobExecutor = JobExecutor()
         self.accountExecutor = AccountExecutor()
+        self.regimeService = RegimeService()
 
     async def execute(self):
         try:
@@ -64,6 +66,7 @@ class SchedulerExecutor:
             logger.info(f"symbols loaded: {[symbol.symbol_id for symbol in symbols]}")
 
             actions: List[DefaultAnalyzeActionVo] = []
+            action_policy: dict[str, RegimePolicy] = {}
 
             failed_action = await self.jobExecutor.get_failed_job()
             if failed_action:
@@ -75,24 +78,42 @@ class SchedulerExecutor:
                     await self.jobExecutor.delete_job_run(failed_action.batch_id)
                     return None
                 if action:
-                    actions.append(action)
+                    if not action.symbol_id:
+                        logger.warning("failed action has no symbol_id, skip")
+                        return None
+                    regime_result = await self.regimeService.compute_regime(action.symbol_id)
+                    filtered = self._apply_regime_policy(action, regime_result.regime)
+                    if filtered:
+                        actions.append(filtered)
+                        action_policy[self._action_key(filtered)] = self.regimeService.get_policy(regime_result.regime)
             else:
                 for symbol in symbols:
+                    regime_result = await self.regimeService.compute_regime(symbol.symbol_id)
+                    policy = self.regimeService.get_policy(regime_result.regime)
+                    if not policy.allow_analyze:
+                        logger.info(f"skip analyze by regime policy: {symbol.symbol_id} [{regime_result.regime}]")
+                        continue
                     action = await self._run_symbol(symbol)
-                    if action:
-                        actions.append(action)
+                    if not action:
+                        continue
+                    filtered = self._apply_regime_policy(action, regime_result.regime)
+                    if filtered:
+                        actions.append(filtered)
+                        action_policy[self._action_key(filtered)] = policy
 
             if not actions:
                 logger.info("no analyze action generated.")
                 return None
 
-            filtered_actions = [action for action in actions if action.side.lower() != "wait"]
+            filtered_actions = [action for action in actions if (action.side or "").lower() not in {"wait", "none"}]
             if not filtered_actions:
                 logger.info("no actionable analyze results generated.")
                 return None
             best_action = max(filtered_actions, key=lambda item: item.confidence or 0)
             await self._cleanup_unselected(actions, best_action.batch_id)
             logger.info(f"best action => {best_action.symbol_id} {best_action.side}, reason: {best_action.reason}")
+
+            selected_policy = action_policy.get(self._action_key(best_action), RegimePolicy(True, True, {"BUY", "SELL"}, 1.0, 1.0))
 
             trade_result = await self.tradeExecutor.open_from_analyze(
                 TradeExecuteDto(
@@ -105,6 +126,9 @@ class SchedulerExecutor:
                     reason=best_action.reason,
                     batch_id=best_action.batch_id,
                     c_interval=self.interval,
+                    regime=self._extract_regime_tag(best_action.reason),
+                    position_size_mult=selected_policy.position_size_mult,
+                    leverage_mult=selected_policy.leverage_mult,
                 )
             )
             if trade_result:
@@ -205,6 +229,49 @@ class SchedulerExecutor:
     async def _generate_batch_id(self, symbol_id: str) -> str:
         n = await self.symbolExecutor.get_today_n(DefaultSymbolVo(symbol_id=symbol_id))
         return f"{symbol_id}{reg_ymd_now()}{n}"
+
+    @staticmethod
+    def _normalize_action_side(side: Optional[str]) -> Optional[str]:
+        if not side:
+            return None
+        side_upper = side.upper()
+        if side_upper in {"LONG", "BUY"}:
+            return "BUY"
+        if side_upper in {"SHORT", "SELL"}:
+            return "SELL"
+        return None
+
+    def _apply_regime_policy(self, action: DefaultAnalyzeActionVo, regime: str) -> Optional[DefaultAnalyzeActionVo]:
+        policy = self.regimeService.get_policy(regime)
+        normalized_side = self._normalize_action_side(action.side)
+
+        if not policy.allow_entry:
+            logger.info(f"skip entry by regime policy: {action.symbol_id} [{regime}]")
+            return None
+
+        if normalized_side and policy.allowed_sides and normalized_side not in policy.allowed_sides:
+            logger.info(f"skip side by regime policy: {action.symbol_id} {action.side} [{regime}]")
+            return None
+
+        reason = action.reason or ""
+        action.reason = f"{reason} [regime={regime}]".strip()
+        return action
+
+    @staticmethod
+    def _extract_regime_tag(reason: Optional[str]) -> Optional[str]:
+        if not reason:
+            return None
+        start = reason.rfind("[regime=")
+        if start < 0:
+            return None
+        end = reason.find("]", start)
+        if end < 0:
+            return None
+        return reason[start + 8:end]
+
+    @staticmethod
+    def _action_key(action: DefaultAnalyzeActionVo) -> str:
+        return action.batch_id or action.symbol_id or "unknown"
 
 
 async def execute():
