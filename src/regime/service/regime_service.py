@@ -10,6 +10,40 @@ import pandas as pd
 from loguru import logger
 
 from src.binance.api.ohlcv.ohlcv_api import OHLCVApi
+from src.common.constants.regime_constants import (
+    ADX_RANGE_THRESHOLD,
+    ADX_TREND_THRESHOLD,
+    ALLOWED_REGIMES,
+    ATR_RISK_DENOM,
+    BASELINE_WINDOW,
+    BB_RISK_DENOM,
+    DEFAULT_EMA_NEAR_PCT,
+    DEFAULT_RANGE_ENTRY_ENABLED,
+    DOWNTREND,
+    EMA_NEAR_CONTEXT_LOOKBACK,
+    EMA_NEAR_LOOKBACK,
+    EPSILON,
+    HYSTERESIS_CONFIRM_COUNT,
+    INDICATOR_PARAMS_NAME,
+    MIN_15M_CANDLES,
+    MIN_1H_CANDLES,
+    RANGE,
+    REGIME_EMA_NEAR_PCT_ENV,
+    REGIME_INTERVAL_15M,
+    REGIME_INTERVAL_1H,
+    REGIME_RANGE_ENTRY_ENV,
+    TRANSITION,
+    TRANSITION_ATR_MULT,
+    TRANSITION_BB_MULT,
+    TREND_ADX_BASE,
+    TREND_ADX_SCALE,
+    TREND_GAP_DENOM,
+    UNKNOWN,
+    UPTREND,
+)
+from src.common.model.params import IndParams
+from src.indicators.engine.indicator import Indicator
+from src.indicators.service.indicator_parameter.indParam_service import IndicatorParamService
 from src.regime.repository.regime_state_repo import RegimeStateRepository
 from src.regime.vo.default import (
     DefaultRegimeStateVo,
@@ -17,18 +51,6 @@ from src.regime.vo.default import (
     RegimeResult,
     RegimeScores,
 )
-
-
-UPTREND = "UPTREND"
-DOWNTREND = "DOWNTREND"
-RANGE = "RANGE"
-TRANSITION = "TRANSITION"
-UNKNOWN = "UNKNOWN"
-
-ALLOWED_REGIMES = {UPTREND, DOWNTREND, RANGE, TRANSITION, UNKNOWN}
-
-MIN_1H_CANDLES = 200
-MIN_15M_CANDLES = 400
 
 
 @dataclass
@@ -44,8 +66,12 @@ class RegimeService:
     def __init__(self):
         self.api = OHLCVApi()
         self.repository = RegimeStateRepository()
-        self.range_entry_enabled = os.getenv("REGIME_RANGE_ENTRY_ENABLED", "false").lower() == "true"
-        self.ema_near_pct = float(os.getenv("REGIME_EMA_NEAR_PCT", "0.0015"))
+        self.indParamService = IndicatorParamService()
+        self._regime_params_cache = None
+        self.range_entry_enabled = (
+            os.getenv(REGIME_RANGE_ENTRY_ENV, str(DEFAULT_RANGE_ENTRY_ENABLED)).lower() == "true"
+        )
+        self.ema_near_pct = float(os.getenv(REGIME_EMA_NEAR_PCT_ENV, str(DEFAULT_EMA_NEAR_PCT)))
 
     def get_policy(self, regime: str) -> RegimePolicy:
         regime_upper = (regime or UNKNOWN).upper()
@@ -69,9 +95,24 @@ class RegimeService:
 
     async def compute_regime(self, symbol: str) -> RegimeResult:
         now = datetime.now(timezone.utc)
-        klines_1h = self.api.get_ohlcv_klines(symbol=symbol, interval="1h", limit=MIN_1H_CANDLES)
-        klines_15m = self.api.get_ohlcv_klines(symbol=symbol, interval="15m", limit=MIN_15M_CANDLES)
-        raw = self.classify_regime(symbol, klines_1h, klines_15m, computed_at=now)
+        ind_params = await self._get_regime_params()
+        klines_1h = self.api.get_ohlcv_klines(
+            symbol=symbol,
+            interval=REGIME_INTERVAL_1H,
+            limit=MIN_1H_CANDLES,
+        )
+        klines_15m = self.api.get_ohlcv_klines(
+            symbol=symbol,
+            interval=REGIME_INTERVAL_15M,
+            limit=MIN_15M_CANDLES,
+        )
+        raw = await self.classify_regime(
+            symbol,
+            klines_1h,
+            klines_15m,
+            ind_params=ind_params,
+            computed_at=now,
+        )
 
         prev_state = await self.repository.select_by_symbol(symbol)
         regime, pending_regime, pending_count, confirmed_at = self._apply_hysteresis(
@@ -108,37 +149,38 @@ class RegimeService:
 
         return RegimeResult(
             symbol=symbol,
-            timeframe="1h",
+            timeframe=REGIME_INTERVAL_1H,
             regime=regime,
             scores=raw.scores,
             features=raw.features,
             computed_at=now,
         )
 
-    def classify_regime(
+    async def classify_regime(
         self,
         symbol: str,
         klines_1h: List[Dict[str, Any]],
         klines_15m: List[Dict[str, Any]],
+        ind_params: IndParams,
         computed_at: Optional[datetime] = None,
     ) -> RegimeResult:
         computed_at = computed_at or datetime.now(timezone.utc)
         if len(klines_1h) < MIN_1H_CANDLES or len(klines_15m) < MIN_15M_CANDLES:
             return RegimeResult(
                 symbol=symbol,
-                timeframe="1h",
+                timeframe=REGIME_INTERVAL_1H,
                 regime=UNKNOWN,
                 scores=RegimeScores(),
                 features=RegimeFeatures(),
                 computed_at=computed_at,
             )
 
-        df_1h = self._to_price_frame(klines_1h)
-        df_15m = self._to_price_frame(klines_15m)
-        if df_1h is None or df_15m is None:
+        indicator_1h = self._build_indicator(klines_1h, ind_params)
+        indicator_15m = self._build_indicator(klines_15m, ind_params)
+        if indicator_1h is None or indicator_15m is None:
             return RegimeResult(
                 symbol=symbol,
-                timeframe="1h",
+                timeframe=REGIME_INTERVAL_1H,
                 regime=UNKNOWN,
                 scores=RegimeScores(),
                 features=RegimeFeatures(),
@@ -146,92 +188,116 @@ class RegimeService:
             )
 
         try:
-            result = self._classify_from_frames(symbol=symbol, df_1h=df_1h, df_15m=df_15m, computed_at=computed_at)
+            result = self._classify_from_indicators(
+                symbol=symbol,
+                indicator_1h=indicator_1h,
+                indicator_15m=indicator_15m,
+                computed_at=computed_at,
+            )
             if result.regime not in ALLOWED_REGIMES:
                 raise ValueError(f"invalid regime: {result.regime}")
             return result
         except Exception:
             return RegimeResult(
                 symbol=symbol,
-                timeframe="1h",
+                timeframe=REGIME_INTERVAL_1H,
                 regime=UNKNOWN,
                 scores=RegimeScores(),
                 features=RegimeFeatures(),
                 computed_at=computed_at,
             )
 
-    def _classify_from_frames(
+    def _classify_from_indicators(
         self,
         symbol: str,
-        df_1h: pd.DataFrame,
-        df_15m: pd.DataFrame,
+        indicator_1h: Indicator,
+        indicator_15m: Indicator,
         computed_at: datetime,
     ) -> RegimeResult:
-        ema20 = self._ema(df_1h["close"], 20)
-        ema60 = self._ema(df_1h["close"], 60)
-        bb_mid, bb_upper, bb_lower = self._bollinger(df_1h["close"], 20, 2.0)
-        bb_bw = (bb_upper - bb_lower) / bb_mid
-        atr_1h = self._atr(df_1h, 14)
-        atr_15m = self._atr(df_15m, 14)
-        adx = self._adx(df_1h, 14)
+        ema_fast = indicator_1h.ema_fast_series()
+        ema_slow = indicator_1h.ema_slow_series()
+        bb_mid, bb_upper, bb_lower, bb_bw = indicator_1h.bollinger_series()
+        atr_1h = indicator_1h.atr_series()
+        atr_15m = indicator_15m.atr_series()
+        adx = indicator_1h.adx_series()
+        ema_gap = indicator_1h.ema_gap_series()
+        ema_gap_ratio = indicator_1h.ema_gap_ratio_series()
+        close_series = indicator_1h.close_series()
 
         adx_last = self._last(adx)
         atr_1h_last = self._last(atr_1h)
         atr_15m_last = self._last(atr_15m)
         bb_last = self._last(bb_bw)
-        ema20_last = self._last(ema20)
-        ema60_last = self._last(ema60)
-        close_last = self._last(df_1h["close"])
-        ema_gap = ema20_last - ema60_last
-        ema_gap_ratio = ema_gap / close_last if close_last else np.nan
+        ema_fast_last = self._last(ema_fast)
+        ema_slow_last = self._last(ema_slow)
+        ema_gap_last = self._last(ema_gap)
+        ema_gap_ratio_last = self._last(ema_gap_ratio)
 
-        atr15_base = self._prev_mean(atr_15m, 20)
-        bb_base = self._prev_mean(bb_bw, 20)
+        atr15_base = self._prev_mean(atr_15m, BASELINE_WINDOW)
+        bb_base = self._prev_mean(bb_bw, BASELINE_WINDOW)
         bb_q30 = float(bb_bw.dropna().quantile(0.3))
         atr1h_q30 = float(atr_1h.dropna().quantile(0.3))
 
-        required = [adx_last, atr_1h_last, atr_15m_last, bb_last, ema20_last, ema60_last, atr15_base, bb_base]
+        required = [
+            adx_last,
+            atr_1h_last,
+            atr_15m_last,
+            bb_last,
+            ema_fast_last,
+            ema_slow_last,
+            atr15_base,
+            bb_base,
+        ]
         if self._is_invalid(required):
             return RegimeResult(
                 symbol=symbol,
-                timeframe="1h",
+                timeframe=REGIME_INTERVAL_1H,
                 regime=UNKNOWN,
                 scores=RegimeScores(),
-                features=RegimeFeatures(adx=adx_last, atr=atr_1h_last, bb_bandwidth=bb_last, ema_gap=ema_gap),
+                features=RegimeFeatures(
+                    adx=adx_last,
+                    atr=atr_1h_last,
+                    bb_bandwidth=bb_last,
+                    ema_gap=ema_gap_last,
+                ),
                 computed_at=computed_at,
             )
 
-        atr_spike = atr_15m_last > atr15_base * 1.8
-        bb_expand = bb_last > bb_base * 1.7
-        ema_cross_or_near = self._ema_cross_or_near(ema20, ema60, df_1h["close"])
+        atr_spike = atr_15m_last > atr15_base * TRANSITION_ATR_MULT
+        bb_expand = bb_last > bb_base * TRANSITION_BB_MULT
+        ema_cross_or_near = self._ema_cross_or_near(ema_fast, ema_slow, close_series)
         transition = atr_spike or bb_expand or ema_cross_or_near
 
         if transition:
             regime = TRANSITION
-        elif adx_last >= 25:
-            regime = UPTREND if ema20_last > ema60_last else DOWNTREND
-        elif adx_last < 20 and bb_last <= bb_q30 and atr_1h_last <= atr1h_q30:
+        elif adx_last >= ADX_TREND_THRESHOLD:
+            regime = UPTREND if ema_fast_last > ema_slow_last else DOWNTREND
+        elif adx_last < ADX_RANGE_THRESHOLD and bb_last <= bb_q30 and atr_1h_last <= atr1h_q30:
             regime = RANGE
         else:
             regime = UNKNOWN
 
-        trend_base = float(np.clip((adx_last - 20.0) / 20.0, 0.0, 1.0))
-        trend_gap = float(np.clip(abs(ema_gap_ratio) / 0.01, 0.0, 1.0))
+        trend_base = float(np.clip((adx_last - TREND_ADX_BASE) / TREND_ADX_SCALE, 0.0, 1.0))
+        trend_gap = float(np.clip(abs(ema_gap_ratio_last) / TREND_GAP_DENOM, 0.0, 1.0))
         trend_strength = float(np.clip(trend_base * (0.5 + 0.5 * trend_gap), 0.0, 1.0))
 
-        range_adx = float(np.clip((20.0 - adx_last) / 20.0, 0.0, 1.0))
-        range_bb = float(np.clip((bb_q30 - bb_last) / max(bb_q30, 1e-8), 0.0, 1.0))
-        range_atr = float(np.clip((atr1h_q30 - atr_1h_last) / max(atr1h_q30, 1e-8), 0.0, 1.0))
+        range_adx = float(np.clip((ADX_RANGE_THRESHOLD - adx_last) / ADX_RANGE_THRESHOLD, 0.0, 1.0))
+        range_bb = float(np.clip((bb_q30 - bb_last) / max(bb_q30, EPSILON), 0.0, 1.0))
+        range_atr = float(np.clip((atr1h_q30 - atr_1h_last) / max(atr1h_q30, EPSILON), 0.0, 1.0))
         range_strength = float(np.clip((range_adx + range_bb + range_atr) / 3.0, 0.0, 1.0))
 
-        atr_risk = float(np.clip(((atr_15m_last / max(atr15_base, 1e-8)) - 1.0) / 0.8, 0.0, 1.0))
-        bb_risk = float(np.clip(((bb_last / max(bb_base, 1e-8)) - 1.0) / 0.7, 0.0, 1.0))
+        atr_risk = float(
+            np.clip(((atr_15m_last / max(atr15_base, EPSILON)) - 1.0) / ATR_RISK_DENOM, 0.0, 1.0)
+        )
+        bb_risk = float(
+            np.clip(((bb_last / max(bb_base, EPSILON)) - 1.0) / BB_RISK_DENOM, 0.0, 1.0)
+        )
         cross_risk = 1.0 if ema_cross_or_near else 0.0
         transition_risk = float(np.clip(max(atr_risk, bb_risk, cross_risk), 0.0, 1.0))
 
         return RegimeResult(
             symbol=symbol,
-            timeframe="1h",
+            timeframe=REGIME_INTERVAL_1H,
             regime=regime,
             scores=RegimeScores(
                 trend_strength=trend_strength,
@@ -242,7 +308,7 @@ class RegimeService:
                 adx=float(adx_last),
                 atr=float(atr_1h_last),
                 bb_bandwidth=float(bb_last),
-                ema_gap=float(ema_gap),
+                ema_gap=float(ema_gap_last),
             ),
             computed_at=computed_at,
         )
@@ -267,83 +333,31 @@ class RegimeService:
             pending_regime = raw_regime
             pending_count = 1
 
-        if pending_count >= 2:
+        if pending_count >= HYSTERESIS_CONFIRM_COUNT:
             return raw_regime, None, 0, now
 
         return prev_confirmed, pending_regime, pending_count, confirmed_at
 
-    def _to_price_frame(self, klines: List[Dict[str, Any]]) -> Optional[pd.DataFrame]:
+    def _build_indicator(self, klines: List[Dict[str, Any]], ind_params: IndParams) -> Optional[Indicator]:
         try:
-            frame = pd.DataFrame(klines)
-            frame["open"] = pd.to_numeric(frame["open"], errors="coerce")
-            frame["high"] = pd.to_numeric(frame["high"], errors="coerce")
-            frame["low"] = pd.to_numeric(frame["low"], errors="coerce")
-            frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
-            frame = frame[["open", "high", "low", "close"]]
-            return frame
+            return Indicator(ohlcv=klines, indParams=ind_params)
         except Exception:
             return None
 
-    @staticmethod
-    def _ema(series: pd.Series, window: int) -> pd.Series:
-        return series.ewm(span=window, adjust=False, min_periods=window).mean()
-
-    @staticmethod
-    def _bollinger(series: pd.Series, window: int, k: float) -> Tuple[pd.Series, pd.Series, pd.Series]:
-        mid = series.rolling(window=window, min_periods=window).mean()
-        std = series.rolling(window=window, min_periods=window).std(ddof=0)
-        upper = mid + k * std
-        lower = mid - k * std
-        return mid, upper, lower
-
-    @staticmethod
-    def _atr(df: pd.DataFrame, window: int) -> pd.Series:
-        high = df["high"]
-        low = df["low"]
-        close = df["close"]
-        prev_close = close.shift(1)
-        tr = pd.concat(
-            [
-                high - low,
-                (high - prev_close).abs(),
-                (low - prev_close).abs(),
-            ],
-            axis=1,
-        ).max(axis=1)
-        return tr.ewm(alpha=1 / window, adjust=False, min_periods=window).mean()
-
-    def _adx(self, df: pd.DataFrame, window: int) -> pd.Series:
-        high = df["high"]
-        low = df["low"]
-        up_move = high.diff()
-        down_move = -low.diff()
-
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        atr = self._atr(df, window)
-
-        plus_di = 100 * pd.Series(plus_dm, index=df.index).ewm(
-            alpha=1 / window,
-            adjust=False,
-            min_periods=window,
-        ).mean() / atr
-        minus_di = 100 * pd.Series(minus_dm, index=df.index).ewm(
-            alpha=1 / window,
-            adjust=False,
-            min_periods=window,
-        ).mean() / atr
-        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
-        return dx.ewm(alpha=1 / window, adjust=False, min_periods=window).mean()
+    async def _get_regime_params(self) -> IndParams:
+        if self._regime_params_cache is None:
+            self._regime_params_cache = await self.indParamService.findby_name(INDICATOR_PARAMS_NAME)
+        return self._regime_params_cache
 
     def _ema_cross_or_near(self, ema20: pd.Series, ema60: pd.Series, close: pd.Series) -> bool:
         gap = ema20 - ema60
         sign = np.sign(gap)
         sign_change = sign.diff().fillna(0).abs() > 0
-        recent_cross = bool(sign_change.tail(3).any())
+        recent_cross = bool(sign_change.tail(EMA_NEAR_LOOKBACK).any())
         ratio = (gap / close).abs()
-        recent_near = bool((ratio.tail(3) <= self.ema_near_pct).any())
+        recent_near = bool((ratio.tail(EMA_NEAR_LOOKBACK) <= self.ema_near_pct).any())
         # "near" is only meaningful around an actual recent cross context.
-        near_with_cross_context = recent_near and bool(sign_change.tail(6).any())
+        near_with_cross_context = recent_near and bool(sign_change.tail(EMA_NEAR_CONTEXT_LOOKBACK).any())
         return recent_cross or near_with_cross_context
 
     @staticmethod

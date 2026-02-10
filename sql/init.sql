@@ -335,6 +335,8 @@ CREATE TABLE public.indicators (
     ma_slow numeric(18,8),
     ema_fast numeric(18,8),
     ema_slow numeric(18,8),
+    ema_gap numeric(18,8),
+    ema_gap_ratio numeric(18,8),
     rsi numeric(18,8),
     macd_line numeric(18,8),
     macd_signal_line numeric(18,8),
@@ -1143,5 +1145,8 @@ VALUES('default', 50, 'close', 20, 60, 20, 60, 20, 14, 9, 2.0000, 14, 14, 14, 14
 INSERT INTO public.indicator_parameter
 ("name", tail, col, ma_fast_w, ma_slow_w, ema_fast_w, ema_slow_w, std_w, rsi_w, macd_signal, bollinger_k, atr_w, kd_k_w, kd_d_w, roc_w, momentum_w, mfi_w, donchain_w, keltner_m, linear_regression_slope_w, attr1, attr2, attr3, attr4, attr5, attr6, attr7, attr8, attr9, attr10, reg_dt, upd_dt)
 VALUES('default_2', 50, 'close', 20, 60, 20, 60, 20, 14, 9, 2.0000, 14, 14, 14, 14, 14, 14, 20, 2.0000, 150, 'Y', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-01-15 21:15:46.844', '2026-01-15 21:15:46.844');
+INSERT INTO public.indicator_parameter
+("name", tail, col, ma_fast_w, ma_slow_w, ema_fast_w, ema_slow_w, std_w, rsi_w, macd_signal, bollinger_k, atr_w, kd_k_w, kd_d_w, roc_w, momentum_w, mfi_w, donchain_w, keltner_m, linear_regression_slope_w, attr1, attr2, attr3, attr4, attr5, attr6, attr7, attr8, attr9, attr10, reg_dt, upd_dt)
+VALUES('regime_default', 60, 'close', 20, 60, 20, 60, 20, 14, 9, 2.0000, 14, 14, 14, 14, 14, 14, 20, 2.0000, 20, 'Y', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-01-15 21:15:46.845', '2026-01-15 21:15:46.845');
 
 \unrestrict 6Ln0sCSjwcJffIl0xhtvmcdaPctdgGvfCi24J79UHcIELKrvXnxq8yqMoCvKQ0j
