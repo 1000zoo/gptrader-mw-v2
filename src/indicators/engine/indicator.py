@@ -25,6 +25,35 @@ class Indicator:
     def timestamp(self) -> List:
         return self.cal.timestamp().tolist()
 
+    def close_series(self) -> pd.Series:
+        return self.cal.series("close")
+
+    def ema_fast_series(self) -> pd.Series:
+        return self.cal.cal_ema(window=self.params.ema_fast_w, col=self.params.col)
+
+    def ema_slow_series(self) -> pd.Series:
+        return self.cal.cal_ema(window=self.params.ema_slow_w, col=self.params.col)
+
+    def bollinger_series(self) -> Tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+        return self.cal.bollinger(
+            window=self.params.ma_fast_w,
+            k=self.params.bollinger_k,
+            col=self.params.col,
+        )
+
+    def atr_series(self) -> pd.Series:
+        return self.cal.atr(window=self.params.atr_w)
+
+    def adx_series(self) -> pd.Series:
+        return self.cal.dmi_adx(window=self.params.atr_w)[2]
+
+    def ema_gap_series(self) -> pd.Series:
+        return self.ema_fast_series() - self.ema_slow_series()
+
+    def ema_gap_ratio_series(self) -> pd.Series:
+        close = self.close_series().replace(0, np.nan)
+        return self.ema_gap_series() / close
+
     def ma_fast(self) -> List:
         return self.tail_list(
             self.cal.cal_ma(window=self.params.ma_fast_w, col=self.params.col)
@@ -37,12 +66,12 @@ class Indicator:
 
     def ema_fast(self) -> List:
         return self.tail_list(
-            self.cal.cal_ema(window=self.params.ema_fast_w, col=self.params.col)
+            self.ema_fast_series()
         )
 
     def ema_slow(self) -> List:
         return self.tail_list(
-            self.cal.cal_ema(window=self.params.ema_slow_w, col=self.params.col)
+            self.ema_slow_series()
         )
 
     def rsi(self) -> List:
@@ -62,11 +91,7 @@ class Indicator:
     
     def bollinger(self) -> Tuple[list, ...]:
         return self.tuple_tail_list(
-            self.cal.bollinger(
-                window=self.params.ma_fast_w,
-                k=self.params.bollinger_k,
-                col=self.params.col
-            )
+            self.bollinger_series()
         )
 
     def true_range(self) -> List:
@@ -74,7 +99,7 @@ class Indicator:
     
     def atr(self, window: int = 14) -> List:
         return self.tail_list(
-            self.cal.atr(window=self.params.atr_w)
+            self.atr_series()
         )
     
     def dmi_adx(self) -> Tuple[List, ...]:
@@ -83,6 +108,12 @@ class Indicator:
                 window=self.params.atr_w
             )
         )
+
+    def ema_gap(self) -> List:
+        return self.tail_list(self.ema_gap_series())
+
+    def ema_gap_ratio(self) -> List:
+        return self.tail_list(self.ema_gap_ratio_series())
     
     def stochastic_kd(self) -> Tuple[List, ...]:
         return self.tuple_tail_list(
@@ -163,6 +194,8 @@ class Indicator:
             "ma_slow": self.ma_slow(),
             "ema_fast": self.ema_fast(),
             "ema_slow": self.ema_slow(),
+            "ema_gap": self.ema_gap(),
+            "ema_gap_ratio": self.ema_gap_ratio(),
             "rsi": self.rsi(),
             "macd_line": macd_line,
             "macd_signal_line": macd_signal_line,

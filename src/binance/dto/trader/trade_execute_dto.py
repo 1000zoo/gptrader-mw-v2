@@ -14,3 +14,6 @@ class TradeExecuteDto(BaseModel):
     batch_id: Optional[str] = None
     signal_log_id: Optional[int] = None
     c_interval: Optional[str] = None
+    regime: Optional[str] = None
+    position_size_mult: Optional[float] = None
+    leverage_mult: Optional[float] = None

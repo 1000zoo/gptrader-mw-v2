@@ -114,6 +114,12 @@ class TradeService:
         if not side:
             logger.info(f"invalid side: {dto.symbol_id}, {dto.side}")
             raise InvalidRequestException("Trade side is invalid.")
+        if dto.regime == "UPTREND" and side != "BUY":
+            raise InvalidRequestException("Regime policy blocks short entry in UPTREND.")
+        if dto.regime == "DOWNTREND" and side != "SELL":
+            raise InvalidRequestException("Regime policy blocks long entry in DOWNTREND.")
+        if dto.regime in {"TRANSITION", "UNKNOWN"}:
+            raise InvalidRequestException(f"Regime policy blocks entries in {dto.regime}.")
 
         entry_price = dto.entry_price
         if entry_price is None and self.enable_risk_sizing:
@@ -128,6 +134,13 @@ class TradeService:
 
         leverage = int(5 + (confidence - THRESHOLD) / (1.0 - THRESHOLD) * (15 - 5))
         percent_of_balance = round(0.2 + (confidence - THRESHOLD) / (1.0 - THRESHOLD) * (0.5 - 0.2), 2)
+
+        leverage_mult = dto.leverage_mult if dto.leverage_mult is not None else 1.0
+        size_mult = dto.position_size_mult if dto.position_size_mult is not None else 1.0
+        leverage = max(1, int(round(leverage * max(leverage_mult, 0.0))))
+        percent_of_balance = max(0.0, percent_of_balance * max(size_mult, 0.0))
+        if percent_of_balance <= 0:
+            raise InvalidRequestException("Position size is zero after regime policy.")
 
         risk_budget_usd = None
         if self.enable_risk_sizing:
