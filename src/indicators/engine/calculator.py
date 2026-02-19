@@ -24,6 +24,9 @@ class Calculator:
     def timestamp(self) -> pd.Series:
         return self.df.index
 
+    def series(self, col: str) -> pd.Series:
+        return self.df[col]
+
     def cal_ma(self, window: int = 20, col: str = "close") -> pd.Series:
         return self.df[col].rolling(window=window).mean()
 

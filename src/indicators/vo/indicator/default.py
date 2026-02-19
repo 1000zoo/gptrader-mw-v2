@@ -22,6 +22,8 @@ class DefaultIndicatorVo(Vo):
     ma_slow: Optional[float] = None
     ema_fast: Optional[float] = None
     ema_slow: Optional[float] = None
+    ema_gap: Optional[float] = None
+    ema_gap_ratio: Optional[float] = None
     rsi: Optional[float] = None
 
     macd_line: Optional[float] = None
@@ -77,6 +79,8 @@ class DefaultIndicatorVo(Vo):
             "ma_slow": self.ma_slow,
             "ema_fast": self.ema_fast,
             "ema_slow": self.ema_slow,
+            "ema_gap": self.ema_gap,
+            "ema_gap_ratio": self.ema_gap_ratio,
 
             "rsi": self.rsi,
 
@@ -144,6 +148,8 @@ class DefaultIndicatorVo(Vo):
             ma_slow=data.get("ma_slow"),
             ema_fast=data.get("ema_fast"),
             ema_slow=data.get("ema_slow"),
+            ema_gap=data.get("ema_gap"),
+            ema_gap_ratio=data.get("ema_gap_ratio"),
             rsi=data.get("rsi"),
 
             macd_line=data.get("macd_line"),

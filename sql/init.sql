@@ -335,6 +335,8 @@ CREATE TABLE public.indicators (
     ma_slow numeric(18,8),
     ema_fast numeric(18,8),
     ema_slow numeric(18,8),
+    ema_gap numeric(18,8),
+    ema_gap_ratio numeric(18,8),
     rsi numeric(18,8),
     macd_line numeric(18,8),
     macd_signal_line numeric(18,8),
@@ -711,6 +713,40 @@ CREATE TABLE public.system_state (
 
 
 --
+-- Name: regime_state; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.regime_state (
+    symbol_id character varying(16) NOT NULL,
+    timeframe character varying(20) DEFAULT '1h'::character varying NOT NULL,
+    regime character varying(20) DEFAULT 'UNKNOWN'::character varying NOT NULL,
+    pending_regime character varying(20),
+    pending_count integer DEFAULT 0 NOT NULL,
+    trend_strength numeric(10,6) DEFAULT 0 NOT NULL,
+    range_strength numeric(10,6) DEFAULT 0 NOT NULL,
+    transition_risk numeric(10,6) DEFAULT 0 NOT NULL,
+    adx numeric(18,8),
+    atr numeric(18,8),
+    bb_bandwidth numeric(18,8),
+    ema_gap numeric(18,8),
+    computed_at timestamp with time zone,
+    confirmed_at timestamp with time zone,
+    attr1 text,
+    attr2 text,
+    attr3 text,
+    attr4 text,
+    attr5 text,
+    attr6 text,
+    attr7 text,
+    attr8 text,
+    attr9 text,
+    attr10 text,
+    reg_dt timestamp with time zone DEFAULT now(),
+    upd_dt timestamp with time zone
+);
+
+
+--
 -- Name: system_state_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
 
@@ -960,6 +996,14 @@ ALTER TABLE ONLY public.position_event
 
 
 --
+-- Name: regime_state regime_state_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.regime_state
+    ADD CONSTRAINT regime_state_pkey PRIMARY KEY (symbol_id);
+
+
+--
 -- Name: signal_log signal_log_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1034,6 +1078,13 @@ CREATE INDEX idx_ohlcv_symbol_regymd_interval ON public.ohlcv USING btree (symbo
 
 
 --
+-- Name: idx_regime_state_regime; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_regime_state_regime ON public.regime_state USING btree (regime);
+
+
+--
 -- Name: idx_signal_log_run_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1094,6 +1145,8 @@ VALUES('default', 50, 'close', 20, 60, 20, 60, 20, 14, 9, 2.0000, 14, 14, 14, 14
 INSERT INTO public.indicator_parameter
 ("name", tail, col, ma_fast_w, ma_slow_w, ema_fast_w, ema_slow_w, std_w, rsi_w, macd_signal, bollinger_k, atr_w, kd_k_w, kd_d_w, roc_w, momentum_w, mfi_w, donchain_w, keltner_m, linear_regression_slope_w, attr1, attr2, attr3, attr4, attr5, attr6, attr7, attr8, attr9, attr10, reg_dt, upd_dt)
 VALUES('default_2', 50, 'close', 20, 60, 20, 60, 20, 14, 9, 2.0000, 14, 14, 14, 14, 14, 14, 20, 2.0000, 150, 'Y', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-01-15 21:15:46.844', '2026-01-15 21:15:46.844');
+INSERT INTO public.indicator_parameter
+("name", tail, col, ma_fast_w, ma_slow_w, ema_fast_w, ema_slow_w, std_w, rsi_w, macd_signal, bollinger_k, atr_w, kd_k_w, kd_d_w, roc_w, momentum_w, mfi_w, donchain_w, keltner_m, linear_regression_slope_w, attr1, attr2, attr3, attr4, attr5, attr6, attr7, attr8, attr9, attr10, reg_dt, upd_dt)
+VALUES('regime_default', 60, 'close', 20, 60, 20, 60, 20, 14, 9, 2.0000, 14, 14, 14, 14, 14, 14, 20, 2.0000, 20, 'Y', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-01-15 21:15:46.845', '2026-01-15 21:15:46.845');
 
 \unrestrict 6Ln0sCSjwcJffIl0xhtvmcdaPctdgGvfCi24J79UHcIELKrvXnxq8yqMoCvKQ0j
-
