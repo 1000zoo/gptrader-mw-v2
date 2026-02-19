@@ -165,7 +165,7 @@ CREATE TABLE indicator_parameter (
 -- INDICATOR (지표 값)
 -- =========================================
 -- indicator dict 기준:
--- timestamp, ma_fast, ma_slow, ema_fast, ema_slow, rsi,
+-- timestamp, ma_fast, ma_slow, ema_fast, ema_slow, ema_gap, ema_gap_ratio, rsi,
 -- macd_line, macd_signal_line, macd_hist,
 -- bollinger_mid, bollinger_upper, bollinger_lower, bollinger_width,
 -- true_range, atr,
@@ -189,6 +189,8 @@ CREATE TABLE indicators (
     ma_slow                     NUMERIC(18, 8),
     ema_fast                    NUMERIC(18, 8),
     ema_slow                    NUMERIC(18, 8),
+    ema_gap                     NUMERIC(18, 8),
+    ema_gap_ratio               NUMERIC(18, 8),
     rsi                         NUMERIC(18, 8),
     macd_line                   NUMERIC(18, 8),
     macd_signal_line            NUMERIC(18, 8),
