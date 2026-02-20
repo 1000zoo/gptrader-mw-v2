@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Literal
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, cast
 
 from pydantic import BaseModel
 
@@ -9,6 +9,9 @@ except ImportError:
         if default_factory is not None:
             return default_factory()
         return default
+
+if TYPE_CHECKING:
+    from src.binance.vo.ohlcv.default import DefaultOhlcvVo
 
 TF = Literal["1m", "5m", "15m", "30m", "1h"]
 Action = Literal["BUY", "SELL", "HOLD"]
@@ -53,6 +56,16 @@ ALLOWED_INDICATOR_COLUMNS = {
     "high_linear_regression_direction",
 }
 
+ALLOWED_OHLCV_COLUMNS = {
+    "timestamp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "quote_volume",
+}
+
 
 class StrategyInitConfig(BaseModel):
     strategy_name: str
@@ -64,15 +77,44 @@ class StrategyInitConfig(BaseModel):
 
 class StrategyRunInput(BaseModel):
     indicators_by_tf: Dict[TF, List[Dict[str, Any]]]
+    ohlcv_by_tf: Dict[TF, Dict[str, Any]]
     recent_analyzes: List[Dict[str, Any]] = Field(default_factory=list)
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+
         for tf, rows in self.indicators_by_tf.items():
             for row in rows:
                 unknown = set(row.keys()) - ALLOWED_INDICATOR_COLUMNS
                 if unknown:
                     raise ValueError(f"{tf}: unsupported indicator columns: {sorted(unknown)}")
+
+        for tf, row in self.ohlcv_by_tf.items():
+            unknown = set(row.keys()) - ALLOWED_OHLCV_COLUMNS
+            if unknown:
+                raise ValueError(f"{tf}: unsupported ohlcv columns: {sorted(unknown)}")
+
+    @staticmethod
+    def ohlcv_vo_to_dict(vo: "DefaultOhlcvVo") -> Dict[str, Any]:
+        return {
+            "timestamp": vo.ts,
+            "open": vo.c_open,
+            "high": vo.c_high,
+            "low": vo.c_low,
+            "close": vo.c_close,
+            "volume": vo.volume,
+            "quote_volume": vo.quote_volume,
+        }
+
+    @staticmethod
+    def ohlcv_by_tf_from_vo_list(vo_list: List["DefaultOhlcvVo"]) -> Dict[TF, Dict[str, Any]]:
+        res: Dict[TF, Dict[str, Any]] = {}
+        for vo in vo_list:
+            tf = vo.c_interval
+            if tf not in {"1m", "5m", "15m", "30m", "1h"}:
+                continue
+            res[cast(TF, tf)] = StrategyRunInput.ohlcv_vo_to_dict(vo)
+        return res
 
 
 class StrategyDecision(BaseModel):
