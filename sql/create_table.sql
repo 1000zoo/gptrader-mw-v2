@@ -391,6 +391,39 @@ CREATE TABLE IF NOT EXISTS regime_state (
 CREATE INDEX IF NOT EXISTS idx_regime_state_regime
     ON regime_state (regime);
 
+-- =========================================
+-- STRATEGY
+-- =========================================
+CREATE TABLE IF NOT EXISTS strategy (
+    id              BIGSERIAL PRIMARY KEY,
+    strategy_name   VARCHAR(100) NOT NULL,
+    module_path     VARCHAR(255) NOT NULL,
+    module_name     VARCHAR(100) NOT NULL,
+    use_yn          VARCHAR(1) NOT NULL DEFAULT 'Y',
+    description     TEXT,
+    params          JSONB,
+    version         VARCHAR(32),
+    priority        INTEGER DEFAULT 100,
+    attr1           TEXT,
+    attr2           TEXT,
+    attr3           TEXT,
+    attr4           TEXT,
+    attr5           TEXT,
+    attr6           TEXT,
+    attr7           TEXT,
+    attr8           TEXT,
+    attr9           TEXT,
+    attr10          TEXT,
+    reg_dt          TIMESTAMPTZ DEFAULT NOW(),
+    upd_dt          TIMESTAMPTZ
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_strategy_name
+    ON strategy (strategy_name);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_use_yn
+    ON strategy (use_yn);
+
 CREATE INDEX idx_slack_setting_process_active
     ON slack_setting (process_name, is_active);
 

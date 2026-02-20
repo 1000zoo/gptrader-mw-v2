@@ -120,3 +120,6 @@
 
 구현 계획:
 - `docs/plans/strategy/2026-02-19-istrategy-interface-implementation.md`
+
+관리 모듈 문서:
+- `docs/src/strategy/strategy_management.md`
