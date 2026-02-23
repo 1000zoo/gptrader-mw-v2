@@ -26,3 +26,21 @@ class OhlcvRepository:
     
     async def select_ohlcv(self, vo: OhlcvFilterVo) -> List[DefaultOhlcvVo]:
         return await common_select(self.TABLE_NAME, vo, DefaultOhlcvVo)
+
+    async def select_recent_ohlcv(self, symbol_id: str, interval: str, limit: int) -> List[DefaultOhlcvVo]:
+        sql = text(
+            f"""
+            SELECT * FROM {self.TABLE_NAME}
+            WHERE symbol_id = :symbol_id
+              AND c_interval = :interval
+            ORDER BY COALESCE(ts, reg_dt) DESC, seq_no DESC
+            LIMIT :limit
+            """
+        )
+        async with SessionLocal() as session:
+            result = await session.execute(
+                sql,
+                {"symbol_id": symbol_id, "interval": interval, "limit": limit},
+            )
+            rows = result.mappings().all()
+            return [DefaultOhlcvVo(**r) for r in rows]

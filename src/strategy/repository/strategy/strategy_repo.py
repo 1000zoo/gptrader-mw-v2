@@ -42,6 +42,22 @@ class StrategyRepository:
                 return None
             return DefaultStrategyVo(**row)
 
+    async def select_top_active_strategy(self) -> Optional[DefaultStrategyVo]:
+        sql = text(
+            f"""
+            SELECT * FROM {self.TABLE_NAME}
+            WHERE use_yn = 'Y'
+            ORDER BY priority ASC NULLS LAST, id ASC
+            LIMIT 1
+            """
+        )
+        async with SessionLocal() as session:
+            result = await session.execute(sql)
+            row = result.mappings().first()
+            if not row:
+                return None
+            return DefaultStrategyVo(**row)
+
     async def update_strategy(self, vo: DefaultStrategyVo) -> int:
         data = vo.model_dump(exclude_none=True)
         strategy_name = data.pop("strategy_name", None)

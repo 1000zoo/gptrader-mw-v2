@@ -119,3 +119,18 @@ class OhlcvService:
         if not ohlcv:
             raise DataNotFoundException("OHLCV data not found.")
         return ohlcv
+
+    async def find_recent_ohlcv(
+        self, symbol_id: str, interval: str, limit: int
+    ) -> List[DefaultOhlcvVo]:
+        try:
+            ohlcv = await self.repository.select_recent_ohlcv(
+                symbol_id=symbol_id,
+                interval=interval,
+                limit=limit,
+            )
+        except (SQLAlchemyError, ValueError) as e:
+            raise RepositoryError("Failed to fetch recent OHLCV data.") from e
+        if not ohlcv:
+            raise DataNotFoundException("Recent OHLCV data not found.")
+        return list(reversed(ohlcv))

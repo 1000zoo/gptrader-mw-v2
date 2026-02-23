@@ -36,6 +36,12 @@ class StrategyService:
         except (SQLAlchemyError, ValueError) as e:
             raise RepositoryError("Failed to select strategy by name.") from e
 
+    async def find_top_active_strategy(self) -> Optional[DefaultStrategyVo]:
+        try:
+            return await self.repository.select_top_active_strategy()
+        except (SQLAlchemyError, ValueError) as e:
+            raise RepositoryError("Failed to select top active strategy.") from e
+
     async def update_strategy(self, vo: DefaultStrategyVo) -> int:
         try:
             return await self.repository.update_strategy(vo)

@@ -99,6 +99,44 @@ class VolatilityBreakoutRegimeStrategy(IStrategy):
 
         return self._hold("no_entry_signal", metadata=metadata)
 
+    def run_exit_strategy(self, data: StrategyRunInput) -> StrategyDecision:
+        self.validate_input(data)
+
+        indicator = self._latest_row(data, self.tf)
+        ohlcv = data.ohlcv_by_tf.get(self.tf, {})
+
+        ema_slow = self._to_float(indicator.get("ema_slow"))
+        rsi = self._to_float(indicator.get("rsi"))
+        close = self._to_float(ohlcv.get("close"))
+
+        if any(v is None for v in [ema_slow, rsi, close]):
+            return self._hold("missing_required_fields")
+
+        metadata = {
+            "timeframe": self.tf,
+            "ema_slow": ema_slow,
+            "rsi": rsi,
+            "close": close,
+        }
+
+        if close < ema_slow or rsi < 45.0:
+            return StrategyDecision(
+                action="SELL",
+                confidence=0.70,
+                reason="exit_long_signal",
+                metadata=metadata,
+            )
+
+        if close > ema_slow or rsi > 55.0:
+            return StrategyDecision(
+                action="BUY",
+                confidence=0.70,
+                reason="exit_short_signal",
+                metadata=metadata,
+            )
+
+        return self._hold("keep_position", metadata=metadata)
+
     def _latest_row(self, data: StrategyRunInput, tf: str) -> Dict[str, Any]:
         rows = data.indicators_by_tf.get(tf)
         if not rows:

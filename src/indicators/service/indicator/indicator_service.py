@@ -81,3 +81,18 @@ class IndicatorService:
         if not indicators:
             raise DataNotFoundException("Indicators not found.")
         return indicators
+
+    async def find_recent_indicators(
+        self, symbol_id: str, interval: str, limit: int
+    ) -> List[DefaultIndicatorVo]:
+        try:
+            indicators = await self.repository.select_recent_indicators(
+                symbol_id=symbol_id,
+                interval=interval,
+                limit=limit,
+            )
+        except (SQLAlchemyError, ValueError) as e:
+            raise RepositoryError("Failed to select recent indicators.") from e
+        if not indicators:
+            raise DataNotFoundException("Recent indicators not found.")
+        return list(reversed(indicators))

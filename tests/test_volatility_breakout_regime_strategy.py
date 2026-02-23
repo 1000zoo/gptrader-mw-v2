@@ -107,3 +107,45 @@ def test_run_strategy_returns_hold_when_no_entry_signal():
 
     assert decision.action == "HOLD"
     assert decision.reason == "no_entry_signal"
+
+
+def test_run_exit_strategy_returns_sell_for_long_exit_signal():
+    strategy = _build_strategy()
+    data = _build_input(
+        ema_fast=100.0,
+        ema_slow=105.0,
+        adx=20.0,
+        atr=0.3,
+        rsi=40.0,
+        bb_upper=110.0,
+        bb_middle=105.0,
+        bb_lower=95.0,
+        close=99.0,
+        volume=1200.0,
+    )
+
+    decision = strategy.run_exit_strategy(data)
+
+    assert decision.action == "SELL"
+    assert decision.reason == "exit_long_signal"
+
+
+def test_run_exit_strategy_returns_hold_when_keep_position():
+    strategy = _build_strategy()
+    data = _build_input(
+        ema_fast=106.0,
+        ema_slow=100.0,
+        adx=20.0,
+        atr=0.3,
+        rsi=52.0,
+        bb_upper=110.0,
+        bb_middle=105.0,
+        bb_lower=95.0,
+        close=108.0,
+        volume=1200.0,
+    )
+
+    decision = strategy.run_exit_strategy(data)
+
+    assert decision.action == "HOLD"
+    assert decision.reason == "keep_position"

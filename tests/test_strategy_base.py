@@ -12,6 +12,10 @@ class DummyStrategy(IStrategy):
         self.validate_input(data)
         return self._hold("ok")
 
+    def run_exit_strategy(self, data):
+        self.validate_input(data)
+        return self._hold("ok")
+
 
 @pytest.fixture
 def sample_input():

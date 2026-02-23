@@ -65,3 +65,7 @@ class IStrategy(ABC):
     @abstractmethod
     def run_strategy(self, data: StrategyRunInput) -> StrategyDecision:
         ...
+
+    @abstractmethod
+    def run_exit_strategy(self, data: StrategyRunInput) -> StrategyDecision:
+        ...

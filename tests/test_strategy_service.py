@@ -14,6 +14,9 @@ class DummyLoadedStrategy(IStrategy):
     def run_strategy(self, data):
         return self._hold("ok")
 
+    def run_exit_strategy(self, data):
+        return self._hold("ok")
+
 
 class NotAStrategy:
     pass
