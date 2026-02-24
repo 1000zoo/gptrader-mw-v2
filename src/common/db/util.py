@@ -14,6 +14,7 @@ ALLOWED_TABLES = {
     'job_run',
     'job_run_hist',
     'ohlcv',
+    'ohlcv_summary',
     'indicator_parameter',
     'signal_log',
     'trade_fill',

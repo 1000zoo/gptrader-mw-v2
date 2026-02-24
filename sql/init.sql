@@ -539,6 +539,53 @@ ALTER SEQUENCE public.ohlcv_id_seq OWNED BY public.ohlcv.id;
 
 
 --
+-- Name: ohlcv_summary; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ohlcv_summary (
+    id bigint NOT NULL,
+    batch_id character varying(32),
+    reg_ymd character varying(8),
+    symbol_id character varying(16),
+    c_interval character varying(20),
+    c_limit integer,
+    start_ts timestamp with time zone,
+    end_ts timestamp with time zone,
+    attr1 text,
+    attr2 text,
+    attr3 text,
+    attr4 text,
+    attr5 text,
+    attr6 text,
+    attr7 text,
+    attr8 text,
+    attr9 text,
+    attr10 text,
+    reg_dt timestamp with time zone DEFAULT now(),
+    upd_dt timestamp with time zone
+);
+
+
+--
+-- Name: ohlcv_summary_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.ohlcv_summary_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: ohlcv_summary_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.ohlcv_summary_id_seq OWNED BY public.ohlcv_summary.id;
+
+
+--
 -- Name: position_event; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -880,6 +927,13 @@ ALTER TABLE ONLY public.ohlcv ALTER COLUMN id SET DEFAULT nextval('public.ohlcv_
 
 
 --
+-- Name: ohlcv_summary id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ohlcv_summary ALTER COLUMN id SET DEFAULT nextval('public.ohlcv_summary_id_seq'::regclass);
+
+
+--
 -- Name: position_event id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -988,6 +1042,14 @@ ALTER TABLE ONLY public.ohlcv
 
 
 --
+-- Name: ohlcv_summary ohlcv_summary_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ohlcv_summary
+    ADD CONSTRAINT ohlcv_summary_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: position_event position_event_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1075,6 +1137,13 @@ CREATE INDEX idx_indicators_symbol_regymd_interval ON public.indicators USING bt
 --
 
 CREATE INDEX idx_ohlcv_symbol_regymd_interval ON public.ohlcv USING btree (symbol_id, reg_ymd, c_interval);
+
+
+--
+-- Name: idx_ohlcv_summary_symbol_regymd_interval; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_ohlcv_summary_symbol_regymd_interval ON public.ohlcv_summary USING btree (symbol_id, reg_ymd, c_interval);
 
 
 --
