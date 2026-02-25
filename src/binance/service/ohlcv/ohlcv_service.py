@@ -66,6 +66,28 @@ class OhlcvService:
         self.api = OHLCVApi()
         self.repository = OhlcvRepository()
 
+    async def fetch_ohlcv(
+            self,
+            symbol: str,
+            interval: str,
+            limit: int,
+            batch_id: str = "FETCH",
+            start_time: datetime = None,
+            end_time: datetime = None,
+    ) -> List[DefaultOhlcvVo]:
+        try:
+            data = self.api.get_ohlcv_klines(
+                symbol,
+                interval,
+                limit,
+                start_time,
+                end_time
+            )
+        except InvalidResponseException | ExternalApiError as e:
+            raise ExternalApiError from e
+
+        return _to_vo_list(data, batch_id)
+
     async def load_ohlcv(self, symbol_name: str, interval: str, limit: int, batch_id: str) -> List[DefaultOhlcvVo]:
         try:
             data = self.api.get_ohlcv_klines(symbol=symbol_name, interval=interval, limit=limit)

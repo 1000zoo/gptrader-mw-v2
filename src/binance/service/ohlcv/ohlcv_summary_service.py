@@ -46,13 +46,13 @@ class OhlcvSummaryService:
         interval: str,
         limit: int,
         batch_id: str,
-        start_time: Optional[datetime] = None,
+        start_time: datetime,
+        end_time: Optional[datetime] = None,
     ) -> OhlcvSummaryVo:
         delta = _interval_to_delta(interval) * limit
-        end_ts = datetime.now(timezone.utc)
-        start_ts = start_time if start_time else (end_ts - delta)
-        if start_ts.tzinfo is None:
-            start_ts = start_ts.replace(tzinfo=timezone.utc)
+        end_ts = end_time if end_time else (start_time + delta)
+        if end_ts.tzinfo is None:
+            end_ts = end_ts.replace(tzinfo=timezone.utc)
 
         vo = OhlcvSummaryVo(
             batch_id=batch_id,
@@ -60,7 +60,7 @@ class OhlcvSummaryService:
             symbol_id=symbol_name,
             c_interval=interval,
             c_limit=limit,
-            start_ts=start_ts,
+            start_ts=start_time,
             end_ts=end_ts,
             attr1="Y",
         )
