@@ -46,6 +46,21 @@ class OhlcvMasterService:
             start_time=summary_vo.start_ts
         )
 
+    async def delete_candles(self) -> int:
+        count = await self.ohlcvService.count_total_candles()
+        if count <= 0:
+            return 0
 
+        chunk_size = 10000
+        deleted_total = 0
+
+        while deleted_total < count:
+            limit = min(chunk_size, count - deleted_total)
+            deleted = await self.ohlcvService.delete_candles(limit=limit, symbol="%")
+            if deleted <= 0:
+                break
+            deleted_total += deleted
+
+        return deleted_total
 
 

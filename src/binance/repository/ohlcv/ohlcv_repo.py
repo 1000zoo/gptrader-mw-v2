@@ -44,3 +44,37 @@ class OhlcvRepository:
             )
             rows = result.mappings().all()
             return [DefaultOhlcvVo(**r) for r in rows]
+
+    async def select_count_total_candles(self) -> int:
+        sql = text(
+            f"""
+            SELECT COUNT(*) FROM {self.TABLE_NAME}
+            """
+        )
+        async with SessionLocal() as session:
+            result = await session.execute(
+                sql,
+                {}
+            )
+            ret = result.mappings().all()
+            return ret[0]['count']
+
+    async def delete_candles(self, limit: int, symbol: str) -> int:
+        sql = text(
+            f"""
+            DELETE FROM ohlcv
+            WHERE id IN (
+                SELECT id
+                FROM ohlcv
+                WHERE SYMBOL_ID LIKE :symbol
+                LIMIT :limit
+            )
+            """
+        )
+        async with SessionLocal() as session:
+            result = await session.execute(
+                sql,
+                {'symbol': symbol, 'limit': limit}
+            )
+            print(result.rowcount)
+            await session.commit()

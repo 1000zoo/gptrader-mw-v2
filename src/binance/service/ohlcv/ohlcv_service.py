@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from http.cookiejar import request_port
 from typing import List, Dict
 
 from src.binance.api.ohlcv.ohlcv_api import OHLCVApi
@@ -156,3 +157,15 @@ class OhlcvService:
         if not ohlcv:
             raise DataNotFoundException("Recent OHLCV data not found.")
         return list(reversed(ohlcv))
+
+    async def count_total_candles(self) -> int:
+        try:
+            return await self.repository.select_count_total_candles()
+        except Exception as e:
+            raise RepositoryError() from e
+
+    async def delete_candles(self, limit: int = 10000, symbol: str = "%") -> int:
+        try:
+            return await self.repository.delete_candles(limit=limit, symbol=symbol)
+        except Exception as e:
+            raise RepositoryError() from e
