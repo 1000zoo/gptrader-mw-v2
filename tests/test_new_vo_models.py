@@ -10,6 +10,7 @@ from src.ops.vo.system_state.default import DefaultSystemStateVo
 from src.calibration.vo.confidence_calibration.default import DefaultConfidenceCalibrationVo
 from src.research.vo.backtest_result.default import DefaultBacktestResultVo
 from src.ops.vo.execution_anomaly.default import DefaultExecutionAnomalyVo
+from src.ops.vo.scheduler.default import DefaultSchedulerVo
 
 
 def test_signal_log_vo_fields():
@@ -32,3 +33,19 @@ def test_supporting_vo_models_round_trip():
     assert calibration.bucket_from == 0.1
     assert backtest.trades == 10
     assert anomaly.severity == "HIGH"
+
+
+def test_scheduler_vo_fields():
+    ts = datetime.utcnow()
+    vo = DefaultSchedulerVo(
+        name="position_risk_scheduler",
+        state="SUCCESS",
+        last_run_dt=ts,
+        last_run_log="completed",
+        use_yn=True,
+    )
+    assert vo.name == "position_risk_scheduler"
+    assert vo.state == "SUCCESS"
+    assert vo.last_run_dt == ts
+    assert vo.last_run_log == "completed"
+    assert vo.use_yn is True

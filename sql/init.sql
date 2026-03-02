@@ -760,6 +760,32 @@ CREATE TABLE public.system_state (
 
 
 --
+-- Name: scheduler; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.scheduler (
+    id bigint NOT NULL,
+    name character varying(100) NOT NULL,
+    state character varying(30),
+    last_run_dt timestamp with time zone,
+    last_run_log text,
+    use_yn boolean DEFAULT true,
+    attr1 text,
+    attr2 text,
+    attr3 text,
+    attr4 text,
+    attr5 text,
+    attr6 text,
+    attr7 text,
+    attr8 text,
+    attr9 text,
+    attr10 text,
+    reg_dt timestamp with time zone DEFAULT now(),
+    upd_dt timestamp with time zone
+);
+
+
+--
 -- Name: regime_state; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -810,6 +836,25 @@ CREATE SEQUENCE public.system_state_id_seq
 --
 
 ALTER SEQUENCE public.system_state_id_seq OWNED BY public.system_state.id;
+
+
+--
+-- Name: scheduler_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.scheduler_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: scheduler_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.scheduler_id_seq OWNED BY public.scheduler.id;
 
 
 --
@@ -948,6 +993,13 @@ ALTER TABLE ONLY public.signal_log ALTER COLUMN id SET DEFAULT nextval('public.s
 
 
 --
+-- Name: scheduler id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.scheduler ALTER COLUMN id SET DEFAULT nextval('public.scheduler_id_seq'::regclass);
+
+
+--
 -- Name: system_state id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -1074,6 +1126,22 @@ ALTER TABLE ONLY public.signal_log
 
 
 --
+-- Name: scheduler scheduler_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.scheduler
+    ADD CONSTRAINT scheduler_name_key UNIQUE (name);
+
+
+--
+-- Name: scheduler scheduler_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.scheduler
+    ADD CONSTRAINT scheduler_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: symbols symbols_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1123,6 +1191,13 @@ CREATE INDEX idx_exec_anomaly_signal_log_id ON public.execution_anomaly USING bt
 --
 
 CREATE INDEX idx_exec_anomaly_trade_fill_id ON public.execution_anomaly USING btree (trade_fill_id);
+
+
+--
+-- Name: idx_scheduler_use_yn; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_scheduler_use_yn ON public.scheduler USING btree (use_yn);
 
 
 --
