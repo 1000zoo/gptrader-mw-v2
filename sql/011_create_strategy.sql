@@ -32,3 +32,10 @@ CREATE INDEX IF NOT EXISTS idx_strategy_use_yn
     ON strategy (use_yn);
 
 commit;
+
+
+
+
+
+insert into strategy (strategy_name, module_path, module_name, use_yn) values
+('VolatilityBreakoutRegimeStrategy', 'src.strategy.strategies', 'VolatilityBreakoutRegimeStrategy', 'Y');

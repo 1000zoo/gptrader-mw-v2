@@ -52,6 +52,24 @@ class IndicatorService:
     def __init__(self):
         self.repository = IndicatorRepository()
 
+    @staticmethod
+    def cal_indicators(ohlcv: List[DefaultOhlcvVo], indParams: IndParams) -> List[DefaultIndicatorVo]:
+        if not ohlcv:
+            raise InvalidRequestException("OHLCV data is required to calculate indicators.")
+        indicator = Indicator(ohlcv=_vo_to_dict(ohlcv), indParams=indParams)
+        results = indicator.getT()
+        sample = ohlcv[0]
+        meta = {
+            'reg_ymd': sample.reg_ymd,
+            'symbol_id': sample.symbol_id,
+            'batch_id': sample.batch_id,
+            'indicator_parameter_id': indParams.name,
+            'c_interval': sample.c_interval,
+            'c_limit': sample.c_limit
+        }
+        vo_list = _to_vo_list(results, **meta)
+        return vo_list
+
     async def cal_insert_indicators(self, ohlcv: List[DefaultOhlcvVo], indParams: IndParams) -> List[DefaultIndicatorVo]:
         if not ohlcv:
             raise InvalidRequestException("OHLCV data is required to calculate indicators.")

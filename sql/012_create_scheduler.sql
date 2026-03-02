@@ -27,3 +27,13 @@ CREATE INDEX IF NOT EXISTS idx_scheduler_use_yn
     ON scheduler (use_yn);
 
 commit;
+
+
+insert into scheduler (name, state, use_yn) values
+('MainScheduler', 'Y', 'Y');
+
+insert into scheduler (name, state, use_yn) values
+('StrategyScheduler', 'Y', 'Y');
+
+insert into scheduler (name, state, use_yn) values
+('BacktestScheduler', 'Y', 'Y');

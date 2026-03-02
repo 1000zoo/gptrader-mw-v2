@@ -5,6 +5,7 @@ from loguru import logger
 from src.binance.service.ohlcv.ohlcv_service import OhlcvService
 from src.binance.service.ohlcv.ohlcv_summary_service import OhlcvSummaryService
 from src.binance.vo.ohlcv.default import DefaultOhlcvVo
+from src.binance.vo.ohlcv.filter import OhlcvFilterVo
 from src.binance.vo.ohlcv.summary_default import OhlcvSummaryVo
 from src.binance.vo.ohlcv.summary_filter import OhlcvSummaryFilterVo
 
@@ -32,6 +33,14 @@ class OhlcvMasterService:
             start_time=start_candle.ts
         )
         logger.info(f"candle load success => {summary}")
+        return candle_data
+
+    async def only_fetch_candle(self, vo: OhlcvFilterVo) -> List[DefaultOhlcvVo]:
+        candle_data : List[DefaultOhlcvVo] = await self.ohlcvService.fetch_ohlcv(
+            symbol=vo.symbol_id,
+            interval=vo.c_interval,
+            limit=vo.c_limit,
+        )
         return candle_data
 
     async def fetch_from_summary(self, vo: OhlcvSummaryFilterVo) -> List[DefaultOhlcvVo]:
