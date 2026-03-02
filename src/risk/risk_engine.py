@@ -8,6 +8,7 @@ from typing import List
 from loguru import logger
 
 from src.binance.service.trader.account_service import AccountService
+from src.binance.vo.trader.account_position_default import DefaultAccountPositionVo
 from src.ops.service.execution_anomaly.execution_anomaly_service import ExecutionAnomalyService
 from src.trade.service.trade_fill.trade_fill_service import TradeFillService
 
@@ -33,6 +34,28 @@ def _env_int(name: str, default: int) -> int:
     value = os.getenv(name)
     if value is None:
         return default
+
+
+def _position_value(
+    position: DefaultAccountPositionVo | dict,
+    dict_key: str,
+    vo_attr: str,
+    default: float = 0.0,
+) -> float:
+    if isinstance(position, dict):
+        raw = position.get(dict_key, default)
+    else:
+        raw = getattr(position, vo_attr, default)
+    try:
+        return float(raw or 0.0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _position_symbol(position: DefaultAccountPositionVo | dict) -> str | None:
+    if isinstance(position, dict):
+        return position.get("symbol")
+    return position.symbol
     try:
         return int(value)
     except ValueError:
@@ -90,7 +113,7 @@ class RiskEngine:
             logger.warning(f"risk_engine: failed to fetch positions: {exc}")
             reasons.append("positions_unavailable")
 
-        open_positions = [p for p in positions if abs(float(p.get("positionAmt", 0) or 0)) > 0]
+        open_positions = [p for p in positions if abs(_position_value(p, "positionAmt", "position_amt")) > 0]
         if self.max_open_positions > 0 and len(open_positions) >= self.max_open_positions:
             allowed = False
             reasons.append("max_open_positions")
@@ -99,11 +122,11 @@ class RiskEngine:
             total_exposure = 0.0
             symbol_exposure = 0.0
             for position in open_positions:
-                amt = abs(float(position.get("positionAmt", 0) or 0))
-                entry_price = float(position.get("entryPrice", 0) or 0)
+                amt = abs(_position_value(position, "positionAmt", "position_amt"))
+                entry_price = _position_value(position, "entryPrice", "entry_price")
                 notional = amt * entry_price
                 total_exposure += notional
-                if position.get("symbol") == symbol:
+                if _position_symbol(position) == symbol:
                     symbol_exposure += notional
             if total_exposure / equity > self.max_exposure_total_pct:
                 allowed = False
