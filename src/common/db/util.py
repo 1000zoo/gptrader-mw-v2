@@ -23,6 +23,7 @@ ALLOWED_TABLES = {
     'backtest_result',
     'execution_anomaly',
     'slack_setting',
+    'scheduler',
     'regime_state',
     'strategy',
 }
