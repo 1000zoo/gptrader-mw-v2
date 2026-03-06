@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS scheduler (
     state           VARCHAR(30),
     last_run_dt     TIMESTAMPTZ,
     last_run_log    TEXT,
-    use_yn          BOOLEAN DEFAULT TRUE,
+    use_yn          VARCHAR(1) NOT NULL DEFAULT 'Y',
     attr1           TEXT,
     attr2           TEXT,
     attr3           TEXT,
@@ -29,6 +29,9 @@ CREATE INDEX IF NOT EXISTS idx_scheduler_use_yn
 commit;
 
 
+drop table scheduler;
+
+
 insert into scheduler (name, state, use_yn) values
 ('MainScheduler', 'Y', 'Y');
 
@@ -37,3 +40,5 @@ insert into scheduler (name, state, use_yn) values
 
 insert into scheduler (name, state, use_yn) values
 ('BacktestScheduler', 'Y', 'Y');
+
+

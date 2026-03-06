@@ -769,7 +769,7 @@ CREATE TABLE public.scheduler (
     state character varying(30),
     last_run_dt timestamp with time zone,
     last_run_log text,
-    use_yn boolean DEFAULT true,
+    use_yn          VARCHAR(1) NOT NULL DEFAULT 'Y',
     attr1 text,
     attr2 text,
     attr3 text,
@@ -930,6 +930,12 @@ CREATE TABLE public.trade_fill (
 );
 
 
+
+create table if not exists strategy_timeframe (
+    strategy_name              VARCHAR(100) not NULL,
+    timeframe     				VARCHAR(10) NOT null,
+    primary key (strategy_name, timeframe)
+);
 --
 -- Name: trade_fill_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
@@ -1331,5 +1337,9 @@ VALUES('regime_default', 60, 'close', 20, 60, 20, 60, 20, 14, 9, 2.0000, 14, 14,
 -- insert default strategy
 insert into strategy (strategy_name, module_path, module_name, params_id, use_yn) values
 ('VolatilityBreakoutRegimeStrategy', 'src.strategy.strategies', 'VolatilityBreakoutRegimeStrategy', 'default_2', 'Y');
+
+insert into strategy_timeframe (strategy_name, timeframe) values ('VolatilityBreakoutRegimeStrategy', '1m'); 
+insert into strategy_timeframe (strategy_name, timeframe) values ('VolatilityBreakoutRegimeStrategy', '5m');
+
 
 \unrestrict 6Ln0sCSjwcJffIl0xhtvmcdaPctdgGvfCi24J79UHcIELKrvXnxq8yqMoCvKQ0j
