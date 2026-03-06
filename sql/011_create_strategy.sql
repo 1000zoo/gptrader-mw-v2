@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS strategy (
     module_name     VARCHAR(100) NOT NULL,
     use_yn          VARCHAR(1) NOT NULL DEFAULT 'Y',
     description     TEXT,
+    params_id       VARCHAR(20),
     params          JSONB,
     version         VARCHAR(32),
     priority        INTEGER DEFAULT 100,
@@ -31,11 +32,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_strategy_name
 CREATE INDEX IF NOT EXISTS idx_strategy_use_yn
     ON strategy (use_yn);
 
+
+
+insert into strategy (strategy_name, module_path, module_name, params_id, use_yn) values
+('VolatilityBreakoutRegimeStrategy', 'src.strategy.strategies', 'VolatilityBreakoutRegimeStrategy', 'default_2', 'Y');
+
+
+
 commit;
-
-
-
-
-
-insert into strategy (strategy_name, module_path, module_name, use_yn) values
-('VolatilityBreakoutRegimeStrategy', 'src.strategy.strategies', 'VolatilityBreakoutRegimeStrategy', 'Y');
