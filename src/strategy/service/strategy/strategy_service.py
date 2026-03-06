@@ -2,7 +2,6 @@ import importlib
 from typing import List, Optional
 
 from sqlalchemy.exc import SQLAlchemyError
-from typing_extensions import deprecated
 
 from src.common.exception.data_not_found_exception import DataNotFoundException
 from src.common.exception.invalid_request_exception import InvalidRequestException
@@ -55,9 +54,14 @@ class StrategyService:
         except (SQLAlchemyError, ValueError) as e:
             raise RepositoryError("Failed to delete strategy.") from e
 
+    async def find_timestamp(self, strategy_name: str):
+        try:
+            ret = await self.repository.find_timestamp(strategy_name=strategy_name)
+            return [r['timeframe'] for r in ret]
+        except (SQLAlchemyError, ValueError) as e:
+            raise RepositoryError("Failed to find strategy timestamp.") from e
 
     # use strategy_preparation_usecase
-    @deprecated
     async def build_strategy_instance(self, strategy_name: str) -> IStrategy:
         strategy_info = await self.find_strategy_by_name(strategy_name, only_active=True)
         if strategy_info is None:

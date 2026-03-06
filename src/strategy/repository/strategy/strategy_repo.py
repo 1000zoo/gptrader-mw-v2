@@ -12,6 +12,7 @@ from src.strategy.vo.strategy.filter import StrategyFilterVo
 class StrategyRepository:
     def __init__(self):
         self.TABLE_NAME = "strategy"
+        self.TIMESTAMP_TABLE = "strategy_timeframe"
 
     async def insert_strategy(self, vo: DefaultStrategyVo) -> int:
         data = vo.model_dump(exclude_none=True)
@@ -91,3 +92,9 @@ class StrategyRepository:
             result = await session.execute(sql, {"strategy_name": strategy_name})
             await session.commit()
             return result.rowcount
+
+    async def find_timestamp(self, strategy_name: str) -> Optional[List[str]]:
+        sql = text(f"SELECT timeframe FROM {self.TIMESTAMP_TABLE} WHERE strategy_name = :strategy_name")
+        async with SessionLocal() as session:
+            result = await session.execute(sql, {"strategy_name": strategy_name})
+            return result.mappings().all()
