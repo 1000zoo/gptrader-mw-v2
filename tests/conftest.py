@@ -1,6 +1,10 @@
 import sys
-from pathlib import Path
 import types
+from pathlib import Path
+
+from src.common.db.connection import init_db
+
+init_db()
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:

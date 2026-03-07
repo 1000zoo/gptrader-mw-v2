@@ -27,3 +27,18 @@ SessionLocal = async_sessionmaker(
     autoflush=False,
     expire_on_commit=False,
 )
+
+def init_db():
+    global engine, SessionLocal
+
+    engine = create_async_engine(
+        DATABASE_URL,
+        echo=SQL_ECHO,  # SQL 로그 보려면 True
+        hide_parameters=True,  # 파라미터 대량 로그 방지
+    )
+
+    SessionLocal = async_sessionmaker(
+        bind=engine,
+        autoflush=False,
+        expire_on_commit=False,
+    )
