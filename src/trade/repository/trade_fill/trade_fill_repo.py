@@ -51,6 +51,19 @@ class TradeFillRepository:
             rows = result.mappings().all()
             return [DefaultTradeFillVo(**r) for r in rows]
 
+    async def select_open_positions(self) -> List[DefaultTradeFillVo]:
+        sql = text(
+            f"""
+            SELECT * FROM {self.TABLE_NAME}
+            WHERE status = 'OPEN'
+            ORDER BY COALESCE(entry_ts, reg_dt) DESC
+            """
+        )
+        async with SessionLocal() as session:
+            result = await session.execute(sql)
+            rows = result.mappings().all()
+            return [DefaultTradeFillVo(**r) for r in rows]
+
     async def select_by_entry_order_id(self, entry_order_id: str) -> Optional[DefaultTradeFillVo]:
         sql = text(
             f"""

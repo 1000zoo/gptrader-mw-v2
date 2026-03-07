@@ -539,6 +539,53 @@ ALTER SEQUENCE public.ohlcv_id_seq OWNED BY public.ohlcv.id;
 
 
 --
+-- Name: ohlcv_summary; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.ohlcv_summary (
+    id bigint NOT NULL,
+    batch_id character varying(32),
+    reg_ymd character varying(8),
+    symbol_id character varying(16),
+    c_interval character varying(20),
+    c_limit integer,
+    start_ts timestamp with time zone,
+    end_ts timestamp with time zone,
+    attr1 text,
+    attr2 text,
+    attr3 text,
+    attr4 text,
+    attr5 text,
+    attr6 text,
+    attr7 text,
+    attr8 text,
+    attr9 text,
+    attr10 text,
+    reg_dt timestamp with time zone DEFAULT now(),
+    upd_dt timestamp with time zone
+);
+
+
+--
+-- Name: ohlcv_summary_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.ohlcv_summary_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: ohlcv_summary_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.ohlcv_summary_id_seq OWNED BY public.ohlcv_summary.id;
+
+
+--
 -- Name: position_event; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -713,6 +760,32 @@ CREATE TABLE public.system_state (
 
 
 --
+-- Name: scheduler; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.scheduler (
+    id bigint NOT NULL,
+    name character varying(100) NOT NULL,
+    state character varying(30),
+    last_run_dt timestamp with time zone,
+    last_run_log text,
+    use_yn          VARCHAR(1) NOT NULL DEFAULT 'Y',
+    attr1 text,
+    attr2 text,
+    attr3 text,
+    attr4 text,
+    attr5 text,
+    attr6 text,
+    attr7 text,
+    attr8 text,
+    attr9 text,
+    attr10 text,
+    reg_dt timestamp with time zone DEFAULT now(),
+    upd_dt timestamp with time zone
+);
+
+
+--
 -- Name: regime_state; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -766,8 +839,61 @@ ALTER SEQUENCE public.system_state_id_seq OWNED BY public.system_state.id;
 
 
 --
+-- Name: scheduler_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.scheduler_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: scheduler_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.scheduler_id_seq OWNED BY public.scheduler.id;
+
+
+--
 -- Name: trade_fill; Type: TABLE; Schema: public; Owner: -
 --
+-- =========================================
+-- STRATEGY
+-- =========================================
+CREATE TABLE IF NOT EXISTS strategy (
+    id              BIGSERIAL PRIMARY KEY,
+    strategy_name   VARCHAR(100) NOT NULL,
+    module_path     VARCHAR(255) NOT NULL,
+    module_name     VARCHAR(100) NOT NULL,
+    use_yn          VARCHAR(1) NOT NULL DEFAULT 'Y',
+    description     TEXT,
+    params_id       VARCHAR(20),
+    params          JSONB,
+    version         VARCHAR(32),
+    priority        INTEGER DEFAULT 100,
+    attr1           TEXT,
+    attr2           TEXT,
+    attr3           TEXT,
+    attr4           TEXT,
+    attr5           TEXT,
+    attr6           TEXT,
+    attr7           TEXT,
+    attr8           TEXT,
+    attr9           TEXT,
+    attr10          TEXT,
+    reg_dt          TIMESTAMPTZ DEFAULT NOW(),
+    upd_dt          TIMESTAMPTZ
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_strategy_name
+    ON strategy (strategy_name);
+
+CREATE INDEX IF NOT EXISTS idx_strategy_use_yn
+    ON strategy (use_yn);
+
 
 CREATE TABLE public.trade_fill (
     id bigint NOT NULL,
@@ -804,6 +930,12 @@ CREATE TABLE public.trade_fill (
 );
 
 
+
+create table if not exists strategy_timeframe (
+    strategy_name              VARCHAR(100) not NULL,
+    timeframe     				VARCHAR(10) NOT null,
+    primary key (strategy_name, timeframe)
+);
 --
 -- Name: trade_fill_id_seq; Type: SEQUENCE; Schema: public; Owner: -
 --
@@ -880,6 +1012,13 @@ ALTER TABLE ONLY public.ohlcv ALTER COLUMN id SET DEFAULT nextval('public.ohlcv_
 
 
 --
+-- Name: ohlcv_summary id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ohlcv_summary ALTER COLUMN id SET DEFAULT nextval('public.ohlcv_summary_id_seq'::regclass);
+
+
+--
 -- Name: position_event id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -891,6 +1030,13 @@ ALTER TABLE ONLY public.position_event ALTER COLUMN id SET DEFAULT nextval('publ
 --
 
 ALTER TABLE ONLY public.signal_log ALTER COLUMN id SET DEFAULT nextval('public.signal_log_id_seq'::regclass);
+
+
+--
+-- Name: scheduler id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.scheduler ALTER COLUMN id SET DEFAULT nextval('public.scheduler_id_seq'::regclass);
 
 
 --
@@ -988,6 +1134,14 @@ ALTER TABLE ONLY public.ohlcv
 
 
 --
+-- Name: ohlcv_summary ohlcv_summary_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.ohlcv_summary
+    ADD CONSTRAINT ohlcv_summary_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: position_event position_event_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1009,6 +1163,22 @@ ALTER TABLE ONLY public.regime_state
 
 ALTER TABLE ONLY public.signal_log
     ADD CONSTRAINT signal_log_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: scheduler scheduler_name_key; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.scheduler
+    ADD CONSTRAINT scheduler_name_key UNIQUE (name);
+
+
+--
+-- Name: scheduler scheduler_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.scheduler
+    ADD CONSTRAINT scheduler_pkey PRIMARY KEY (id);
 
 
 --
@@ -1064,6 +1234,13 @@ CREATE INDEX idx_exec_anomaly_trade_fill_id ON public.execution_anomaly USING bt
 
 
 --
+-- Name: idx_scheduler_use_yn; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_scheduler_use_yn ON public.scheduler USING btree (use_yn);
+
+
+--
 -- Name: idx_indicators_symbol_regymd_interval; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1075,6 +1252,13 @@ CREATE INDEX idx_indicators_symbol_regymd_interval ON public.indicators USING bt
 --
 
 CREATE INDEX idx_ohlcv_symbol_regymd_interval ON public.ohlcv USING btree (symbol_id, reg_ymd, c_interval);
+
+
+--
+-- Name: idx_ohlcv_summary_symbol_regymd_interval; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_ohlcv_summary_symbol_regymd_interval ON public.ohlcv_summary USING btree (symbol_id, reg_ymd, c_interval);
 
 
 --
@@ -1148,5 +1332,14 @@ VALUES('default_2', 50, 'close', 20, 60, 20, 60, 20, 14, 9, 2.0000, 14, 14, 14, 
 INSERT INTO public.indicator_parameter
 ("name", tail, col, ma_fast_w, ma_slow_w, ema_fast_w, ema_slow_w, std_w, rsi_w, macd_signal, bollinger_k, atr_w, kd_k_w, kd_d_w, roc_w, momentum_w, mfi_w, donchain_w, keltner_m, linear_regression_slope_w, attr1, attr2, attr3, attr4, attr5, attr6, attr7, attr8, attr9, attr10, reg_dt, upd_dt)
 VALUES('regime_default', 60, 'close', 20, 60, 20, 60, 20, 14, 9, 2.0000, 14, 14, 14, 14, 14, 14, 20, 2.0000, 20, 'Y', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-01-15 21:15:46.845', '2026-01-15 21:15:46.845');
+
+
+-- insert default strategy
+insert into strategy (strategy_name, module_path, module_name, params_id, use_yn) values
+('VolatilityBreakoutRegimeStrategy', 'src.strategy.strategies.volatility_breakout_regime_strategy', 'VolatilityBreakoutRegimeStrategy', 'default_2', 'Y');
+
+insert into strategy_timeframe (strategy_name, timeframe) values ('VolatilityBreakoutRegimeStrategy', '1m'); 
+insert into strategy_timeframe (strategy_name, timeframe) values ('VolatilityBreakoutRegimeStrategy', '5m');
+
 
 \unrestrict 6Ln0sCSjwcJffIl0xhtvmcdaPctdgGvfCi24J79UHcIELKrvXnxq8yqMoCvKQ0j

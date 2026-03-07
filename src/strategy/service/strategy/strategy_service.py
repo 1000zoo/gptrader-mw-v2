@@ -10,6 +10,7 @@ from src.strategy.repository.strategy.strategy_repo import StrategyRepository
 from src.strategy.strategies.IStrategy import IStrategy
 from src.strategy.vo.strategy.default import DefaultStrategyVo
 from src.strategy.vo.strategy.filter import StrategyFilterVo
+from src.strategy.vo.strategy_timeframe.default import DefaultStrategyTimeframeVo
 
 
 class StrategyService:
@@ -36,6 +37,12 @@ class StrategyService:
         except (SQLAlchemyError, ValueError) as e:
             raise RepositoryError("Failed to select strategy by name.") from e
 
+    async def find_top_active_strategy(self) -> Optional[DefaultStrategyVo]:
+        try:
+            return await self.repository.select_top_active_strategy()
+        except (SQLAlchemyError, ValueError) as e:
+            raise RepositoryError("Failed to select top active strategy.") from e
+
     async def update_strategy(self, vo: DefaultStrategyVo) -> int:
         try:
             return await self.repository.update_strategy(vo)
@@ -48,6 +55,14 @@ class StrategyService:
         except (SQLAlchemyError, ValueError) as e:
             raise RepositoryError("Failed to delete strategy.") from e
 
+    async def find_timeframe(self, vo: DefaultStrategyTimeframeVo) -> List[DefaultStrategyTimeframeVo]:
+        try:
+            ret = await self.repository.find_timeframe(vo=vo)
+            return ret
+        except (SQLAlchemyError, ValueError) as e:
+            raise RepositoryError("Failed to find strategy timeframe.") from e
+
+    # use strategy_preparation_usecase
     async def build_strategy_instance(self, strategy_name: str) -> IStrategy:
         strategy_info = await self.find_strategy_by_name(strategy_name, only_active=True)
         if strategy_info is None:

@@ -1,5 +1,6 @@
 import json
 from typing import Any, Mapping, List, Tuple
+
 from sqlalchemy import text
 
 from src.common.db.connection import SessionLocal
@@ -14,6 +15,7 @@ ALLOWED_TABLES = {
     'job_run',
     'job_run_hist',
     'ohlcv',
+    'ohlcv_summary',
     'indicator_parameter',
     'signal_log',
     'trade_fill',
@@ -22,8 +24,10 @@ ALLOWED_TABLES = {
     'backtest_result',
     'execution_anomaly',
     'slack_setting',
+    'scheduler',
     'regime_state',
     'strategy',
+    'strategy_timeframe',
 }
 
 def strip_none(d: Mapping[str, Any],) -> dict[str, Any]:

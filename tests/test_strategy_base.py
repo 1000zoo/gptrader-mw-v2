@@ -12,6 +12,10 @@ class DummyStrategy(IStrategy):
         self.validate_input(data)
         return self._hold("ok")
 
+    def run_exit_strategy(self, data):
+        self.validate_input(data)
+        return self._hold("ok")
+
 
 @pytest.fixture
 def sample_input():
@@ -22,7 +26,14 @@ def sample_input():
             "15m": [{"timestamp": "2026-01-01T00:00:00Z", "rsi": 50.0}],
             "30m": [{"timestamp": "2026-01-01T00:00:00Z", "rsi": 50.0}],
             "1h": [{"timestamp": "2026-01-01T00:00:00Z", "rsi": 50.0}],
-        }
+        },
+        ohlcv_by_tf={
+            "1m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "5m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "15m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "30m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "1h": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+        },
     )
 
 
@@ -53,7 +64,14 @@ def test_validate_input_raises_on_missing_timeframe(sample_config):
             "5m": [{"timestamp": "2026-01-01T00:00:00Z", "rsi": 50.0}],
             "15m": [{"timestamp": "2026-01-01T00:00:00Z", "rsi": 50.0}],
             "30m": [{"timestamp": "2026-01-01T00:00:00Z", "rsi": 50.0}],
-        }
+        },
+        ohlcv_by_tf={
+            "1m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "5m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "15m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "30m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "1h": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+        },
     )
 
     with pytest.raises(ValueError):
@@ -79,7 +97,38 @@ def test_validate_input_raises_on_insufficient_rows():
             "15m": [{"timestamp": "2026-01-01T00:00:00Z", "rsi": 50.0}],
             "30m": [{"timestamp": "2026-01-01T00:00:00Z", "rsi": 50.0}],
             "1h": [{"timestamp": "2026-01-01T00:00:00Z", "rsi": 50.0}],
-        }
+        },
+        ohlcv_by_tf={
+            "1m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "5m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "15m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "30m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "1h": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+        },
+    )
+
+    with pytest.raises(ValueError):
+        strategy.validate_input(bad_input)
+
+
+def test_validate_input_raises_on_missing_ohlcv_timeframe(sample_config):
+    strategy = DummyStrategy()
+    strategy.init_strategy(sample_config)
+
+    bad_input = StrategyRunInput(
+        indicators_by_tf={
+            "1m": [{"timestamp": "2026-01-01T00:00:00Z", "rsi": 50.0}],
+            "5m": [{"timestamp": "2026-01-01T00:00:00Z", "rsi": 50.0}],
+            "15m": [{"timestamp": "2026-01-01T00:00:00Z", "rsi": 50.0}],
+            "30m": [{"timestamp": "2026-01-01T00:00:00Z", "rsi": 50.0}],
+            "1h": [{"timestamp": "2026-01-01T00:00:00Z", "rsi": 50.0}],
+        },
+        ohlcv_by_tf={
+            "1m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "5m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "15m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "30m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+        },
     )
 
     with pytest.raises(ValueError):
@@ -100,7 +149,14 @@ def test_latest_and_window_helpers_work(sample_config):
             "15m": [{"timestamp": "2026-01-01T00:00:00Z", "rsi": 50.0}],
             "30m": [{"timestamp": "2026-01-01T00:00:00Z", "rsi": 50.0}],
             "1h": [{"timestamp": "2026-01-01T00:00:00Z", "rsi": 50.0}],
-        }
+        },
+        ohlcv_by_tf={
+            "1m": {"timestamp": "2026-01-01T00:01:00Z", "open": 1.0},
+            "5m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "15m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "30m": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+            "1h": {"timestamp": "2026-01-01T00:00:00Z", "open": 1.0},
+        },
     )
 
     assert strategy._latest(data, "1m", "rsi") == 55.0

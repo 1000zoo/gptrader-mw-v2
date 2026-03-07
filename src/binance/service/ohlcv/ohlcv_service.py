@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from http.cookiejar import request_port
 from typing import List, Dict
 
 from src.binance.api.ohlcv.ohlcv_api import OHLCVApi
@@ -66,6 +67,28 @@ class OhlcvService:
         self.api = OHLCVApi()
         self.repository = OhlcvRepository()
 
+    async def fetch_ohlcv(
+            self,
+            symbol: str,
+            interval: str,
+            limit: int,
+            batch_id: str = "FETCH",
+            start_time: datetime = None,
+            end_time: datetime = None,
+    ) -> List[DefaultOhlcvVo]:
+        try:
+            data = self.api.get_ohlcv_klines(
+                symbol,
+                interval,
+                limit,
+                start_time,
+                end_time
+            )
+        except InvalidResponseException | ExternalApiError as e:
+            raise ExternalApiError from e
+
+        return _to_vo_list(data, batch_id)
+
     async def load_ohlcv(self, symbol_name: str, interval: str, limit: int, batch_id: str) -> List[DefaultOhlcvVo]:
         try:
             data = self.api.get_ohlcv_klines(symbol=symbol_name, interval=interval, limit=limit)
@@ -119,3 +142,30 @@ class OhlcvService:
         if not ohlcv:
             raise DataNotFoundException("OHLCV data not found.")
         return ohlcv
+
+    async def find_recent_ohlcv(
+        self, symbol_id: str, interval: str, limit: int
+    ) -> List[DefaultOhlcvVo]:
+        try:
+            ohlcv = await self.repository.select_recent_ohlcv(
+                symbol_id=symbol_id,
+                interval=interval,
+                limit=limit,
+            )
+        except (SQLAlchemyError, ValueError) as e:
+            raise RepositoryError("Failed to fetch recent OHLCV data.") from e
+        if not ohlcv:
+            raise DataNotFoundException("Recent OHLCV data not found.")
+        return list(reversed(ohlcv))
+
+    async def count_total_candles(self) -> int:
+        try:
+            return await self.repository.select_count_total_candles()
+        except Exception as e:
+            raise RepositoryError() from e
+
+    async def delete_candles(self, limit: int = 10000, symbol: str = "%") -> int:
+        try:
+            return await self.repository.delete_candles(limit=limit, symbol=symbol)
+        except Exception as e:
+            raise RepositoryError() from e

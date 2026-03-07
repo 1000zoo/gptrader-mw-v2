@@ -1,17 +1,8 @@
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List
 
 from pydantic import BaseModel
 
-try:
-    from pydantic import Field
-except ImportError:
-    def Field(default=None, default_factory=None, **kwargs):
-        if default_factory is not None:
-            return default_factory()
-        return default
-
-TF = Literal["1m", "5m", "15m", "30m", "1h"]
-Action = Literal["BUY", "SELL", "HOLD"]
+from src.common.model.types import TF, Action
 
 ALLOWED_INDICATOR_COLUMNS = {
     "timestamp",
@@ -53,35 +44,33 @@ ALLOWED_INDICATOR_COLUMNS = {
     "high_linear_regression_direction",
 }
 
+ALLOWED_OHLCV_COLUMNS = {
+    "timestamp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "quote_volume",
+}
+
 
 class StrategyInitConfig(BaseModel):
     strategy_name: str
-    symbol: str
-    timeframes: List[TF] = Field(default_factory=lambda: ["1m", "5m", "15m", "30m", "1h"])
-    lookback_by_tf: Dict[TF, int] = Field(default_factory=dict)
-    params: Dict[str, Any] = Field(default_factory=dict)
+    symbol: str = "ANY"
+    timeframes: List[TF]
+    lookback_by_tf: Dict[TF, int]
+    params: Dict[str, Any] = {}
 
 
 class StrategyRunInput(BaseModel):
     indicators_by_tf: Dict[TF, List[Dict[str, Any]]]
-    recent_analyzes: List[Dict[str, Any]] = Field(default_factory=list)
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        for tf, rows in self.indicators_by_tf.items():
-            for row in rows:
-                unknown = set(row.keys()) - ALLOWED_INDICATOR_COLUMNS
-                if unknown:
-                    raise ValueError(f"{tf}: unsupported indicator columns: {sorted(unknown)}")
+    ohlcv_by_tf: Dict[TF, Dict[str, Any]]
+    recent_analyzes: List[Dict[str, Any]] = []
 
 
 class StrategyDecision(BaseModel):
     action: Action
-    confidence: float = Field(ge=0.0, le=1.0)
+    confidence: float
     reason: str
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        if self.confidence < 0.0 or self.confidence > 1.0:
-            raise ValueError("confidence must be between 0 and 1")
+    metadata: Dict[str, Any] = {}

@@ -36,5 +36,5 @@ class AccountApi:
         account = self.get_account()
         positions = account.get("positions")
         if positions is None:
-            raise DataNotFoundException("Account positions are missing.")
+            return []
         return positions

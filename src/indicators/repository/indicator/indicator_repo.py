@@ -25,3 +25,23 @@ class IndicatorRepository:
 
     async def select_indicators(self, vo: IndicatorsFilterVo) -> List[DefaultIndicatorVo]:
         return await common_select(self.TABLE_NAME, vo, DefaultIndicatorVo)
+
+    async def select_recent_indicators(
+        self, symbol_id: str, interval: str, limit: int
+    ) -> List[DefaultIndicatorVo]:
+        sql = text(
+            f"""
+            SELECT * FROM {self.TABLE_NAME}
+            WHERE symbol_id = :symbol_id
+              AND c_interval = :interval
+            ORDER BY COALESCE(ts, reg_dt) DESC, seq_no DESC
+            LIMIT :limit
+            """
+        )
+        async with SessionLocal() as session:
+            result = await session.execute(
+                sql,
+                {"symbol_id": symbol_id, "interval": interval, "limit": limit},
+            )
+            rows = result.mappings().all()
+            return [DefaultIndicatorVo(**r) for r in rows]

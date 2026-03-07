@@ -28,6 +28,10 @@ class IStrategy(ABC):
             if rows is None:
                 raise ValueError(f"missing timeframe indicators: {tf}")
 
+            ohlcv = data.ohlcv_by_tf.get(tf)
+            if ohlcv is None:
+                raise ValueError(f"missing timeframe ohlcv: {tf}")
+
             min_rows = self._config.lookback_by_tf[tf]
             if len(rows) < min_rows:
                 raise ValueError(
@@ -60,4 +64,8 @@ class IStrategy(ABC):
 
     @abstractmethod
     def run_strategy(self, data: StrategyRunInput) -> StrategyDecision:
+        ...
+
+    @abstractmethod
+    def run_exit_strategy(self, data: StrategyRunInput) -> StrategyDecision:
         ...

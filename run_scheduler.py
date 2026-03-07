@@ -11,9 +11,11 @@ from src.common.logger.logger_config import setup_logging
 from src.common.exception.exception_handler import handle_top_level_exception_sync
 from src.research.runner import run_from_env
 from src.scheduler.executor import execute as scheduler_execute
+from src.scheduler.position_risk_executor import execute as position_risk_execute
 
 DEFAULT_EXECUTE_INTERVAL_SECONDS = 3600
 DEFAULT_RESEARCH_INTERVAL_SECONDS = 3600
+DEFAULT_RISK_EXECUTE_INTERVAL_SECONDS = 60
 
 
 def tznow(scheduler: AsyncIOScheduler) -> datetime:
@@ -50,6 +52,10 @@ async def setup_scheduler() -> None:
         "RESEARCH_JOB_INTERVAL_SECONDS",
         DEFAULT_RESEARCH_INTERVAL_SECONDS,
     )
+    risk_execute_interval = _get_interval_seconds(
+        "RISK_EXECUTE_INTERVAL_SECONDS",
+        DEFAULT_RISK_EXECUTE_INTERVAL_SECONDS,
+    )
 
     scheduler.add_job(
         scheduler_execute,
@@ -59,6 +65,16 @@ async def setup_scheduler() -> None:
         next_run_time=tznow(scheduler),
         coalesce=True,
         misfire_grace_time=300,
+    )
+
+    scheduler.add_job(
+        position_risk_execute,
+        "interval",
+        seconds=risk_execute_interval,
+        id="position_risk_job",
+        next_run_time=tznow(scheduler),
+        coalesce=True,
+        misfire_grace_time=60,
     )
 
     scheduler.add_job(

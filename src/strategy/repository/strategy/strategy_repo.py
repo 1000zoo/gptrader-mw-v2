@@ -7,11 +7,13 @@ from src.common.db.connection import SessionLocal
 from src.common.db.util import common_insert, common_select
 from src.strategy.vo.strategy.default import DefaultStrategyVo
 from src.strategy.vo.strategy.filter import StrategyFilterVo
+from src.strategy.vo.strategy_timeframe.default import DefaultStrategyTimeframeVo
 
 
 class StrategyRepository:
     def __init__(self):
         self.TABLE_NAME = "strategy"
+        self.TIMEFRAME_TABLE = "strategy_timeframe"
 
     async def insert_strategy(self, vo: DefaultStrategyVo) -> int:
         data = vo.model_dump(exclude_none=True)
@@ -37,6 +39,22 @@ class StrategyRepository:
         )
         async with SessionLocal() as session:
             result = await session.execute(sql, {"strategy_name": strategy_name})
+            row = result.mappings().first()
+            if not row:
+                return None
+            return DefaultStrategyVo(**row)
+
+    async def select_top_active_strategy(self) -> Optional[DefaultStrategyVo]:
+        sql = text(
+            f"""
+            SELECT * FROM {self.TABLE_NAME}
+            WHERE use_yn = 'Y'
+            ORDER BY priority ASC NULLS LAST, id ASC
+            LIMIT 1
+            """
+        )
+        async with SessionLocal() as session:
+            result = await session.execute(sql)
             row = result.mappings().first()
             if not row:
                 return None
@@ -75,3 +93,6 @@ class StrategyRepository:
             result = await session.execute(sql, {"strategy_name": strategy_name})
             await session.commit()
             return result.rowcount
+
+    async def find_timeframe(self, vo: DefaultStrategyTimeframeVo) -> Optional[List[DefaultStrategyTimeframeVo]]:
+        return await common_select(self.TIMEFRAME_TABLE, vo, DefaultStrategyTimeframeVo)

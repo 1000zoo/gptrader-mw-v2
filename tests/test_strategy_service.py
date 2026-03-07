@@ -3,15 +3,20 @@ import types
 
 import pytest
 
+from src.common.db.connection import init_db
 from src.common.exception.data_not_found_exception import DataNotFoundException
 from src.common.exception.invalid_request_exception import InvalidRequestException
 from src.strategy.service.strategy.strategy_service import StrategyService
 from src.strategy.strategies.IStrategy import IStrategy
 from src.strategy.vo.strategy.default import DefaultStrategyVo
+from src.strategy.vo.strategy_timeframe.default import DefaultStrategyTimeframeVo
 
 
 class DummyLoadedStrategy(IStrategy):
     def run_strategy(self, data):
+        return self._hold("ok")
+
+    def run_exit_strategy(self, data):
         return self._hold("ok")
 
 
@@ -74,3 +79,17 @@ def test_build_strategy_instance_raises_on_invalid_class(monkeypatch):
 
     with pytest.raises(InvalidRequestException):
         asyncio.run(service.build_strategy_instance("bad"))
+
+@pytest.mark.asyncio
+async def test_strategy_timeframe():
+    init_db()
+    service = StrategyService()
+    s = await service.find_timeframe(DefaultStrategyTimeframeVo(strategy_name="VolatilityBreakoutRegimeStrategy"))
+
+
+@pytest.mark.asyncio
+async def test_strategy_timeframe_wrong():
+    init_db()
+    service = StrategyService()
+    s = await service.find_timeframe(DefaultStrategyTimeframeVo(strategy_name="WRONG"))
+    print(s)

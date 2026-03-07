@@ -38,6 +38,12 @@ class TradeFillService:
         except (SQLAlchemyError, ValueError) as e:
             raise RepositoryError("Failed to select recent trade_fill.") from e
 
+    async def find_open_positions(self) -> List[DefaultTradeFillVo]:
+        try:
+            return await self.repository.select_open_positions()
+        except (SQLAlchemyError, ValueError) as e:
+            raise RepositoryError("Failed to select open trade_fill.") from e
+
     async def find_by_entry_order_id(self, entry_order_id: str) -> Optional[DefaultTradeFillVo]:
         try:
             return await self.repository.select_by_entry_order_id(entry_order_id)
