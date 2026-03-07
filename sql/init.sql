@@ -1336,7 +1336,7 @@ VALUES('regime_default', 60, 'close', 20, 60, 20, 60, 20, 14, 9, 2.0000, 14, 14,
 
 -- insert default strategy
 insert into strategy (strategy_name, module_path, module_name, params_id, use_yn) values
-('VolatilityBreakoutRegimeStrategy', 'src.strategy.strategies', 'VolatilityBreakoutRegimeStrategy', 'default_2', 'Y');
+('VolatilityBreakoutRegimeStrategy', 'src.strategy.strategies.volatility_breakout_regime_strategy', 'VolatilityBreakoutRegimeStrategy', 'default_2', 'Y');
 
 insert into strategy_timeframe (strategy_name, timeframe) values ('VolatilityBreakoutRegimeStrategy', '1m'); 
 insert into strategy_timeframe (strategy_name, timeframe) values ('VolatilityBreakoutRegimeStrategy', '5m');
