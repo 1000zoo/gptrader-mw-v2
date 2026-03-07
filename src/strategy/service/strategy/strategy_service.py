@@ -10,6 +10,7 @@ from src.strategy.repository.strategy.strategy_repo import StrategyRepository
 from src.strategy.strategies.IStrategy import IStrategy
 from src.strategy.vo.strategy.default import DefaultStrategyVo
 from src.strategy.vo.strategy.filter import StrategyFilterVo
+from src.strategy.vo.strategy_timeframe.default import DefaultStrategyTimeframeVo
 
 
 class StrategyService:
@@ -54,12 +55,12 @@ class StrategyService:
         except (SQLAlchemyError, ValueError) as e:
             raise RepositoryError("Failed to delete strategy.") from e
 
-    async def find_timestamp(self, strategy_name: str):
+    async def find_timeframe(self, vo: DefaultStrategyTimeframeVo) -> List[DefaultStrategyTimeframeVo]:
         try:
-            ret = await self.repository.find_timestamp(strategy_name=strategy_name)
-            return [r['timeframe'] for r in ret]
+            ret = await self.repository.find_timeframe(vo=vo)
+            return ret
         except (SQLAlchemyError, ValueError) as e:
-            raise RepositoryError("Failed to find strategy timestamp.") from e
+            raise RepositoryError("Failed to find strategy timeframe.") from e
 
     # use strategy_preparation_usecase
     async def build_strategy_instance(self, strategy_name: str) -> IStrategy:

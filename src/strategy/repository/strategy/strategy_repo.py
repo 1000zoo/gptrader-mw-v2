@@ -7,12 +7,13 @@ from src.common.db.connection import SessionLocal
 from src.common.db.util import common_insert, common_select
 from src.strategy.vo.strategy.default import DefaultStrategyVo
 from src.strategy.vo.strategy.filter import StrategyFilterVo
+from src.strategy.vo.strategy_timeframe.default import DefaultStrategyTimeframeVo
 
 
 class StrategyRepository:
     def __init__(self):
         self.TABLE_NAME = "strategy"
-        self.TIMESTAMP_TABLE = "strategy_timeframe"
+        self.TIMEFRAME_TABLE = "strategy_timeframe"
 
     async def insert_strategy(self, vo: DefaultStrategyVo) -> int:
         data = vo.model_dump(exclude_none=True)
@@ -93,8 +94,5 @@ class StrategyRepository:
             await session.commit()
             return result.rowcount
 
-    async def find_timestamp(self, strategy_name: str) -> Optional[List[str]]:
-        sql = text(f"SELECT timeframe FROM {self.TIMESTAMP_TABLE} WHERE strategy_name = :strategy_name")
-        async with SessionLocal() as session:
-            result = await session.execute(sql, {"strategy_name": strategy_name})
-            return result.mappings().all()
+    async def find_timeframe(self, vo: DefaultStrategyTimeframeVo) -> Optional[List[DefaultStrategyTimeframeVo]]:
+        return await common_select(self.TIMEFRAME_TABLE, vo, DefaultStrategyTimeframeVo)
