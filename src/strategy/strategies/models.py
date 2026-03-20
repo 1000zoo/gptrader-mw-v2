@@ -61,6 +61,7 @@ class StrategyInitConfig(BaseModel):
     timeframes: List[TF]
     lookback_by_tf: Dict[TF, int]
     params: Dict[str, Any] = {}
+    limit: Dict[TF, int] = {}
 
 
 class StrategyRunInput(BaseModel):
