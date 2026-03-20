@@ -120,7 +120,7 @@ class VolatilityBreakoutRegimeStrategy(IStrategy):
 
         ema_slow = self._to_float(indicator.get("ema_slow"))
         rsi = self._to_float(indicator.get("rsi"))
-        close = self._to_float(ohlcv.get("close"))
+        close = self._to_float(ohlcv.get("c_close"))
 
         if any(v is None for v in [ema_slow, rsi, close]):
             return self._hold("missing_required_fields")
