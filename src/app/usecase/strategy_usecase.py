@@ -20,12 +20,15 @@ class StrategyPreparationUseCase:
             DefaultStrategyTimeframeVo(strategy_name=vo.strategy_name)
         )
         timeframes = [cast(TF, tf.timeframe) for tf in strategy_tf]
+        limit = {cast(TF, tf.timeframe): tf.c_limit for tf in strategy_tf}
         lookback = {cast(TF, tf.timeframe): tf.lookback for tf in strategy_tf}
         strategy: IStrategy = load_class(vo.module_path, vo.module_name, IStrategy)
         strategy.init_strategy(StrategyInitConfig(
             strategy_name=vo.strategy_name,
             timeframes=timeframes,
-            lookback_by_tf=lookback
+            lookback_by_tf=lookback,
+            limit=limit,
+            params_id=vo.params_id
         ))
         return strategy
 

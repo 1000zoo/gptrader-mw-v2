@@ -1,8 +1,8 @@
 import pytest
 
-from src.app.usecase.strategy_preparation_usecase import StrategyPreparationUseCase
+from src.app.usecase.strategy_usecase import StrategyUseCase
 
-usecase = StrategyPreparationUseCase()
+usecase = StrategyUseCase()
 
 @pytest.mark.asyncio
 async def test_load_strategy_by_priority():
