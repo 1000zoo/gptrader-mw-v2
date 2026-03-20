@@ -1,7 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
+from loguru import logger
+
+from src.common.model.types import TF
 from src.strategy.strategies.IStrategy import IStrategy
 from src.strategy.strategies.models import StrategyDecision, StrategyInitConfig, StrategyRunInput
 
@@ -33,9 +36,14 @@ class VolatilityBreakoutRegimeStrategy(IStrategy):
 
     def run_strategy(self, data: StrategyRunInput) -> StrategyDecision:
         self.validate_input(data)
+        tf = cast(TF, self.tf)
 
         indicator = self._latest_row(data, self.tf)
-        ohlcv = data.ohlcv_by_tf.get(self.tf, {})
+        ohlcv = data.ohlcv_by_tf.get(tf)
+        if not ohlcv:
+            logger.error(f"ohlcv necessary")
+            raise Exception
+        ohlcv = ohlcv[0]
 
         ema_fast = self._to_float(indicator.get("ema_fast"))
         ema_slow = self._to_float(indicator.get("ema_slow"))
@@ -101,9 +109,14 @@ class VolatilityBreakoutRegimeStrategy(IStrategy):
 
     def run_exit_strategy(self, data: StrategyRunInput) -> StrategyDecision:
         self.validate_input(data)
+        tf = cast(TF, self.tf)
 
         indicator = self._latest_row(data, self.tf)
-        ohlcv = data.ohlcv_by_tf.get(self.tf, {})
+        ohlcv = data.ohlcv_by_tf.get(tf)
+        if not ohlcv:
+            logger.error("OHLCV necessary")
+            raise Exception
+        ohlcv = ohlcv[0]
 
         ema_slow = self._to_float(indicator.get("ema_slow"))
         rsi = self._to_float(indicator.get("rsi"))
@@ -137,7 +150,9 @@ class VolatilityBreakoutRegimeStrategy(IStrategy):
 
         return self._hold("keep_position", metadata=metadata)
 
-    def _latest_row(self, data: StrategyRunInput, tf: str) -> Dict[str, Any]:
+    @staticmethod
+    def _latest_row(data: StrategyRunInput, tf: str) -> Dict[str, Any]:
+        tf = cast(TF, tf)
         rows = data.indicators_by_tf.get(tf)
         if not rows:
             raise ValueError(f"no indicator rows for timeframe={tf}")
