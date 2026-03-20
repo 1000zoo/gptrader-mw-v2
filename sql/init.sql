@@ -930,10 +930,11 @@ CREATE TABLE public.trade_fill (
 );
 
 
-
 create table if not exists strategy_timeframe (
     strategy_name              VARCHAR(100) not NULL,
     timeframe     				VARCHAR(10) NOT null,
+    lookback					integer default 1,
+    c_limit						integer default 150,
     primary key (strategy_name, timeframe)
 );
 --
