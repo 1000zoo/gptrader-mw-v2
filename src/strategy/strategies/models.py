@@ -62,11 +62,12 @@ class StrategyInitConfig(BaseModel):
     lookback_by_tf: Dict[TF, int]
     params: Dict[str, Any] = {}
     limit: Dict[TF, int] = {}
+    params_id: str = "default_2"
 
 
 class StrategyRunInput(BaseModel):
     indicators_by_tf: Dict[TF, List[Dict[str, Any]]]
-    ohlcv_by_tf: Dict[TF, Dict[str, Any]]
+    ohlcv_by_tf: Dict[TF, List[Dict[str, Any]]]
     recent_analyzes: List[Dict[str, Any]] = []
 
 
