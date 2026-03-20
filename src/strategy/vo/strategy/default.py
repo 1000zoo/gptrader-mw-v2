@@ -14,6 +14,7 @@ class DefaultStrategyVo(Vo):
     params: Optional[Dict[str, Any]] = None
     version: Optional[str] = None
     priority: Optional[int] = None
+    params_id: Optional[str] = None
 
     class Config:
         from_attributes = True
