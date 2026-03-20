@@ -14,4 +14,9 @@ class IndicatorParamRepository:
         if not result:
             logger.error(f'params {vo.name} does not exist!')
             raise Exception
-        return result[0]
+        params = result[0]
+        if params.bollinger_k is not None:
+            params.bollinger_k = float(params.bollinger_k)
+        if params.keltner_m is not None:
+            params.keltner_m = float(params.keltner_m)
+        return params
