@@ -1,3 +1,4 @@
+import asyncio
 import os
 from typing import Optional, List
 
@@ -32,29 +33,34 @@ class MarketDataPreparationUseCase:
         self.indicator_param_service = IndicatorParamService()
         self.indicator_service = IndicatorService()
 
-    def _get_indicator_params(self, params_name: str = None):
+    async def _get_indicator_params(self, params_name: str = None):
         if not params_name:
             params_name = os.getenv('INDICATOR_PARAMS_NAME', 'default_2')
         vo = DefaultIndicatorParamsVo(name=params_name)
         try:
-            return self.indicator_param_service.find_params(vo)
+            return await self.indicator_param_service.find_params(vo)
         except Exception as e:
             logger.warning(f'indParams can not found, use default param set, {e}')
             return IndParams()
 
 
-    async def prepare_data(self, dto: PrepareDataDto):
-        ohlcv_vo = await self.ohlcv_master_service.only_fetch_candle(OhlcvFilterVo(
-            symbol_id=dto.symbol_id,
-            c_interval=dto.interval,
-            c_limit=dto.limit,
-        ))
-        indParam = self._get_indicator_params(dto.params_name)
+    async def prepare_data(self, dto_list: List[PrepareDataDto]) -> List[PreparedDataDto]:
+        async def process(dto) -> PreparedDataDto:
+            ohlcv_vo = await self.ohlcv_master_service.only_fetch_candle(OhlcvFilterVo(
+                symbol_id=dto.symbol_id,
+                c_interval=dto.interval,
+                c_limit=dto.limit,
+            ))
+            indParam = await self._get_indicator_params(dto.params_name)
 
-        indicators = IndicatorService.cal_indicators(ohlcv_vo, indParam)
+            indicators = IndicatorService.cal_indicators(ohlcv_vo, indParam)
+            return PreparedDataDto(
+                ohlcv=ohlcv_vo, indicators=indicators
+            )
 
-        return PreparedDataDto(
-            ohlcv=ohlcv_vo, indicators=indicators
+        results = await asyncio.gather(
+            *[process(dto) for dto in dto_list]
         )
+        return list(results)
 
-    ## Todo: 위는 analyze, strategy 용이고, backtest 용 추가 필요
+    ## Todo: 위는 analyze, strategy 용이고, backtest 용 추가 필요 (시간범위)
