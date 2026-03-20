@@ -69,3 +69,11 @@ class IStrategy(ABC):
     @abstractmethod
     def run_exit_strategy(self, data: StrategyRunInput) -> StrategyDecision:
         ...
+
+    @property
+    def limit_config(self):
+        return self._config.limit
+
+    @property
+    def params_id(self):
+        return self._config.params_id
