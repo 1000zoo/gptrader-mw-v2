@@ -7,11 +7,10 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from loguru import logger
 
-from src.common.logger.logger_config import setup_logging
 from src.common.exception.exception_handler import handle_top_level_exception_sync
+from src.common.logger.logger_config import setup_logging
 from src.research.runner import run_from_env
 from src.scheduler.executor import execute as scheduler_execute
-from src.scheduler.position_risk_executor import execute as position_risk_execute
 
 DEFAULT_EXECUTE_INTERVAL_SECONDS = 3600
 DEFAULT_RESEARCH_INTERVAL_SECONDS = 3600
@@ -65,16 +64,6 @@ async def setup_scheduler() -> None:
         next_run_time=tznow(scheduler),
         coalesce=True,
         misfire_grace_time=300,
-    )
-
-    scheduler.add_job(
-        position_risk_execute,
-        "interval",
-        seconds=risk_execute_interval,
-        id="position_risk_job",
-        next_run_time=tznow(scheduler),
-        coalesce=True,
-        misfire_grace_time=60,
     )
 
     scheduler.add_job(
