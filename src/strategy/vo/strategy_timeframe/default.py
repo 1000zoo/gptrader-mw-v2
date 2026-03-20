@@ -8,3 +8,4 @@ class DefaultStrategyTimeframeVo(Vo):
     strategy_name: str
     timeframe: Optional[TF] = None
     lookback: Optional[int] = None
+    c_limit: int = 150
