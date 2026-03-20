@@ -1,6 +1,6 @@
 import asyncio
 import os
-from typing import Optional, List
+from typing import Optional, List, cast
 
 from loguru import logger
 from pydantic import BaseModel
@@ -10,6 +10,7 @@ from src.binance.service.ohlcv.ohlcv_service import OhlcvService
 from src.binance.vo.ohlcv.default import DefaultOhlcvVo
 from src.binance.vo.ohlcv.filter import OhlcvFilterVo
 from src.common.model.params import IndParams
+from src.common.model.types import TF
 from src.indicators.service.indicator.indicator_service import IndicatorService
 from src.indicators.service.indicator_parameter.indParam_service import IndicatorParamService
 from src.indicators.vo.indicator.default import DefaultIndicatorVo
@@ -25,6 +26,8 @@ class PrepareDataDto(BaseModel):
 class PreparedDataDto(BaseModel):
     ohlcv: List[DefaultOhlcvVo]
     indicators: List[DefaultIndicatorVo]
+    symbol_id: str
+    tf: TF
 
 class MarketDataPreparationUseCase:
     def __init__(self):
@@ -55,7 +58,7 @@ class MarketDataPreparationUseCase:
 
             indicators = IndicatorService.cal_indicators(ohlcv_vo, indParam)
             return PreparedDataDto(
-                ohlcv=ohlcv_vo, indicators=indicators
+                ohlcv=ohlcv_vo, indicators=indicators, tf=cast(TF, dto.interval), symbol_id=dto.symbol_id
             )
 
         results = await asyncio.gather(
