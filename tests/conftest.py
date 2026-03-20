@@ -129,29 +129,6 @@ if "dotenv" not in sys.modules:
     dotenv_module.load_dotenv = load_dotenv
     sys.modules["dotenv"] = dotenv_module
 
-if "httpx" not in sys.modules:
-    httpx_module = types.ModuleType("httpx")
-
-    class DummyResponse:
-        def __init__(self):
-            self.status_code = 200
-
-        def raise_for_status(self):
-            return None
-
-        def json(self):
-            return {}
-
-    def get(*args, **kwargs):
-        return DummyResponse()
-
-    def post(*args, **kwargs):
-        return DummyResponse()
-
-    httpx_module.get = get
-    httpx_module.post = post
-    httpx_module.HTTPError = Exception
-    sys.modules["httpx"] = httpx_module
 
 if "openai" not in sys.modules:
     openai_module = types.ModuleType("openai")
