@@ -1,7 +1,8 @@
+from typing import List, Dict, Tuple
+
 import numpy as np
 import pandas as pd
 
-from typing import List, Dict, Tuple, Optional
 
 class Calculator:
     def __init__(self, ohlcv: List[Dict]):
@@ -230,7 +231,7 @@ class Calculator:
             "macd": self.macd(fast=ema_fast_w, slow=ema_slow_w, signal=macd_signal),
             "bollinger": self.bollinger(window=ma_fast_w, k=bollinger_k),
             "true_range": self.true_range(),
-            "atr": self.atr(atr=atr_w),
+            "atr": self.atr(window=atr_w),
             "dmi_adx": self.dmi_adx(window=atr_w),
             "stochastic_kd": self.stochastic_kd(k_period=kd_k_w, d_period=kd_d_w),
             "cci": self.cci(window=ma_fast_w),
