@@ -1,11 +1,11 @@
 import httpx
-
 from loguru import logger
 
-from src.binance.api.ohlcv.ohlcv_util import ohlcv_klines_serializer
 from src.binance.api.binance_util import get_settings
+from src.binance.api.ohlcv.ohlcv_util import ohlcv_klines_serializer
 from src.common.exception.external_api_error import ExternalApiError
 from src.common.exception.invalid_response_exception import InvalidResponseException
+
 
 class OHLCVApi:
     def __init__(self):

@@ -1,9 +1,10 @@
-from binance.um_futures import UMFutures
 from binance.error import ClientError
+from binance.um_futures import UMFutures
 
 from src.binance.api.binance_util import get_settings
 from src.common.exception.data_not_found_exception import DataNotFoundException
 from src.common.exception.external_api_error import ExternalApiError
+
 
 class AccountApi:
     def __init__(self):
@@ -36,5 +37,5 @@ class AccountApi:
         account = self.get_account()
         positions = account.get("positions")
         if positions is None:
-            raise DataNotFoundException("Account positions are missing.")
+            return []
         return positions

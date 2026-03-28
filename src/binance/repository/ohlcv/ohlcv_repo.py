@@ -26,3 +26,55 @@ class OhlcvRepository:
     
     async def select_ohlcv(self, vo: OhlcvFilterVo) -> List[DefaultOhlcvVo]:
         return await common_select(self.TABLE_NAME, vo, DefaultOhlcvVo)
+
+    async def select_recent_ohlcv(self, symbol_id: str, interval: str, limit: int) -> List[DefaultOhlcvVo]:
+        sql = text(
+            f"""
+            SELECT * FROM {self.TABLE_NAME}
+            WHERE symbol_id = :symbol_id
+              AND c_interval = :interval
+            ORDER BY COALESCE(ts, reg_dt) DESC, seq_no DESC
+            LIMIT :limit
+            """
+        )
+        async with SessionLocal() as session:
+            result = await session.execute(
+                sql,
+                {"symbol_id": symbol_id, "interval": interval, "limit": limit},
+            )
+            rows = result.mappings().all()
+            return [DefaultOhlcvVo(**r) for r in rows]
+
+    async def select_count_total_candles(self) -> int:
+        sql = text(
+            f"""
+            SELECT COUNT(*) FROM {self.TABLE_NAME}
+            """
+        )
+        async with SessionLocal() as session:
+            result = await session.execute(
+                sql,
+                {}
+            )
+            ret = result.mappings().all()
+            return ret[0]['count']
+
+    async def delete_candles(self, limit: int, symbol: str) -> int:
+        sql = text(
+            f"""
+            DELETE FROM ohlcv
+            WHERE id IN (
+                SELECT id
+                FROM ohlcv
+                WHERE SYMBOL_ID LIKE :symbol
+                LIMIT :limit
+            )
+            """
+        )
+        async with SessionLocal() as session:
+            result = await session.execute(
+                sql,
+                {'symbol': symbol, 'limit': limit}
+            )
+            print(result.rowcount)
+            await session.commit()

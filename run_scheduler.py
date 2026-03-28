@@ -7,13 +7,15 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from loguru import logger
 
-from src.common.logger.logger_config import setup_logging
+from src.app.schedulers.strategy.strategy_scheduler import execute as exit_strategy_execute
 from src.common.exception.exception_handler import handle_top_level_exception_sync
-from src.research.runner import run_from_env
+from src.common.logger.logger_config import setup_logging
 from src.scheduler.executor import execute as scheduler_execute
 
 DEFAULT_EXECUTE_INTERVAL_SECONDS = 3600
 DEFAULT_RESEARCH_INTERVAL_SECONDS = 3600
+DEFAULT_RISK_EXECUTE_INTERVAL_SECONDS = 60
+DEFAULT_EXIT_EXECUTE_INTERVAL_SECONDS = 60
 
 
 def tznow(scheduler: AsyncIOScheduler) -> datetime:
@@ -50,6 +52,14 @@ async def setup_scheduler() -> None:
         "RESEARCH_JOB_INTERVAL_SECONDS",
         DEFAULT_RESEARCH_INTERVAL_SECONDS,
     )
+    risk_execute_interval = _get_interval_seconds(
+        "RISK_EXECUTE_INTERVAL_SECONDS",
+        DEFAULT_RISK_EXECUTE_INTERVAL_SECONDS,
+    )
+    exit_execute_interval = _get_interval_seconds(
+        "EXIT_EXECUTE_INTERVAL_SECONDS",
+        DEFAULT_EXIT_EXECUTE_INTERVAL_SECONDS
+    )
 
     scheduler.add_job(
         scheduler_execute,
@@ -61,14 +71,24 @@ async def setup_scheduler() -> None:
         misfire_grace_time=300,
     )
 
+    # scheduler.add_job(
+    #     run_from_env,
+    #     "interval",
+    #     seconds=research_interval,
+    #     id="research_job",
+    #     next_run_time=tznow(scheduler),
+    #     coalesce=True,
+    #     misfire_grace_time=600,
+    # )
+
     scheduler.add_job(
-        run_from_env,
+        exit_strategy_execute,
         "interval",
-        seconds=research_interval,
-        id="research_job",
+        seconds=exit_execute_interval,
+        id="exit_strategy_monitoring",
         next_run_time=tznow(scheduler),
         coalesce=True,
-        misfire_grace_time=600,
+        misfire_grace_time=300,
     )
 
     scheduler.start()
