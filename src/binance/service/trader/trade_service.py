@@ -57,10 +57,6 @@ class TradeService:
         leverage = int(5 + (confidence - THRESHOLD) / (1.0 - THRESHOLD) * (15 - 5))
         percent_of_balance = round(0.2 + (confidence - THRESHOLD) / (1.0 - THRESHOLD) * (0.5 - 0.2), 2)
 
-        leverage_mult = dto.leverage_mult if dto.leverage_mult is not None else 1.0
-        size_mult = dto.position_size_mult if dto.position_size_mult is not None else 1.0
-        leverage = max(1, int(round(leverage * max(leverage_mult, 0.0))))
-        percent_of_balance = max(0.0, percent_of_balance * max(size_mult, 0.0))
         if percent_of_balance <= 0:
             raise InvalidRequestException("Position size is zero after regime policy.")
 
@@ -84,7 +80,6 @@ class TradeService:
         logger.bind(
             run_id=dto.batch_id,
             symbol=dto.symbol_id,
-            timeframe=dto.c_interval,
             entry_price=entry_price,
             action_id=None,
             job_id=dto.batch_id,
