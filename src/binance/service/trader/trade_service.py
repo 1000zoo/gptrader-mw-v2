@@ -224,3 +224,10 @@ class TradeService:
         if response is None or response.get("error") or response.get("success") is False:
             raise ExternalApiError("Cancel open orders response indicated failure.")
         return response
+
+    def close_position(self, symbol: str):
+        try:
+            return self.tradeApi.close_position(symbol)
+        except ExternalApiError as e:
+            logger.error(f"error at `service.close_position`: {e}")
+            raise ExternalApiError("Failed to close position.") from e
