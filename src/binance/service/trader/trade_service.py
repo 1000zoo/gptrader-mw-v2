@@ -3,18 +3,18 @@ from typing import Optional
 
 from loguru import logger
 
-from src.common.config import THRESHOLD
 from src.binance.api.trader.trade_api import TradeApi
 from src.binance.dto.trader.trade_execute_dto import TradeExecuteDto
-from src.common.exception.invalid_request_exception import InvalidRequestException
+from src.calibration.calibration_service import CalibrationService
+from src.common.config import THRESHOLD
 from src.common.exception.external_api_error import ExternalApiError
-from src.ops.service.system_state.system_state_service import SystemStateService
+from src.common.exception.invalid_request_exception import InvalidRequestException
 from src.ops.service.kill_switch.kill_switch_service import KillSwitchService
+from src.ops.service.system_state.system_state_service import SystemStateService
+from src.risk.risk_engine import RiskEngine
 from src.signal.service.signal_log.signal_log_service import SignalLogService
 from src.trade.service.trade_fill.trade_fill_service import TradeFillService
 from src.trade.vo.trade_fill.default import DefaultTradeFillVo
-from src.risk.risk_engine import RiskEngine
-from src.calibration.calibration_service import CalibrationService
 
 
 def _normalize_confidence(confidence: Optional[float]) -> Optional[float]:
@@ -224,3 +224,4 @@ class TradeService:
         if response is None or response.get("error") or response.get("success") is False:
             raise ExternalApiError("Cancel open orders response indicated failure.")
         return response
+
