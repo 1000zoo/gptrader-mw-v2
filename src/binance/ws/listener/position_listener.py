@@ -1,16 +1,18 @@
 import asyncio
-import websockets
 import json
+from typing import Dict
 
-from typing import Dict, List
-from binance.um_futures import UMFutures
+import websockets
 from binance.error import ClientError
+from binance.um_futures import UMFutures
 from loguru import logger
+from websockets.exceptions import WebSocketException
 
 from src.binance.api.binance_util import get_ws_settings
 from src.binance.ws.handler.event_filter import EventFilter
 from src.common.exception.external_api_error import ExternalApiError
-from websockets.exceptions import WebSocketException
+from src.ops.service.slack.slack_service import SlackService
+
 
 class PositionListener:
     def __init__(self):
@@ -20,6 +22,7 @@ class PositionListener:
         self.listen_key = None
         self.error_count = 0
         self.eventFilter = EventFilter()
+        self.slack_service = SlackService()
 
     async def start(self):
         resp = self.client.new_listen_key()
@@ -41,6 +44,7 @@ class PositionListener:
                     raise ExternalApiError("Websocket connection failed repeatedly.") from e
 
     async def _event_handler(self, message: Dict):
+        await self.slack_service.send_message("account_event", f"message: {message}")
         return await self.eventFilter.filter(message=message)
     
     def __filter_message(self, message: Dict):
