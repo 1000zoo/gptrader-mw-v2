@@ -25,7 +25,7 @@ class SlackSettingRepository:
     async def select_active_by_process(self, process_name: str) -> Optional[DefaultSlackSettingVo]:
         sql = text(
             "SELECT * FROM slack_setting "
-            "WHERE process_name = :process_name AND is_active = TRUE "
+            "WHERE process_name = :process_name AND is_active = 'Y' "
             "ORDER BY reg_dt DESC LIMIT 1"
         )
         async with SessionLocal() as session:

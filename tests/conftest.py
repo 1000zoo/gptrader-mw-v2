@@ -2,11 +2,16 @@ import sys
 import types
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from src.common.db.connection import init_db
 
 init_db()
 
 ROOT = Path(__file__).resolve().parents[1]
+
+load_dotenv()
+
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))
 
