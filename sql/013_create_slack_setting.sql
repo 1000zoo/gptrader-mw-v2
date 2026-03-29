@@ -32,3 +32,13 @@ insert into slack_setting (
 	'C0AP44YUBCP',
 	'test'
 );
+
+insert into slack_setting (
+	process_name ,
+	channel_id,
+	channel_name 
+) values (
+	'position_event',
+	'C0APYKFQ57B',
+	'position_event'
+);

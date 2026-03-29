@@ -44,7 +44,7 @@ class PositionListener:
                     raise ExternalApiError("Websocket connection failed repeatedly.") from e
 
     async def _event_handler(self, message: Dict):
-        await self.slack_service.send_message("account_event", f"message: {message}")
+        await self.slack_service.send_message("position_event", f"message: {message}")
         return await self.eventFilter.filter(message=message)
     
     def __filter_message(self, message: Dict):
