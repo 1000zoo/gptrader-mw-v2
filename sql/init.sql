@@ -863,7 +863,7 @@ ALTER SEQUENCE public.scheduler_id_seq OWNED BY public.scheduler.id;
 -- =========================================
 -- STRATEGY
 -- =========================================
-CREATE TABLE IF NOT EXISTS strategy (
+CREATE TABLE IF NOT EXISTS public.strategy (
     id              BIGSERIAL PRIMARY KEY,
     strategy_name   VARCHAR(100) NOT NULL,
     module_path     VARCHAR(255) NOT NULL,
@@ -889,10 +889,10 @@ CREATE TABLE IF NOT EXISTS strategy (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_strategy_name
-    ON strategy (strategy_name);
+    ON public.strategy (strategy_name);
 
 CREATE INDEX IF NOT EXISTS idx_strategy_use_yn
-    ON strategy (use_yn);
+    ON public.strategy (use_yn);
 
 
 CREATE TABLE public.trade_fill (
@@ -930,7 +930,7 @@ CREATE TABLE public.trade_fill (
 );
 
 
-create table if not exists strategy_timeframe (
+create table if not exists public.strategy_timeframe (
     strategy_name              VARCHAR(100) not NULL,
     timeframe     				VARCHAR(10) NOT null,
     lookback					integer default 1,
@@ -1336,11 +1336,11 @@ VALUES('regime_default', 60, 'close', 20, 60, 20, 60, 20, 14, 9, 2.0000, 14, 14,
 
 
 -- insert default strategy
-insert into strategy (strategy_name, module_path, module_name, params_id, use_yn) values
+insert into public.strategy (strategy_name, module_path, module_name, params_id, use_yn) values
 ('VolatilityBreakoutRegimeStrategy', 'src.strategy.strategies.volatility_breakout_regime_strategy', 'VolatilityBreakoutRegimeStrategy', 'default_2', 'Y');
 
-insert into strategy_timeframe (strategy_name, timeframe) values ('VolatilityBreakoutRegimeStrategy', '1m'); 
-insert into strategy_timeframe (strategy_name, timeframe) values ('VolatilityBreakoutRegimeStrategy', '5m');
+insert into public.strategy_timeframe (strategy_name, timeframe) values ('VolatilityBreakoutRegimeStrategy', '1m'); 
+insert into public.strategy_timeframe (strategy_name, timeframe) values ('VolatilityBreakoutRegimeStrategy', '5m');
 
 
 \unrestrict 6Ln0sCSjwcJffIl0xhtvmcdaPctdgGvfCi24J79UHcIELKrvXnxq8yqMoCvKQ0j
