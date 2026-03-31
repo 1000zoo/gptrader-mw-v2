@@ -19,7 +19,6 @@ CREATE TABLE slack_setting (
 );
 
 commit;
-drop table slack_setting ;
 
 select * from slack_setting;
 
