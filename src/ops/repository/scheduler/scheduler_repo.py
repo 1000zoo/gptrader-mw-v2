@@ -24,9 +24,11 @@ class SchedulerRepository:
 
     async def select_by_name(self, name: str) -> Optional[DefaultSchedulerVo]:
         sql = text(
-            "SELECT * FROM scheduler "
-            "WHERE name = :name "
-            "ORDER BY reg_dt DESC LIMIT 1"
+            f"""
+            SELECT * FROM {self.TABLE_NAME}
+            WHERE name = :name and use_yn = 'Y'
+            ORDER BY reg_dt DESC LIMIT 1
+            """
         )
         async with SessionLocal() as session:
             result = await session.execute(sql, {"name": name})
