@@ -1,4 +1,4 @@
-from datetime import datetime
+from typing import List
 
 from loguru import logger
 
@@ -29,11 +29,12 @@ class AnalyzeService:
         self,
         result: DefaultAnalyzeResultVo,
         action: DefaultAnalyzeActionVo,
-        sample: DefaultOhlcvVo,
-        window_start_ts: datetime,
-        window_end_ts: datetime,
+        ohlcvs: List[DefaultOhlcvVo],
         indicator_params_version: str,
     ) -> None:
+        sample = ohlcvs[0]
+        window_start_ts = min([ohlcv.ts for ohlcv in ohlcvs])
+        window_end_ts = max([ohlcv.ts for ohlcv in ohlcvs])
         raw_position = action.side
         final_action = action.side
         signal_log = DefaultSignalLogVo(
@@ -68,7 +69,7 @@ class AnalyzeService:
         await self._record_signal_log(
             result=result,
             action=action,
-            sample=analyzeInputDto.ohlcv[0],
+            ohlcvs=analyzeInputDto.ohlcv,
             indicator_params_version=analyzeInputDto.indParams.name
         )
 

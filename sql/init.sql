@@ -1343,4 +1343,16 @@ insert into public.strategy_timeframe (strategy_name, timeframe) values ('Volati
 insert into public.strategy_timeframe (strategy_name, timeframe) values ('VolatilityBreakoutRegimeStrategy', '5m');
 
 
+
+
+INSERT INTO public.scheduler
+(id, "name", state, last_run_dt, last_run_log, use_yn, attr1, attr2, attr3, attr4, attr5, attr6, attr7, attr8, attr9, attr10, reg_dt, upd_dt)
+VALUES(1, 'MainScheduler', 'Y', NULL, NULL, 'Y', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-03-06 23:16:58.173', NULL);
+INSERT INTO public.scheduler
+(id, "name", state, last_run_dt, last_run_log, use_yn, attr1, attr2, attr3, attr4, attr5, attr6, attr7, attr8, attr9, attr10, reg_dt, upd_dt)
+VALUES(3, 'BacktestScheduler', 'Y', NULL, NULL, 'Y', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-03-06 23:16:58.173', NULL);
+INSERT INTO public.scheduler
+(id, "name", state, last_run_dt, last_run_log, use_yn, attr1, attr2, attr3, attr4, attr5, attr6, attr7, attr8, attr9, attr10, reg_dt, upd_dt)
+VALUES(2, 'StrategyScheduler', 'Y', NULL, NULL, 'Y', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-03-06 23:16:58.173', NULL);
+
 \unrestrict 6Ln0sCSjwcJffIl0xhtvmcdaPctdgGvfCi24J79UHcIELKrvXnxq8yqMoCvKQ0j
