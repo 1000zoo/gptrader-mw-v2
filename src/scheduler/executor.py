@@ -83,8 +83,8 @@ class SchedulerExecutor:
             else:
                 for symbol in symbols:
                     action = await self._run_symbol(symbol)
-                    if not action:
-                        continue
+                    if action:
+                        actions.append(action)
 
             if not actions:
                 logger.info("no analyze action generated.")
