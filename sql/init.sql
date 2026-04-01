@@ -646,7 +646,7 @@ ALTER SEQUENCE public.position_event_id_seq OWNED BY public.position_event.id;
 CREATE TABLE public.signal_log (
     id bigint NOT NULL,
     run_id character varying(64),
-    job_run_id character varying(32),
+    job_run_id character varying(64),
     symbol_id character varying(16),
     c_interval character varying(20),
     base_ts timestamp with time zone,
@@ -654,7 +654,7 @@ CREATE TABLE public.signal_log (
     window_end_ts timestamp with time zone,
     n_candles integer,
     indicator_params_version character varying(64),
-    prompt_version character varying(64),
+    prompt_version character varying(100),
     model_name character varying(100),
     model_temperature numeric(6,3),
     raw_position character varying(10),
@@ -1280,7 +1280,7 @@ CREATE INDEX idx_signal_log_run_id ON public.signal_log USING btree (run_id);
 -- Name: idx_signal_log_symbol_interval_base_ts; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_signal_log_symbol_interval_base_ts ON public.signal_log USING btree (symbol_id, c_interval, base_ts DESC);
+CREATE INDEX idx_signal_log_symbol_interval_base_ts ON public.signal_log USING btree (job_run_id, symbol_id, c_interval, base_ts DESC);
 
 
 --
