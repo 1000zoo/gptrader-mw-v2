@@ -929,6 +929,25 @@ CREATE TABLE public.trade_fill (
     upd_dt timestamp with time zone
 );
 
+CREATE TABLE public.slack_setting (
+    id BIGSERIAL PRIMARY KEY,
+    process_name VARCHAR(100) NOT NULL,
+    channel_id VARCHAR(100),
+    channel_name VARCHAR(255),
+    is_active CHAR(1),
+    attr1 VARCHAR(100),
+    attr2 VARCHAR(100),
+    attr3 VARCHAR(100),
+    attr4 VARCHAR(100),
+    attr5 VARCHAR(100),
+    attr6 VARCHAR(100),
+    attr7 VARCHAR(100),
+    attr8 VARCHAR(100),
+    attr9 VARCHAR(100),
+    attr10 VARCHAR(100),
+    reg_dt TIMESTAMP,
+    upd_dt TIMESTAMP
+);
 
 create table if not exists public.strategy_timeframe (
     strategy_name              VARCHAR(100) not NULL,
@@ -1304,6 +1323,8 @@ CREATE INDEX idx_trade_fill_symbol_status ON public.trade_fill USING btree (symb
 CREATE UNIQUE INDEX ux_signal_log_decision ON public.signal_log USING btree (symbol_id, c_interval, base_ts, prompt_version, indicator_params_version);
 
 
+CREATE UNIQUE INDEX ux_slack_setting_process_name
+ON public.slack_setting (process_name);
 --
 -- PostgreSQL database dump complete
 --
