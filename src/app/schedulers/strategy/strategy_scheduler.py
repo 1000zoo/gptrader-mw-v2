@@ -15,14 +15,14 @@ class StrategyScheduler:
         self.strategy_usecase = StrategyUseCase()
         self.trade_service = TradeService()
 
-    def _can_start_exit_scheduler(self):
-        if not self.scheduler_service.is_valid_scheduler(self.name):
+    async def _can_start_exit_scheduler(self):
+        if not await self.scheduler_service.is_valid_scheduler(self.name):
             logger.info(f"{self.name} state is not Y")
             return False
         return True
 
     async def run_exit(self):
-        if not self._can_start_exit_scheduler():
+        if not await self._can_start_exit_scheduler():
             return
         job_position: JobPosition = await self.account_usecase.get_current_job_position()
         if not job_position:

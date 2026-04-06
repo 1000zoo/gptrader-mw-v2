@@ -646,7 +646,7 @@ ALTER SEQUENCE public.position_event_id_seq OWNED BY public.position_event.id;
 CREATE TABLE public.signal_log (
     id bigint NOT NULL,
     run_id character varying(64),
-    job_run_id character varying(32),
+    job_run_id character varying(64),
     symbol_id character varying(16),
     c_interval character varying(20),
     base_ts timestamp with time zone,
@@ -654,7 +654,7 @@ CREATE TABLE public.signal_log (
     window_end_ts timestamp with time zone,
     n_candles integer,
     indicator_params_version character varying(64),
-    prompt_version character varying(64),
+    prompt_version character varying(100),
     model_name character varying(100),
     model_temperature numeric(6,3),
     raw_position character varying(10),
@@ -863,7 +863,7 @@ ALTER SEQUENCE public.scheduler_id_seq OWNED BY public.scheduler.id;
 -- =========================================
 -- STRATEGY
 -- =========================================
-CREATE TABLE IF NOT EXISTS strategy (
+CREATE TABLE IF NOT EXISTS public.strategy (
     id              BIGSERIAL PRIMARY KEY,
     strategy_name   VARCHAR(100) NOT NULL,
     module_path     VARCHAR(255) NOT NULL,
@@ -889,10 +889,10 @@ CREATE TABLE IF NOT EXISTS strategy (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_strategy_name
-    ON strategy (strategy_name);
+    ON public.strategy (strategy_name);
 
 CREATE INDEX IF NOT EXISTS idx_strategy_use_yn
-    ON strategy (use_yn);
+    ON public.strategy (use_yn);
 
 
 CREATE TABLE public.trade_fill (
@@ -929,8 +929,27 @@ CREATE TABLE public.trade_fill (
     upd_dt timestamp with time zone
 );
 
+CREATE TABLE public.slack_setting (
+    id BIGSERIAL PRIMARY KEY,
+    process_name VARCHAR(100) NOT NULL,
+    channel_id VARCHAR(100),
+    channel_name VARCHAR(255),
+    is_active CHAR(1),
+    attr1 VARCHAR(100),
+    attr2 VARCHAR(100),
+    attr3 VARCHAR(100),
+    attr4 VARCHAR(100),
+    attr5 VARCHAR(100),
+    attr6 VARCHAR(100),
+    attr7 VARCHAR(100),
+    attr8 VARCHAR(100),
+    attr9 VARCHAR(100),
+    attr10 VARCHAR(100),
+    reg_dt TIMESTAMP,
+    upd_dt TIMESTAMP
+);
 
-create table if not exists strategy_timeframe (
+create table if not exists public.strategy_timeframe (
     strategy_name              VARCHAR(100) not NULL,
     timeframe     				VARCHAR(10) NOT null,
     lookback					integer default 1,
@@ -1280,7 +1299,7 @@ CREATE INDEX idx_signal_log_run_id ON public.signal_log USING btree (run_id);
 -- Name: idx_signal_log_symbol_interval_base_ts; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_signal_log_symbol_interval_base_ts ON public.signal_log USING btree (symbol_id, c_interval, base_ts DESC);
+CREATE INDEX idx_signal_log_symbol_interval_base_ts ON public.signal_log USING btree (job_run_id, symbol_id, c_interval, base_ts DESC);
 
 
 --
@@ -1304,6 +1323,8 @@ CREATE INDEX idx_trade_fill_symbol_status ON public.trade_fill USING btree (symb
 CREATE UNIQUE INDEX ux_signal_log_decision ON public.signal_log USING btree (symbol_id, c_interval, base_ts, prompt_version, indicator_params_version);
 
 
+CREATE UNIQUE INDEX ux_slack_setting_process_name
+ON public.slack_setting (process_name);
 --
 -- PostgreSQL database dump complete
 --
@@ -1336,11 +1357,23 @@ VALUES('regime_default', 60, 'close', 20, 60, 20, 60, 20, 14, 9, 2.0000, 14, 14,
 
 
 -- insert default strategy
-insert into strategy (strategy_name, module_path, module_name, params_id, use_yn) values
+insert into public.strategy (strategy_name, module_path, module_name, params_id, use_yn) values
 ('VolatilityBreakoutRegimeStrategy', 'src.strategy.strategies.volatility_breakout_regime_strategy', 'VolatilityBreakoutRegimeStrategy', 'default_2', 'Y');
 
-insert into strategy_timeframe (strategy_name, timeframe) values ('VolatilityBreakoutRegimeStrategy', '1m'); 
-insert into strategy_timeframe (strategy_name, timeframe) values ('VolatilityBreakoutRegimeStrategy', '5m');
+insert into public.strategy_timeframe (strategy_name, timeframe) values ('VolatilityBreakoutRegimeStrategy', '1m'); 
+insert into public.strategy_timeframe (strategy_name, timeframe) values ('VolatilityBreakoutRegimeStrategy', '5m');
 
+
+
+
+INSERT INTO public.scheduler
+(id, "name", state, last_run_dt, last_run_log, use_yn, attr1, attr2, attr3, attr4, attr5, attr6, attr7, attr8, attr9, attr10, reg_dt, upd_dt)
+VALUES(1, 'MainScheduler', 'Y', NULL, NULL, 'Y', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-03-06 23:16:58.173', NULL);
+INSERT INTO public.scheduler
+(id, "name", state, last_run_dt, last_run_log, use_yn, attr1, attr2, attr3, attr4, attr5, attr6, attr7, attr8, attr9, attr10, reg_dt, upd_dt)
+VALUES(3, 'BacktestScheduler', 'Y', NULL, NULL, 'Y', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-03-06 23:16:58.173', NULL);
+INSERT INTO public.scheduler
+(id, "name", state, last_run_dt, last_run_log, use_yn, attr1, attr2, attr3, attr4, attr5, attr6, attr7, attr8, attr9, attr10, reg_dt, upd_dt)
+VALUES(2, 'StrategyScheduler', 'Y', NULL, NULL, 'Y', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, '2026-03-06 23:16:58.173', NULL);
 
 \unrestrict 6Ln0sCSjwcJffIl0xhtvmcdaPctdgGvfCi24J79UHcIELKrvXnxq8yqMoCvKQ0j

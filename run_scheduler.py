@@ -7,8 +7,6 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from dotenv import load_dotenv
 from loguru import logger
 
-from src.app.schedulers.strategy.strategy_scheduler import execute as exit_strategy_execute
-from src.common.exception.exception_handler import handle_top_level_exception_sync
 from src.common.logger.logger_config import setup_logging
 from src.scheduler.executor import execute as scheduler_execute
 
@@ -81,15 +79,15 @@ async def setup_scheduler() -> None:
     #     misfire_grace_time=600,
     # )
 
-    scheduler.add_job(
-        exit_strategy_execute,
-        "interval",
-        seconds=exit_execute_interval,
-        id="exit_strategy_monitoring",
-        next_run_time=tznow(scheduler),
-        coalesce=True,
-        misfire_grace_time=300,
-    )
+    # scheduler.add_job(
+    #     exit_strategy_execute,
+    #     "interval",
+    #     seconds=exit_execute_interval,
+    #     id="exit_strategy_monitoring",
+    #     next_run_time=tznow(scheduler),
+    #     coalesce=True,
+    #     misfire_grace_time=300,
+    # )
 
     scheduler.start()
     logger.info("scheduler started")
@@ -109,9 +107,3 @@ if __name__ == "__main__":
         asyncio.run(setup_scheduler())
     except Exception as e:
         logger.exception(f"[MAIN] Scheduler crashed: {e}")
-        handle_top_level_exception_sync(
-            process_name="scheduler",
-            method="setup_scheduler",
-            error=e,
-        )
-        raise

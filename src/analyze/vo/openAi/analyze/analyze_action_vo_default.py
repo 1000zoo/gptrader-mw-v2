@@ -1,6 +1,5 @@
-from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel
+
 from src.common.model.base import Vo
 
 
@@ -11,7 +10,7 @@ class DefaultAnalyzeActionVo(Vo):
     batch_id: Optional[str] = None
     symbol_id: Optional[str] = None
 
-    side: Optional[str] = None             # 'LONG', 'SHORT', 'NONE'
+    side: Optional[str] = None             # 'long', 'short', 'wait'
     entry_price: Optional[float] = None
     tp: Optional[float] = None
     sl: Optional[float] = None

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import List, Optional
 
 from loguru import logger
@@ -14,12 +13,6 @@ from src.binance.executor.symbol.symbol_executor import SymbolExecutor
 from src.binance.executor.trader.account_executor import AccountExecutor
 from src.binance.executor.trader.trade_executor import TradeExecutor
 from src.binance.vo.symbol.default import DefaultSymbolVo
-from src.common.model.params import IndParams
-from src.common.util.date import reg_ymd_now
-from src.indicators.executor.indicator.indicator_executor import IndicatorExecutor
-from src.job.executor.job.job_executor import JobExecutor
-from src.job.vo.job.default import DefaultJobRunVo
-from src.regime.service.regime_service import RegimePolicy, RegimeService
 from src.common.constants.job_constants import (
     JOB_STATUS_DONE,
     JOB_STATUS_ERROR,
@@ -32,9 +25,15 @@ from src.common.constants.job_constants import (
     JOB_TYPE_POSITION_OPEN,
 )
 from src.common.exception.data_not_found_exception import DataNotFoundException
-from src.common.exception.invalid_request_exception import InvalidRequestException
 from src.common.exception.external_api_error import ExternalApiError
+from src.common.exception.invalid_request_exception import InvalidRequestException
 from src.common.exception.repository_error import RepositoryError
+from src.common.model.params import IndParams
+from src.common.util.date import reg_ymd_now
+from src.indicators.executor.indicator.indicator_executor import IndicatorExecutor
+from src.job.executor.job.job_executor import JobExecutor
+from src.job.vo.job.default import DefaultJobRunVo
+from src.regime.service.regime_service import RegimePolicy
 
 
 class SchedulerExecutor:
@@ -49,7 +48,6 @@ class SchedulerExecutor:
         self.tradeExecutor = TradeExecutor()
         self.jobExecutor = JobExecutor()
         self.accountExecutor = AccountExecutor()
-        self.regimeService = RegimeService()
 
     async def execute(self):
         try:
@@ -81,31 +79,18 @@ class SchedulerExecutor:
                     if not action.symbol_id:
                         logger.warning("failed action has no symbol_id, skip")
                         return None
-                    regime_result = await self.regimeService.compute_regime(action.symbol_id)
-                    filtered = self._apply_regime_policy(action, regime_result.regime)
-                    if filtered:
-                        actions.append(filtered)
-                        action_policy[self._action_key(filtered)] = self.regimeService.get_policy(regime_result.regime)
+                    actions.append(action)
             else:
                 for symbol in symbols:
-                    regime_result = await self.regimeService.compute_regime(symbol.symbol_id)
-                    policy = self.regimeService.get_policy(regime_result.regime)
-                    if not policy.allow_analyze:
-                        logger.info(f"skip analyze by regime policy: {symbol.symbol_id} [{regime_result.regime}]")
-                        continue
                     action = await self._run_symbol(symbol)
-                    if not action:
-                        continue
-                    filtered = self._apply_regime_policy(action, regime_result.regime)
-                    if filtered:
-                        actions.append(filtered)
-                        action_policy[self._action_key(filtered)] = policy
+                    if action:
+                        actions.append(action)
 
             if not actions:
                 logger.info("no analyze action generated.")
                 return None
 
-            filtered_actions = [action for action in actions if (action.side or "").lower() not in {"wait", "none"}]
+            filtered_actions = [action for action in actions if (action.side or "").lower() in {"long", "short"}]
             if not filtered_actions:
                 logger.info("no actionable analyze results generated.")
                 return None
@@ -240,22 +225,6 @@ class SchedulerExecutor:
         if side_upper in {"SHORT", "SELL"}:
             return "SELL"
         return None
-
-    def _apply_regime_policy(self, action: DefaultAnalyzeActionVo, regime: str) -> Optional[DefaultAnalyzeActionVo]:
-        policy = self.regimeService.get_policy(regime)
-        normalized_side = self._normalize_action_side(action.side)
-
-        if not policy.allow_entry:
-            logger.info(f"skip entry by regime policy: {action.symbol_id} [{regime}]")
-            return None
-
-        if normalized_side and policy.allowed_sides and normalized_side not in policy.allowed_sides:
-            logger.info(f"skip side by regime policy: {action.symbol_id} {action.side} [{regime}]")
-            return None
-
-        reason = action.reason or ""
-        action.reason = f"{reason} [regime={regime}]".strip()
-        return action
 
     @staticmethod
     def _extract_regime_tag(reason: Optional[str]) -> Optional[str]:
