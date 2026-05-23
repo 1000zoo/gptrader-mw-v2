@@ -39,8 +39,8 @@
 | A      | `src/domain/market`                           | `done`        | 없음                   | B, D, K          | 기초 시장 모델 고정 완료  |
 | B      | `src/domain/indicator`                        | `done`        | A                    | D, E, L          | 지표 결과 구조 고정 완료  |
 | C      | `src/domain/signal`                           | `done`        | 없음                   | D, E, F, G       | 판단 공통 언어 고정 완료  |
-| D      | `src/domain/strategy`                         | `done`        | A, B, C              | E, I, L          | 전략 계약 고정 완료    |
-| E      | `src/domain/signal_generator`                 | `not started` | C, D                 | I, K, L          | 전략 조합 규칙        |
+| D      | `src/domain/strategy`                         | `done`        | A, B, C              | E, I, L          | 전략 계약 고정 완료     |
+| E      | `src/domain/signal_generator`                 | `done`        | C, D                 | I, K, L          | 전략 조합 규칙 고정 완료  |
 | F      | `src/domain/risk`                             | `done`        | C                    | K                | 리스크 계산 언어 고정 완료 |
 | G      | `src/domain/position`                         | `done`        | C                    | H, T             | 포지션 상태 모델 고정 완료 |
 | H      | `src/domain/execution`                        | `not started` | C, G                 | J, N, K          | 주문 공통 계약        |
@@ -71,6 +71,14 @@
 ```
 
 ## 작업 로그
+
+### 2026-05-24 Module E
+
+- Agent: Codex
+- Status: `in progress` -> `done`
+- Plan: `docs/plans/2026-05-24-module-e-signal-generator.md`
+- Summary: `src/domain/signal_generator`에 `GeneratedSignal`, `SignalGenerator`, `CompositeSignalGenerator`, `RegimeSignalGenerator`를 추가하고, 전략 결과 조합 및 레짐 기반 위임 규칙을 테스트로 고정했다.
+- Follow-up: 다음 에이전트는 Module H의 주문/실행 계약을 진행하거나, Module I의 전략 수명주기 모델을 Module D/E 계약에 연결할 수 있다.
 
 ### 2026-05-24 Module F
 
