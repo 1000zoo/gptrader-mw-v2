@@ -41,7 +41,7 @@
 | C      | `src/domain/signal`                           | `done`        | 없음                   | D, E, F, G       | 판단 공통 언어 고정 완료  |
 | D      | `src/domain/strategy`                         | `done`        | A, B, C              | E, I, L          | 전략 계약 고정 완료    |
 | E      | `src/domain/signal_generator`                 | `not started` | C, D                 | I, K, L          | 전략 조합 규칙        |
-| F      | `src/domain/risk`                             | `not started` | C                    | K                | 순수 계산 유지        |
+| F      | `src/domain/risk`                             | `done`        | C                    | K                | 리스크 계산 언어 고정 완료 |
 | G      | `src/domain/position`                         | `done`        | C                    | H, T             | 포지션 상태 모델 고정 완료 |
 | H      | `src/domain/execution`                        | `not started` | C, G                 | J, N, K          | 주문 공통 계약        |
 | I      | `src/domain/lifecycle`                        | `not started` | C, D, E              | J, L, M, O       | 전략 수명주기 모델      |
@@ -71,6 +71,22 @@
 ```
 
 ## 작업 로그
+
+### 2026-05-24 Module F
+
+- Agent: Codex
+- Status: `in progress` -> `done`
+- Plan: `docs/plans/2026-05-24-module-f-risk.md`
+- Summary: `src/domain/risk`에 `ExposureLimit`, `RiskPolicy`, `PositionSizer` 계약을 추가하고, 계좌 입력 기반 노출 한도, 진입 차단 사유, 신뢰도 기반 포지션 사이징 규칙을 테스트로 고정했다.
+- Follow-up: 다음 에이전트는 Module H의 주문/실행 계약을 진행하거나, Module E의 전략 결과 조합 규칙을 정의할 수 있다.
+
+### 2026-05-24 Plan Document Enforcement
+
+- Agent: Codex
+- Status: `done`
+- Plan: `docs/codex.md`
+- Summary: 모든 에이전트가 구현 전 `docs/plans` 계획 문서를 작성하거나 갱신하도록 `docs/codex.md`와 `docs/plan/modules/README.md`에 하드 게이트를 추가했다. 계획 문서가 없으면 구현 시작, 완료 처리, `done` 상태 변경을 금지한다.
+- Follow-up: 다음 에이전트는 모듈 작업 시작 전과 종료 전 담당 모듈의 `docs/plans` 문서 존재 여부와 최신성을 반드시 확인한다.
 
 ### 2026-05-24 Module D
 
