@@ -46,7 +46,7 @@
 | H      | `src/domain/execution`                        | `done`        | C, G                 | J, N, K          | 주문 공통 계약 고정 완료   |
 | I      | `src/domain/lifecycle`                        | `done`        | C, D, E              | J, L, M, O       | 전략 수명주기 모델 고정 완료 |
 | J      | `src/domain/ports`                            | `done`        | 관련 도메인 모델            | K, L, M, N, O, P | 어댑터 계약 경계 고정 완료 |
-| K      | `src/application/usecases/trade`              | `not started` | A-J 중 거래 관련          | R, S, T          | 실거래 오케스트레이션      |
+| K      | `src/application/usecases/trade`              | `done`        | A-J 중 거래 관련          | R, S, T          | 거래 유스케이스 1차 완료   |
 | L      | `src/application/usecases/research`           | `not started` | B, C, D, E, I, J     | M, O             | 연구 흐름 분리         |
 | M      | `src/application/usecases/strategy_lifecycle` | `not started` | I, J, L              | R, S             | 등록-승격 흐름         |
 | N      | `src/infrastructure/exchange`                 | `not started` | J, 관련 도메인 모델         | K, T             | 거래소 adapter 분리   |
@@ -71,6 +71,14 @@
 ```
 
 ## 작업 로그
+
+### 2026-05-24 Module K
+
+- Agent: Codex
+- Status: `in progress` -> `done`
+- Plan: `docs/plans/2026-05-24-module-k-application-trade.md`
+- Summary: `src/application/usecases/trade`에 `ExecuteTradeUseCase`, `ClosePositionUseCase`, `SyncPositionUseCase`와 관련 command/result DTO를 추가했다. 시장 스냅샷 조회, 전략 컨텍스트 생성, 시그널 생성/로그 기록, 포지션 사이징, 리스크 검증, 시장가 진입 주문, reduce-only 청산 주문, 체결 리포트 기반 포지션 동기화 흐름을 테스트로 고정했다.
+- Follow-up: 다음 에이전트는 Module R/S/T에서 거래 유스케이스 호출 경계를 연결하거나, Module N의 거래소 어댑터에서 `OrderExecutionPort`와 `MarketDataPort` 구현을 진행할 수 있다.
 
 ### 2026-05-24 Module J
 
