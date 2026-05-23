@@ -39,7 +39,7 @@
 | A      | `src/domain/market`                           | `done`        | 없음                   | B, D, K          | 기초 시장 모델 고정 완료  |
 | B      | `src/domain/indicator`                        | `done`        | A                    | D, E, L          | 지표 결과 구조 고정 완료  |
 | C      | `src/domain/signal`                           | `done`        | 없음                   | D, E, F, G       | 판단 공통 언어 고정 완료  |
-| D      | `src/domain/strategy`                         | `not started` | A, B, C              | E, I, L          | 전략 계약 우선        |
+| D      | `src/domain/strategy`                         | `done`        | A, B, C              | E, I, L          | 전략 계약 고정 완료    |
 | E      | `src/domain/signal_generator`                 | `not started` | C, D                 | I, K, L          | 전략 조합 규칙        |
 | F      | `src/domain/risk`                             | `not started` | C                    | K                | 순수 계산 유지        |
 | G      | `src/domain/position`                         | `done`        | C                    | H, T             | 포지션 상태 모델 고정 완료 |
@@ -71,6 +71,13 @@
 ```
 
 ## 작업 로그
+
+### 2026-05-24 Module D
+
+- Agent: Codex
+- Status: `in progress` -> `done`
+- Summary: `src/domain/strategy`에 `StrategyContext`, `StrategyResult`, `Strategy` 프로토콜과 구현 확장 디렉토리 기준을 추가하고, 시장/지표 입력 정합성 및 전략 결과 계약을 테스트로 고정했다.
+- Follow-up: 다음 에이전트는 Module F의 리스크 계산 언어, Module H의 주문/실행 계약, 또는 Module E의 전략 결과 조합 규칙을 진행할 수 있다.
 
 ### 2026-05-24 Module B
 
