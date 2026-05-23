@@ -38,7 +38,7 @@
 | --- | --- | --- | --- | --- | --- |
 | A | `src/domain/market` | `done` | 없음 | B, D, K | 기초 시장 모델 고정 완료 |
 | B | `src/domain/indicator` | `not started` | A | D, E, L | 지표 결과 구조 정의 필요 |
-| C | `src/domain/signal` | `ready` | 없음 | D, E, F, G | 판단 공통 언어 |
+| C | `src/domain/signal` | `done` | 없음 | D, E, F, G | 판단 공통 언어 고정 완료 |
 | D | `src/domain/strategy` | `not started` | A, B, C | E, I, L | 전략 계약 우선 |
 | E | `src/domain/signal_generator` | `not started` | C, D | I, K, L | 전략 조합 규칙 |
 | F | `src/domain/risk` | `not started` | C | K | 순수 계산 유지 |
@@ -71,6 +71,13 @@
 ```
 
 ## 작업 로그
+
+### 2026-05-12 Module C
+
+- Agent: Codex
+- Status: `in progress` -> `done`
+- Summary: `src/domain/signal`에 `Signal`, `SignalReason`, `TradeDecision` 도메인 모델과 판단 방향/최종 행동 enum, 신뢰도 및 진입 방향 검증 테스트를 추가했다.
+- Follow-up: 다음 에이전트는 Module G를 진행하거나, Module C를 선행 조건으로 삼아 Module F의 리스크 계산 언어 또는 Module D의 전략 계약을 정의한다.
 
 ### 2026-05-12 Module A
 
