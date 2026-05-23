@@ -48,7 +48,7 @@
 | J      | `src/domain/ports`                            | `done`        | 관련 도메인 모델            | K, L, M, N, O, P | 어댑터 계약 경계 고정 완료 |
 | K      | `src/application/usecases/trade`              | `done`        | A-J 중 거래 관련          | R, S, T          | 거래 유스케이스 1차 완료   |
 | L      | `src/application/usecases/research`           | `done`        | B, C, D, E, I, J     | M, O             | 연구 흐름 분리 완료      |
-| M      | `src/application/usecases/strategy_lifecycle` | `not started` | I, J, L              | R, S             | 등록-승격 흐름         |
+| M      | `src/application/usecases/strategy_lifecycle` | `done`        | I, J, L              | R, S             | 등록-승격 흐름 완료      |
 | N      | `src/infrastructure/exchange`                 | `not started` | J, 관련 도메인 모델         | K, T             | 거래소 adapter 분리   |
 | O      | `src/infrastructure/persistence`              | `not started` | I, J                 | K, L, M          | 저장소 구현           |
 | P      | `src/infrastructure/llm`                      | `not started` | J, LLM 전략 계약         | D, E             | LLM adapter      |
@@ -71,6 +71,15 @@
 ```
 
 ## 작업 로그
+
+### 2026-05-24 Module M
+
+- Agent: Codex
+- Status: `in progress` -> `done`
+- Plan: `docs/plans/2026-05-24-module-m-application-strategy-lifecycle.md`
+- Design: `docs/plans/2026-05-24-module-m-application-strategy-lifecycle-design.md`
+- Summary: `src/application/usecases/strategy_lifecycle`에 `RegisterStrategyUseCase`, `PromoteStrategyUseCase`, `RunStrategyLifecycleUseCase`와 관련 command/result DTO를 추가했다. 전략/시그널 생성기 정의 등록, 평가 기반 승격 판단, 최신 또는 명시 평가 승격 실행 흐름을 `StrategyRepositoryPort`와 `PromotionPolicy` 경계로 고정했다.
+- Follow-up: 다음 에이전트는 Module O에서 lifecycle persistence adapter를 구현하거나, Module R/S에서 strategy lifecycle 유스케이스를 API와 스케줄러 진입점에 연결할 수 있다.
 
 ### 2026-05-24 Module L
 
