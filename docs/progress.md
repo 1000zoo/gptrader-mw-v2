@@ -34,28 +34,28 @@
 
 ## 전체 현황
 
-| Module | Path                                          | Status        | Depends On           | Next Targets     | Notes           |
-|--------|-----------------------------------------------|---------------|----------------------|------------------|-----------------|
-| A      | `src/domain/market`                           | `done`        | 없음                   | B, D, K          | 기초 시장 모델 고정 완료  |
-| B      | `src/domain/indicator`                        | `done`        | A                    | D, E, L          | 지표 결과 구조 고정 완료  |
-| C      | `src/domain/signal`                           | `done`        | 없음                   | D, E, F, G       | 판단 공통 언어 고정 완료  |
-| D      | `src/domain/strategy`                         | `done`        | A, B, C              | E, I, L          | 전략 계약 고정 완료     |
-| E      | `src/domain/signal_generator`                 | `done`        | C, D                 | I, K, L          | 전략 조합 규칙 고정 완료  |
-| F      | `src/domain/risk`                             | `done`        | C                    | K                | 리스크 계산 언어 고정 완료 |
-| G      | `src/domain/position`                         | `done`        | C                    | H, T             | 포지션 상태 모델 고정 완료 |
-| H      | `src/domain/execution`                        | `done`        | C, G                 | J, N, K          | 주문 공통 계약 고정 완료 |
-| I      | `src/domain/lifecycle`                        | `not started` | C, D, E              | J, L, M, O       | 전략 수명주기 모델      |
-| J      | `src/domain/ports`                            | `not started` | 관련 도메인 모델            | K, L, M, N, O, P | 어댑터 계약 경계       |
-| K      | `src/application/usecases/trade`              | `not started` | A-J 중 거래 관련          | R, S, T          | 실거래 오케스트레이션     |
-| L      | `src/application/usecases/research`           | `not started` | B, C, D, E, I, J     | M, O             | 연구 흐름 분리        |
-| M      | `src/application/usecases/strategy_lifecycle` | `not started` | I, J, L              | R, S             | 등록-승격 흐름        |
-| N      | `src/infrastructure/exchange`                 | `not started` | J, 관련 도메인 모델         | K, T             | 거래소 adapter 분리  |
-| O      | `src/infrastructure/persistence`              | `not started` | I, J                 | K, L, M          | 저장소 구현          |
-| P      | `src/infrastructure/llm`                      | `not started` | J, LLM 전략 계약         | D, E             | LLM adapter     |
-| Q      | `src/infrastructure/messaging`                | `not started` | 알림 포트 확정 시           | M                | 운영 알림 보조        |
-| R      | `src/interfaces/api`                          | `not started` | 관련 application 유스케이스 | 운영 연동            | HTTP 진입점        |
-| S      | `src/interfaces/scheduler`                    | `not started` | K, M                 | 운영 배포 설정         | 스케줄 엔트리         |
-| T      | `src/interfaces/websocket`                    | `not started` | G, K, N              | 운영 모니터링          | 실시간 포지션 이벤트     |
+| Module | Path                                          | Status        | Depends On           | Next Targets     | Notes            |
+|--------|-----------------------------------------------|---------------|----------------------|------------------|------------------|
+| A      | `src/domain/market`                           | `done`        | 없음                   | B, D, K          | 기초 시장 모델 고정 완료   |
+| B      | `src/domain/indicator`                        | `done`        | A                    | D, E, L          | 지표 결과 구조 고정 완료   |
+| C      | `src/domain/signal`                           | `done`        | 없음                   | D, E, F, G       | 판단 공통 언어 고정 완료   |
+| D      | `src/domain/strategy`                         | `done`        | A, B, C              | E, I, L          | 전략 계약 고정 완료      |
+| E      | `src/domain/signal_generator`                 | `done`        | C, D                 | I, K, L          | 전략 조합 규칙 고정 완료   |
+| F      | `src/domain/risk`                             | `done`        | C                    | K                | 리스크 계산 언어 고정 완료  |
+| G      | `src/domain/position`                         | `done`        | C                    | H, T             | 포지션 상태 모델 고정 완료  |
+| H      | `src/domain/execution`                        | `done`        | C, G                 | J, N, K          | 주문 공통 계약 고정 완료   |
+| I      | `src/domain/lifecycle`                        | `done`        | C, D, E              | J, L, M, O       | 전략 수명주기 모델 고정 완료 |
+| J      | `src/domain/ports`                            | `not started` | 관련 도메인 모델            | K, L, M, N, O, P | 어댑터 계약 경계        |
+| K      | `src/application/usecases/trade`              | `not started` | A-J 중 거래 관련          | R, S, T          | 실거래 오케스트레이션      |
+| L      | `src/application/usecases/research`           | `not started` | B, C, D, E, I, J     | M, O             | 연구 흐름 분리         |
+| M      | `src/application/usecases/strategy_lifecycle` | `not started` | I, J, L              | R, S             | 등록-승격 흐름         |
+| N      | `src/infrastructure/exchange`                 | `not started` | J, 관련 도메인 모델         | K, T             | 거래소 adapter 분리   |
+| O      | `src/infrastructure/persistence`              | `not started` | I, J                 | K, L, M          | 저장소 구현           |
+| P      | `src/infrastructure/llm`                      | `not started` | J, LLM 전략 계약         | D, E             | LLM adapter      |
+| Q      | `src/infrastructure/messaging`                | `not started` | 알림 포트 확정 시           | M                | 운영 알림 보조         |
+| R      | `src/interfaces/api`                          | `not started` | 관련 application 유스케이스 | 운영 연동            | HTTP 진입점         |
+| S      | `src/interfaces/scheduler`                    | `not started` | K, M                 | 운영 배포 설정         | 스케줄 엔트리          |
+| T      | `src/interfaces/websocket`                    | `not started` | G, K, N              | 운영 모니터링          | 실시간 포지션 이벤트      |
 
 ## 작업 로그 템플릿
 
@@ -71,6 +71,14 @@
 ```
 
 ## 작업 로그
+
+### 2026-05-24 Module I
+
+- Agent: Codex
+- Status: `in progress` -> `done`
+- Plan: `docs/plans/2026-05-24-module-i-lifecycle.md`
+- Summary: `src/domain/lifecycle`에 `StrategyDefinition`, `SignalGeneratorDefinition`, `StrategyEvaluation`, `PromotionPolicy`를 추가하고, 전략 정의/조합 정의/평가 지표/승격 가능 여부 판단 규칙을 테스트로 고정했다.
+- Follow-up: 다음 에이전트는 Module J에서 lifecycle 저장 및 오케스트레이션에 필요한 포트 계약을 정의하거나, Module L/M/O에서 이 lifecycle 모델을 사용할 수 있다.
 
 ### 2026-05-24 Module H
 
