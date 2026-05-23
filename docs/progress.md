@@ -49,7 +49,7 @@
 | K      | `src/application/usecases/trade`              | `done`        | A-J 중 거래 관련          | R, S, T          | 거래 유스케이스 1차 완료   |
 | L      | `src/application/usecases/research`           | `done`        | B, C, D, E, I, J     | M, O             | 연구 흐름 분리 완료      |
 | M      | `src/application/usecases/strategy_lifecycle` | `done`        | I, J, L              | R, S             | 등록-승격 흐름 완료      |
-| N      | `src/infrastructure/exchange`                 | `not started` | J, 관련 도메인 모델         | K, T             | 거래소 adapter 분리   |
+| N      | `src/infrastructure/exchange`                 | `done`        | J, 관련 도메인 모델         | K, T             | 1차 adapter 경계 완료, 실 Binance 연동 후속 필요 |
 | O      | `src/infrastructure/persistence`              | `not started` | I, J                 | K, L, M          | 저장소 구현           |
 | P      | `src/infrastructure/llm`                      | `not started` | J, LLM 전략 계약         | D, E             | LLM adapter      |
 | Q      | `src/infrastructure/messaging`                | `not started` | 알림 포트 확정 시           | M                | 운영 알림 보조         |
@@ -71,6 +71,14 @@
 ```
 
 ## 작업 로그
+
+### 2026-05-24 Module N
+
+- Agent: Codex
+- Status: `in progress` -> `done`
+- Plan: `docs/plans/2026-05-24-module-n-infrastructure-exchange.md`
+- Summary: `src/infrastructure/exchange/binance` 아래에 시장 데이터, 계좌, 주문 실행, 포지션 스트림 책임별 패키지를 만들고 Binance용 mapper/adapter 1차 구조를 추가했다. adapter는 주입된 client를 통해 포트 계약을 구현하고, raw Binance payload를 도메인 `Candle`, `MarketSnapshot`, `AccountSnapshot`, `OrderResult`로 변환하도록 테스트로 고정했다. 이후 Upbit 등 다른 거래소는 `src/infrastructure/exchange/upbit` 같은 형제 디렉토리로 추가한다.
+- Follow-up: 실제 Binance REST/futures client 생성, 인증 설정, retry/timeout/rate-limit/error translation, `load_execution_reports` 구현, authenticated position/user-data stream runtime은 다음 Module N 후속 작업 또는 Module T 연결 작업에서 진행해야 한다. 이 후속 범위는 `docs/plans/2026-05-24-module-n-infrastructure-exchange.md`와 `src/infrastructure/exchange/binance/position_stream/README.md`에도 기록되어 있다.
 
 ### 2026-05-24 Module M
 
