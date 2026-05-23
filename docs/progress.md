@@ -47,7 +47,7 @@
 | I      | `src/domain/lifecycle`                        | `done`        | C, D, E              | J, L, M, O       | 전략 수명주기 모델 고정 완료 |
 | J      | `src/domain/ports`                            | `done`        | 관련 도메인 모델            | K, L, M, N, O, P | 어댑터 계약 경계 고정 완료 |
 | K      | `src/application/usecases/trade`              | `done`        | A-J 중 거래 관련          | R, S, T          | 거래 유스케이스 1차 완료   |
-| L      | `src/application/usecases/research`           | `not started` | B, C, D, E, I, J     | M, O             | 연구 흐름 분리         |
+| L      | `src/application/usecases/research`           | `done`        | B, C, D, E, I, J     | M, O             | 연구 흐름 분리 완료      |
 | M      | `src/application/usecases/strategy_lifecycle` | `not started` | I, J, L              | R, S             | 등록-승격 흐름         |
 | N      | `src/infrastructure/exchange`                 | `not started` | J, 관련 도메인 모델         | K, T             | 거래소 adapter 분리   |
 | O      | `src/infrastructure/persistence`              | `not started` | I, J                 | K, L, M          | 저장소 구현           |
@@ -71,6 +71,15 @@
 ```
 
 ## 작업 로그
+
+### 2026-05-24 Module L
+
+- Agent: Codex
+- Status: `in progress` -> `done`
+- Plan: `docs/plans/2026-05-24-module-l-application-research.md`
+- Design: `docs/plans/2026-05-24-module-l-application-research-design.md`
+- Summary: `src/application/usecases/research`에 `BacktestStrategyUseCase`, `DryRunStrategyUseCase`, `EvaluateStrategyUseCase`와 연구용 command/result DTO를 추가했다. 연구 흐름은 시장 스냅샷 조회, 전략/시그널 생성기 실행, lifecycle 평가 생성까지만 담당하고 실거래 주문 실행과 persistence 포트는 사용하지 않도록 테스트로 고정했다.
+- Follow-up: 다음 에이전트는 Module M에서 전략 등록-평가-승격 흐름을 application 경계로 묶거나, Module O에서 lifecycle/research 결과 저장소 구현을 진행할 수 있다.
 
 ### 2026-05-24 Module K
 
