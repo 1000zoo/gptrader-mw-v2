@@ -43,7 +43,7 @@
 | E      | `src/domain/signal_generator`                 | `done`        | C, D                 | I, K, L          | 전략 조합 규칙 고정 완료  |
 | F      | `src/domain/risk`                             | `done`        | C                    | K                | 리스크 계산 언어 고정 완료 |
 | G      | `src/domain/position`                         | `done`        | C                    | H, T             | 포지션 상태 모델 고정 완료 |
-| H      | `src/domain/execution`                        | `not started` | C, G                 | J, N, K          | 주문 공통 계약        |
+| H      | `src/domain/execution`                        | `done`        | C, G                 | J, N, K          | 주문 공통 계약 고정 완료 |
 | I      | `src/domain/lifecycle`                        | `not started` | C, D, E              | J, L, M, O       | 전략 수명주기 모델      |
 | J      | `src/domain/ports`                            | `not started` | 관련 도메인 모델            | K, L, M, N, O, P | 어댑터 계약 경계       |
 | K      | `src/application/usecases/trade`              | `not started` | A-J 중 거래 관련          | R, S, T          | 실거래 오케스트레이션     |
@@ -71,6 +71,14 @@
 ```
 
 ## 작업 로그
+
+### 2026-05-24 Module H
+
+- Agent: Codex
+- Status: `in progress` -> `done`
+- Plan: `docs/plans/2026-05-24-module-h-execution.md`
+- Summary: `src/domain/execution`에 `OrderRequest`, `OrderResult`, `ExecutionReport`를 추가하고, 주문 요청 검증, 주문 결과 상태 표현, 체결 리포트의 포지션 이벤트 변환 규칙을 테스트로 고정했다.
+- Follow-up: 다음 에이전트는 Module I의 전략 수명주기 모델을 진행하거나, Module J에서 실행 포트를 Module H 계약에 연결할 수 있다.
 
 ### 2026-05-24 Module E
 
