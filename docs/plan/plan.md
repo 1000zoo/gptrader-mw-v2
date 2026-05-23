@@ -57,6 +57,15 @@ src/
     cli/
 
   main.py
+
+sql/
+  ddl/
+    tables/
+    indexes/
+    constraints/
+  tests/
+  plans/
+  seeds/
 ```
 
 ## 3. 레이어별 역할
@@ -78,6 +87,7 @@ src/
 - 거래소, DB, LLM, 메신저, 설정, 외부 입출력을 구현한다.
 - 상위 레이어에 필요한 포트를 실제 어댑터로 채운다.
 - 외부 응답 형식과 재시도 정책은 이 레이어에 숨긴다.
+- DB 스키마 원본 DDL은 `./sql`에서 관리하고, 이 레이어는 저장소 구현과 마이그레이션 적용을 담당한다.
 
 ### 3.4 `src/interfaces`
 
@@ -349,10 +359,17 @@ src/
 - 책임
   - 도메인 포트에 대한 DB 구현
   - 전략 정의, 시그널 로그, 평가 결과, 포지션 이벤트 저장
+  - `./sql`의 테이블별 DDL, 인덱스, 제약조건 관리 기준 확정
 - 포함 범위
   - `repositories/`
   - `models/`
   - `migrations/`
+  - `sql/ddl/tables/`
+  - `sql/ddl/indexes/`
+  - `sql/ddl/constraints/`
+  - `sql/tests/`
+  - `sql/plans/`
+  - `sql/seeds/`
 - 선행 의존성
   - Module I
   - Module J
@@ -360,6 +377,7 @@ src/
   - 모델 확정 후 가능
 - 비고
   - `v2-backup/sql`은 테이블 아이디어만 참고한다.
+  - 모든 테이블 DDL은 `reg_ymd`, `reg_dt`, `upd_dt`, `use_yn` 공통 컬럼을 포함해야 한다.
 
 ### Module P. `src/infrastructure/llm`
 
