@@ -50,12 +50,18 @@
 | L      | `src/application/usecases/research`           | `done`        | B, C, D, E, I, J     | M, O             | 연구 흐름 분리 완료      |
 | M      | `src/application/usecases/strategy_lifecycle` | `done`        | I, J, L              | R, S             | 등록-승격 흐름 완료      |
 | N      | `src/infrastructure/exchange`                 | `done`        | J, 관련 도메인 모델         | K, T             | 1차 adapter 경계 완료, 실 Binance 연동 후속 필요 |
-| O      | `src/infrastructure/persistence`              | `not started` | I, J                 | K, L, M          | 저장소 구현           |
+| O      | `src/infrastructure/persistence`              | `done`        | I, J                 | K, L, M          | 저장소 구현 완료        |
 | P      | `src/infrastructure/llm`                      | `not started` | J, LLM 전략 계약         | D, E             | LLM adapter      |
 | Q      | `src/infrastructure/messaging`                | `not started` | 알림 포트 확정 시           | M                | 운영 알림 보조         |
 | R      | `src/interfaces/api`                          | `not started` | 관련 application 유스케이스 | 운영 연동            | HTTP 진입점         |
 | S      | `src/interfaces/scheduler`                    | `not started` | K, M                 | 운영 배포 설정         | 스케줄 엔트리          |
 | T      | `src/interfaces/websocket`                    | `not started` | G, K, N              | 운영 모니터링          | 실시간 포지션 이벤트      |
+
+## 후속 작업
+
+| Item | Path | Status | Depends On | Notes |
+|------|------|--------|------------|-------|
+| SQL-DOMAIN-PERSISTENCE | `docs/plan/sql/domain-persistence-roadmap.md` | `ready` | Module O | 추가 도메인 객체 DDL 확장 필요. 우선순위는 포지션/주문/체결, 시장/지표/시그널 입력, 리스크/승격 정책 순서로 기록됨. |
 
 ## 작업 로그 템플릿
 
@@ -71,6 +77,15 @@
 ```
 
 ## 작업 로그
+
+### 2026-05-24 Module O
+
+- Agent: Codex
+- Status: `in progress` -> `done`
+- Plan: `docs/plans/2026-05-24-module-o-infrastructure-persistence.md`
+- Design: `docs/plans/2026-05-24-module-o-infrastructure-persistence-design.md`
+- Summary: `src/infrastructure/persistence`에 SQLite 기반 `StrategyRepositoryPort`, `SignalLogRepositoryPort` adapter를 추가하고 lifecycle 정의, generator 정의, 평가 결과, generated signal log가 도메인 객체로 round-trip 되도록 테스트로 고정했다. `sql/ddl`, `sql/tests`, `sql/plans`, `sql/seeds`에 persistence 테이블/인덱스/제약조건/checklist 기준도 추가했다.
+- Follow-up: 추가 도메인 객체 DDL 확장은 `docs/plan/sql/domain-persistence-roadmap.md` 기준으로 나중에 진행한다. 다음 에이전트는 Module P에서 LLM adapter를 진행하거나, Module R/S/T에서 application usecase를 API, scheduler, websocket 진입점으로 연결할 수 있다. 운영 DB 전환 시 PostgreSQL migration은 `src/infrastructure/persistence/migrations`와 `sql/ddl` 기준을 사용한다.
 
 ### 2026-05-24 Module N
 
