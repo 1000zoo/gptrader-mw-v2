@@ -45,7 +45,7 @@
 | G      | `src/domain/position`                         | `done`        | C                    | H, T             | 포지션 상태 모델 고정 완료  |
 | H      | `src/domain/execution`                        | `done`        | C, G                 | J, N, K          | 주문 공통 계약 고정 완료   |
 | I      | `src/domain/lifecycle`                        | `done`        | C, D, E              | J, L, M, O       | 전략 수명주기 모델 고정 완료 |
-| J      | `src/domain/ports`                            | `not started` | 관련 도메인 모델            | K, L, M, N, O, P | 어댑터 계약 경계        |
+| J      | `src/domain/ports`                            | `done`        | 관련 도메인 모델            | K, L, M, N, O, P | 어댑터 계약 경계 고정 완료 |
 | K      | `src/application/usecases/trade`              | `not started` | A-J 중 거래 관련          | R, S, T          | 실거래 오케스트레이션      |
 | L      | `src/application/usecases/research`           | `not started` | B, C, D, E, I, J     | M, O             | 연구 흐름 분리         |
 | M      | `src/application/usecases/strategy_lifecycle` | `not started` | I, J, L              | R, S             | 등록-승격 흐름         |
@@ -71,6 +71,14 @@
 ```
 
 ## 작업 로그
+
+### 2026-05-24 Module J
+
+- Agent: Codex
+- Status: `in progress` -> `done`
+- Plan: `docs/plans/2026-05-24-module-j-ports.md`
+- Summary: `src/domain/ports`에 시장 데이터, 계좌, 주문 실행, 전략 저장소, 시그널 로그 저장소 포트 계약을 추가하고, 계좌 잔고 및 시그널 로그 항목의 기본 불변조건을 테스트로 고정했다.
+- Follow-up: 다음 에이전트는 Module K/L/M에서 이 포트 계약으로 application 유스케이스를 설계하거나, Module N/O에서 exchange/persistence adapter 구현을 진행할 수 있다.
 
 ### 2026-05-24 Module I
 
