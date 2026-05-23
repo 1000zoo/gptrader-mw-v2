@@ -11,8 +11,9 @@
 2. `docs/progress.md`를 읽는다.
 3. `docs/plan/modules/README.md`를 읽는다.
 4. 자신이 맡을 모듈의 상세 문서를 읽는다.
-5. `docs/progress.md`에서 해당 모듈 상태를 `in progress`로 바꾼다.
-6. 그 뒤에만 구현, 수정, 테스트를 시작한다.
+5. `docs/plans/YYYY-MM-DD-module-x-name.md` 형식의 모듈 구현 계획 문서를 작성하거나 최신 상태로 갱신한다.
+6. `docs/progress.md`에서 해당 모듈 상태를 `in progress`로 바꾼다.
+7. 그 뒤에만 구현, 수정, 테스트를 시작한다.
 
 이 순서를 건너뛰면 안 된다.
 

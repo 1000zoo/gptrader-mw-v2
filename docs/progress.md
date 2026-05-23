@@ -37,7 +37,7 @@
 | Module | Path                                          | Status        | Depends On           | Next Targets     | Notes           |
 |--------|-----------------------------------------------|---------------|----------------------|------------------|-----------------|
 | A      | `src/domain/market`                           | `done`        | 없음                   | B, D, K          | 기초 시장 모델 고정 완료  |
-| B      | `src/domain/indicator`                        | `not started` | A                    | D, E, L          | 지표 결과 구조 정의 필요  |
+| B      | `src/domain/indicator`                        | `done`        | A                    | D, E, L          | 지표 결과 구조 고정 완료  |
 | C      | `src/domain/signal`                           | `done`        | 없음                   | D, E, F, G       | 판단 공통 언어 고정 완료  |
 | D      | `src/domain/strategy`                         | `not started` | A, B, C              | E, I, L          | 전략 계약 우선        |
 | E      | `src/domain/signal_generator`                 | `not started` | C, D                 | I, K, L          | 전략 조합 규칙        |
@@ -71,6 +71,13 @@
 ```
 
 ## 작업 로그
+
+### 2026-05-24 Module B
+
+- Agent: Codex
+- Status: `in progress` -> `done`
+- Summary: `src/domain/indicator`에 `IndicatorValue`, `IndicatorSet`, `IndicatorCalculator` 계약을 추가하고, 지표 키 정규화, 단일 캔들 시점의 지표 집합, 계산기 포트 경계를 테스트로 고정했다.
+- Follow-up: 다음 에이전트는 Module D의 전략 계약을 진행하거나, Module F의 리스크 계산 언어 또는 Module H의 주문/실행 계약을 정의할 수 있다.
 
 ### 2026-05-24 Module G
 
