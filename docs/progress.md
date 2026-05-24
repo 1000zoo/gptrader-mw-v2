@@ -51,7 +51,7 @@
 | M      | `src/application/usecases/strategy_lifecycle` | `done`        | I, J, L              | R, S             | 등록-승격 흐름 완료      |
 | N      | `src/infrastructure/exchange`                 | `done`        | J, 관련 도메인 모델         | K, T             | 1차 adapter 경계 완료, 실 Binance 연동 후속 필요 |
 | O      | `src/infrastructure/persistence`              | `done`        | I, J                 | K, L, M          | 저장소 구현 완료        |
-| P      | `src/infrastructure/llm`                      | `not started` | J, LLM 전략 계약         | D, E             | LLM adapter      |
+| P      | `src/infrastructure/llm`                      | `done`        | J, LLM 전략 계약         | D, E             | LLM adapter      |
 | Q      | `src/infrastructure/messaging`                | `not started` | 알림 포트 확정 시           | M                | 운영 알림 보조         |
 | R      | `src/interfaces/api`                          | `not started` | 관련 application 유스케이스 | 운영 연동            | HTTP 진입점         |
 | S      | `src/interfaces/scheduler`                    | `not started` | K, M                 | 운영 배포 설정         | 스케줄 엔트리          |
@@ -77,6 +77,15 @@
 ```
 
 ## 작업 로그
+
+### 2026-05-24 Module P
+
+- Agent: Codex
+- Status: `in progress` -> `done`
+- Plan: `docs/plans/2026-05-24-module-p-infrastructure-llm.md`
+- Design: `docs/plans/2026-05-24-module-p-infrastructure-llm-design.md`
+- Summary: `src/infrastructure/llm`에 vendor-neutral LLM 경계를 추가했다. `PromptBuilder`는 `StrategyContext`를 deterministic prompt payload로 조립하고, `LLMClient`는 주입된 low-level client를 호출하며 SDK/transport 실패를 `LLMClientError`로 번역한다. `ResponseParser`는 strict JSON 응답을 기존 `StrategyResult`, `Signal`, `SignalReason`으로 변환하고 파싱 실패를 `LLMResponseParseError`로 번역한다.
+- Follow-up: 다음 에이전트는 Module D/E 후속에서 LLM 기반 전략 구현체 또는 signal generator 연결을 추가할 수 있다. 실제 벤더 SDK 생성, 모델 설정, retry/backoff 정책은 composition root 또는 별도 infrastructure 설정 작업에서 진행한다.
 
 ### 2026-05-24 Module O
 
