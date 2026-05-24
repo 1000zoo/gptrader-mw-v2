@@ -29,11 +29,12 @@ class InMemoryStrategyRepository:
 def make_evaluation(
     evaluation_id: str,
     metrics: dict[str, Decimal] | None = None,
+    status: StrategyLifecycleStatus = StrategyLifecycleStatus.DRY_RUN,
 ) -> StrategyEvaluation:
     return StrategyEvaluation(
         evaluation_id=evaluation_id,
         target_id="generator-main",
-        status=StrategyLifecycleStatus.DRY_RUN,
+        status=status,
         metrics=metrics or {"sharpe": Decimal("1.8")},
     )
 
@@ -64,6 +65,26 @@ def test_run_strategy_lifecycle_usecase_promotes_latest_evaluation_by_default():
     assert result.promotion.promoted is True
     assert result.promotion.source_evaluation == make_evaluation("eval-new")
     assert repository.evaluations[-1].evaluation_id == "promoted-1"
+
+
+def test_run_strategy_lifecycle_usecase_skips_promoted_evaluation_by_default():
+    repository = InMemoryStrategyRepository(
+        (
+            make_evaluation("eval-dry-run"),
+            make_evaluation("eval-promoted", status=StrategyLifecycleStatus.PROMOTED),
+        )
+    )
+
+    result = RunStrategyLifecycleUseCase(repository).execute(
+        RunStrategyLifecycleCommand(
+            target_id="generator-main",
+            promoted_evaluation_id="promoted-1",
+            policy=make_policy(),
+        )
+    )
+
+    assert result.promotion.promoted is True
+    assert result.promotion.source_evaluation == make_evaluation("eval-dry-run")
 
 
 def test_run_strategy_lifecycle_usecase_promotes_explicit_evaluation_id():

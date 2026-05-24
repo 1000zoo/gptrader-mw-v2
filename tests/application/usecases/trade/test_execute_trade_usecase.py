@@ -73,6 +73,16 @@ def _exposure_limit() -> ExposureLimit:
     )
 
 
+def _exhausted_exposure_limit() -> ExposureLimit:
+    return ExposureLimit(
+        equity=Decimal("1000"),
+        current_total_exposure=Decimal("1000"),
+        current_symbol_exposure=Decimal("800"),
+        max_total_exposure_ratio=Decimal("1"),
+        max_symbol_exposure_ratio=Decimal("0.8"),
+    )
+
+
 def test_execute_trade_command_stores_trade_execution_inputs():
     market = make_market()
     indicators = make_indicators(market)
@@ -230,3 +240,36 @@ def test_execute_trade_usecase_skips_order_when_risk_policy_rejects_entry():
     assert result.order_result is None
     assert order_execution.requests == []
     assert risk_policy.requests[0][2] == Decimal("150.00")
+
+
+def test_execute_trade_usecase_rejects_entry_when_exposure_is_exhausted():
+    market = make_market()
+    generated_signal = GeneratedSignal(
+        signal=Signal(direction=SignalDirection.LONG, confidence=Decimal("0.5")),
+    )
+    order_execution = FakeOrderExecution()
+    usecase = ExecuteTradeUseCase(
+        market_data=FakeMarketData(market),
+        signal_generator=FakeSignalGenerator(generated_signal),
+        signal_log_repository=FakeSignalLogRepository(),
+        order_execution=order_execution,
+    )
+
+    result = usecase.execute(
+        ExecuteTradeCommand(
+            symbol=market.symbol,
+            timeframe=market.timeframe,
+            candle_limit=120,
+            indicators=make_indicators(market),
+            exposure_limit=_exhausted_exposure_limit(),
+            base_risk_ratio=Decimal("0.1"),
+            leverage=Decimal("3"),
+            client_order_id_prefix="live-btc",
+            signal_id="signal-1",
+            generator_id="generator-1",
+        )
+    )
+
+    assert result.status is TradeExecutionStatus.RISK_REJECTED
+    assert result.reason == "total_exposure_exceeded"
+    assert order_execution.requests == []

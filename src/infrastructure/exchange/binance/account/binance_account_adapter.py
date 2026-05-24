@@ -11,4 +11,6 @@ class BinanceAccountAdapter(AccountPort):
         self._client = client
 
     def load_account_snapshot(self) -> AccountSnapshot:
+        if hasattr(self._client, "futures_account"):
+            return map_binance_account_to_snapshot(self._client.futures_account())
         return map_binance_account_to_snapshot(self._client.get_account())

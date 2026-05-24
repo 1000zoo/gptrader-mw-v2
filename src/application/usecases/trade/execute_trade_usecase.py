@@ -62,6 +62,12 @@ class ExecuteTradeUseCase:
             base_risk_ratio=command.base_risk_ratio,
             leverage=command.leverage,
         )
+        requested_notional = (
+            command.exposure_limit.equity
+            * command.base_risk_ratio
+            * generated_signal.signal.confidence
+            * command.leverage
+        )
         position_size = sizer.size(
             decision=decision,
             exposure_limit=command.exposure_limit,
@@ -70,7 +76,7 @@ class ExecuteTradeUseCase:
         risk_check = self._risk_policy.check_entry(
             decision=decision,
             exposure_limit=command.exposure_limit,
-            requested_notional=position_size.notional,
+            requested_notional=requested_notional,
         )
         if not risk_check.allowed:
             return ExecuteTradeResult(

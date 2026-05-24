@@ -5,6 +5,7 @@ from src.domain.execution import ExecutionReport, OrderRequest, OrderResult
 from src.domain.market import Symbol
 from src.domain.ports import OrderExecutionPort
 from src.infrastructure.exchange.binance.order_execution.binance_order_execution_mapper import (
+    map_binance_order_to_execution_report,
     map_binance_order_to_result,
     map_order_request_to_binance_params,
 )
@@ -24,6 +25,15 @@ class BinanceOrderExecutionAdapter(OrderExecutionPort):
         since: datetime,
         until: datetime,
     ) -> tuple[ExecutionReport, ...]:
-        raise NotImplementedError(
-            "Binance execution report history is deferred to a later Module N pass"
+        payloads = self._client.get_all_orders(
+            symbol=symbol.pair,
+            startTime=_to_epoch_millis(since),
+            endTime=_to_epoch_millis(until),
         )
+        return tuple(
+            map_binance_order_to_execution_report(payload, symbol) for payload in payloads
+        )
+
+
+def _to_epoch_millis(value: datetime) -> int:
+    return int(value.timestamp() * 1000)

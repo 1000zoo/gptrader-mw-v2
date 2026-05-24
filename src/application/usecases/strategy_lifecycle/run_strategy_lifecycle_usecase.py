@@ -19,8 +19,9 @@ class RunStrategyLifecycleUseCase:
         self,
         command: RunStrategyLifecycleCommand,
     ) -> RunStrategyLifecycleResult:
-        evaluation_id = command.evaluation_id or self._latest_evaluation_id(
-            command.target_id
+        evaluation_id = command.evaluation_id or self._latest_promotable_evaluation_id(
+            target_id=command.target_id,
+            command=command,
         )
         if evaluation_id is None:
             return RunStrategyLifecycleResult(
@@ -42,8 +43,13 @@ class RunStrategyLifecycleUseCase:
             )
         )
 
-    def _latest_evaluation_id(self, target_id: str) -> str | None:
+    def _latest_promotable_evaluation_id(
+        self,
+        target_id: str,
+        command: RunStrategyLifecycleCommand,
+    ) -> str | None:
         evaluations = self._strategy_repository.list_strategy_evaluations(target_id)
-        if not evaluations:
-            return None
-        return evaluations[-1].evaluation_id
+        for evaluation in reversed(evaluations):
+            if command.policy.can_promote(evaluation):
+                return evaluation.evaluation_id
+        return None

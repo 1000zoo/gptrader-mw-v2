@@ -1,8 +1,9 @@
 from decimal import Decimal
 from typing import Mapping
 
-from src.domain.execution import OrderRequest, OrderResult
+from src.domain.execution import ExecutionReport, OrderRequest, OrderResult
 from src.domain.execution.order_request import OrderType
+from src.domain.market import Symbol
 from src.domain.signal import SignalDirection
 
 
@@ -55,6 +56,25 @@ def map_binance_order_to_result(payload: Mapping[str, object]) -> OrderResult:
     )
 
 
+def map_binance_order_to_execution_report(
+    payload: Mapping[str, object],
+    symbol: Symbol,
+) -> ExecutionReport:
+    request = OrderRequest(
+        client_order_id=str(payload["clientOrderId"]),
+        symbol=symbol,
+        side=_map_binance_side(str(payload["side"])),
+        order_type=_map_binance_order_type(str(payload["type"])),
+        quantity=Decimal(str(payload["origQty"])),
+        limit_price=_optional_decimal(payload.get("price")),
+        reduce_only=_map_bool(payload.get("reduceOnly", False)),
+    )
+    return ExecutionReport(
+        request=request,
+        result=map_binance_order_to_result(payload),
+    )
+
+
 def _map_side(side: SignalDirection) -> str:
     if side is SignalDirection.LONG:
         return "BUY"
@@ -69,3 +89,36 @@ def _map_order_type(order_type: OrderType) -> str:
     if order_type is OrderType.LIMIT:
         return "LIMIT"
     raise ValueError(f"unsupported order type: {order_type}")
+
+
+def _map_binance_side(side: str) -> SignalDirection:
+    normalized_side = side.upper()
+    if normalized_side == "BUY":
+        return SignalDirection.LONG
+    if normalized_side == "SELL":
+        return SignalDirection.SHORT
+    raise ValueError(f"unsupported Binance order side: {side}")
+
+
+def _map_binance_order_type(order_type: str) -> OrderType:
+    normalized_order_type = order_type.upper()
+    if normalized_order_type == "MARKET":
+        return OrderType.MARKET
+    if normalized_order_type == "LIMIT":
+        return OrderType.LIMIT
+    raise ValueError(f"unsupported Binance order type: {order_type}")
+
+
+def _optional_decimal(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    text = str(value)
+    if not text or Decimal(text) == Decimal("0"):
+        return None
+    return Decimal(text)
+
+
+def _map_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() == "true"
