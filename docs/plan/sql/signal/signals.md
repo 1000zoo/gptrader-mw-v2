@@ -1,6 +1,6 @@
 # signals
 
-- Status: `ready`
+- Status: `done`
 - Domain: signal
 - Source: `src/domain/signal/signal.py`
 

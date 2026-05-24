@@ -1,6 +1,6 @@
 # signal_reasons
 
-- Status: `ready`
+- Status: `done`
 - Domain: signal
 - Source: `src/domain/signal/signal_reason.py`
 

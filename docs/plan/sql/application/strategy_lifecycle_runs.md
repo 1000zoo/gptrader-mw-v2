@@ -1,6 +1,6 @@
 # strategy_lifecycle_runs
 
-- Status: `ready`
+- Status: `done`
 - Domain: application
 - Source: `src/application/usecases/strategy_lifecycle/*.py`, `src/application/usecases/strategy_lifecycle/dto.py`
 

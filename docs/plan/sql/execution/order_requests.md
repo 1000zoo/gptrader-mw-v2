@@ -1,6 +1,6 @@
 # order_requests
 
-- Status: `ready`
+- Status: `done`
 - Domain: execution
 - Source: `src/domain/execution/order_request.py`, `src/application/usecases/trade/execute_trade_usecase.py`, `src/application/usecases/trade/close_position_usecase.py`
 

@@ -1,6 +1,6 @@
 # trade_runs
 
-- Status: `ready`
+- Status: `done`
 - Domain: application
 - Source: `src/application/usecases/trade/execute_trade_usecase.py`, `src/application/usecases/trade/dto.py`
 

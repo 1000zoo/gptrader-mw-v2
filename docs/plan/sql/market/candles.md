@@ -1,6 +1,6 @@
 # candles
 
-- Status: `ready`
+- Status: `done`
 - Domain: market
 - Source: `src/domain/market/candle.py`, `src/domain/ports/market_data_port.py`
 

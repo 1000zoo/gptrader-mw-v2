@@ -1,0 +1,20 @@
+CREATE TABLE IF NOT EXISTS position_events (
+    event_id TEXT NOT NULL PRIMARY KEY,
+    position_id TEXT NOT NULL,
+    execution_report_id TEXT,
+    symbol TEXT NOT NULL,
+    event_type TEXT NOT NULL CHECK (event_type IN ('increase', 'decrease', 'close')),
+    direction TEXT CHECK (direction IN ('long', 'short')),
+    quantity NUMERIC NOT NULL CHECK (quantity > 0),
+    price NUMERIC CHECK (price IS NULL OR price > 0),
+    occurred_dt TEXT NOT NULL,
+    payload TEXT,
+    reg_ymd TEXT NOT NULL,
+    reg_dt TEXT NOT NULL,
+    upd_dt TEXT NOT NULL,
+    use_yn TEXT NOT NULL DEFAULT 'Y' CHECK (use_yn IN ('Y', 'N')),
+    FOREIGN KEY (position_id) REFERENCES positions (position_id),
+    FOREIGN KEY (execution_report_id) REFERENCES execution_reports (report_id),
+    CHECK (event_id <> ''),
+    CHECK (symbol <> '')
+);

@@ -1,6 +1,6 @@
 # risk_checks
 
-- Status: `ready`
+- Status: `done`
 - Domain: risk
 - Source: `src/domain/risk/risk_policy.py`, `src/application/usecases/trade/execute_trade_usecase.py`
 

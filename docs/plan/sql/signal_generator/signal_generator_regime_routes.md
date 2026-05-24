@@ -1,6 +1,6 @@
 # signal_generator_regime_routes
 
-- Status: `ready`
+- Status: `done`
 - Domain: signal_generator
 - Source: `src/domain/lifecycle/signal_generator_definition.py`, `src/domain/signal_generator/regime_signal_generator.py`
 

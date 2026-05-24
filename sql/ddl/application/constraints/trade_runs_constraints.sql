@@ -1,0 +1,1 @@
+-- Constraints are defined inline in sql/ddl/application/tables/trade_runs.sql.

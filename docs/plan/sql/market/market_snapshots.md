@@ -1,6 +1,6 @@
 # market_snapshots
 
-- Status: `ready`
+- Status: `done`
 - Domain: market
 - Source: `src/domain/market/market_snapshot.py`, `src/domain/strategy/strategy_context.py`
 

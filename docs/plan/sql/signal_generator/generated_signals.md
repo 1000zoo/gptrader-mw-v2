@@ -1,6 +1,6 @@
 # generated_signals
 
-- Status: `ready`
+- Status: `done`
 - Domain: signal_generator
 - Source: `src/domain/signal_generator/signal_generator.py`, `src/domain/ports/signal_log_repository_port.py`
 

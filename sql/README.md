@@ -20,6 +20,10 @@
 - `upd_dt`: 수정 일시, datetime/timestamp 타입
 - `use_yn`: 사용 여부, `Y` 또는 `N`만 허용
 
+## SQLite Type Mapping
+
+SQLite에는 별도 boolean storage class가 없으므로, plan 문서의 `boolean` 컬럼은 `INTEGER`로 저장하고 `CHECK (<column> IN (0, 1))` 제약으로 제한한다. `0`은 false, `1`은 true를 의미한다.
+
 ## Agent Checklist
 
 DDL을 생성하거나 수정할 때 아래를 확인한다.

@@ -1,6 +1,6 @@
 # trade_decisions
 
-- Status: `ready`
+- Status: `done`
 - Domain: signal
 - Source: `src/domain/signal/trade_decision.py`, `src/application/usecases/trade/execute_trade_usecase.py`
 

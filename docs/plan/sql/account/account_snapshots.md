@@ -1,6 +1,6 @@
 # account_snapshots
 
-- Status: `ready`
+- Status: `done`
 - Domain: account
 - Source: `src/domain/ports/account_port.py`, `src/domain/risk/exposure_limit.py`
 

@@ -1,6 +1,6 @@
 # risk_policies
 
-- Status: `ready`
+- Status: `done`
 - Domain: risk
 - Source: `src/domain/risk/risk_policy.py`
 

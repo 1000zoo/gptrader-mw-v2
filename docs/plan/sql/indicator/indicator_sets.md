@@ -1,6 +1,6 @@
 # indicator_sets
 
-- Status: `ready`
+- Status: `done`
 - Domain: indicator
 - Source: `src/domain/indicator/indicator_set.py`, `src/domain/strategy/strategy_context.py`
 

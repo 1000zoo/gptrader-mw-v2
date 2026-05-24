@@ -1,6 +1,6 @@
 # position_events
 
-- Status: `ready`
+- Status: `done`
 - Domain: position
 - Source: `src/domain/position/position_event.py`, `src/domain/execution/execution_report.py`
 

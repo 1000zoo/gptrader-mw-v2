@@ -1,6 +1,6 @@
 # research_runs
 
-- Status: `ready`
+- Status: `done`
 - Domain: application
 - Source: `src/application/usecases/research/*.py`, `src/application/usecases/research/dto.py`
 

@@ -1,6 +1,6 @@
 # execution_reports
 
-- Status: `ready`
+- Status: `done`
 - Domain: execution
 - Source: `src/domain/execution/execution_report.py`, `src/domain/ports/order_execution_port.py`, `src/application/usecases/trade/sync_position_usecase.py`
 

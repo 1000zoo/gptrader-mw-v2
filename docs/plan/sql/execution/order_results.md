@@ -1,6 +1,6 @@
 # order_results
 
-- Status: `ready`
+- Status: `done`
 - Domain: execution
 - Source: `src/domain/execution/order_result.py`, `src/domain/execution/execution_report.py`
 

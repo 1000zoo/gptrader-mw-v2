@@ -1,6 +1,6 @@
 # signal_generator_strategy_links
 
-- Status: `ready`
+- Status: `done`
 - Domain: signal_generator
 - Source: `src/domain/lifecycle/signal_generator_definition.py`
 

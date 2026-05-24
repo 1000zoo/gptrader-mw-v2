@@ -1,0 +1,1 @@
+-- Constraints are defined inline in sql/ddl/application/tables/research_runs.sql.

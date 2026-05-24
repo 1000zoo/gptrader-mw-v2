@@ -1,6 +1,6 @@
 # promotion_policies
 
-- Status: `ready`
+- Status: `done`
 - Domain: lifecycle/risk
 - Source: `src/domain/lifecycle/promotion_policy.py`, `src/application/usecases/strategy_lifecycle/dto.py`
 

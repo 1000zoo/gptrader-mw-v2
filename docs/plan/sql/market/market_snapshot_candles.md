@@ -1,6 +1,6 @@
 # market_snapshot_candles
 
-- Status: `ready`
+- Status: `done`
 - Domain: market
 - Source: `src/domain/market/market_snapshot.py`
 

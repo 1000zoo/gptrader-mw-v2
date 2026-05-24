@@ -1,6 +1,6 @@
 # asset_balances
 
-- Status: `ready`
+- Status: `done`
 - Domain: account
 - Source: `src/domain/ports/account_port.py`
 

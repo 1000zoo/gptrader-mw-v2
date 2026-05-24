@@ -1,6 +1,6 @@
 # strategy_evaluation_metrics
 
-- Status: `ready`
+- Status: `done`
 - Domain: lifecycle
 - Source: `src/domain/lifecycle/strategy_evaluation.py`, `src/domain/lifecycle/promotion_policy.py`
 

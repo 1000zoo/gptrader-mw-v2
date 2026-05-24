@@ -1,6 +1,6 @@
 # position_sizer_configs
 
-- Status: `ready`
+- Status: `done`
 - Domain: risk
 - Source: `src/domain/risk/position_sizer.py`, `src/application/usecases/trade/dto.py`
 

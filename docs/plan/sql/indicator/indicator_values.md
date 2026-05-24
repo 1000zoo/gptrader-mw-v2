@@ -1,6 +1,6 @@
 # indicator_values
 
-- Status: `ready`
+- Status: `done`
 - Domain: indicator
 - Source: `src/domain/indicator/indicator_value.py`, `src/domain/indicator/indicator_set.py`
 

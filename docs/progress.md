@@ -61,7 +61,7 @@
 
 | Item | Path | Status | Depends On | Notes |
 |------|------|--------|------------|-------|
-| SQL-DOMAIN-PERSISTENCE | `docs/plan/sql/domain-persistence-roadmap.md` | `ready` | Module O | 추가 도메인 객체 DDL 확장 필요. 우선순위는 포지션/주문/체결, 시장/지표/시그널 입력, 리스크/승격 정책 순서로 기록됨. |
+| SQL-DOMAIN-PERSISTENCE | `docs/plan/sql/domain-persistence-roadmap.md` | `done` | Module O | 도메인별 SQL 스펙과 `sql/ddl/<domain>` DDL 작성 완료. 다음 단계는 repository port와 persistence adapter 범위 검토. |
 
 ## 작업 로그 템플릿
 
@@ -77,6 +77,14 @@
 ```
 
 ## 작업 로그
+
+### 2026-05-25 SQL-DOMAIN-PERSISTENCE
+
+- Agent: Codex
+- Status: `ready` -> `done`
+- Plan: `docs/plan/sql/domain-persistence-roadmap.md`
+- Summary: `docs/plan/sql/<domain>/<table>.md` 기준으로 전체 33개 테이블 스펙을 정리하고, `sql/ddl/<domain>/tables`, `indexes`, `constraints` 아래에 테이블 DDL 33개, 인덱스 DDL 33개, 제약조건 추적 파일 33개를 생성했다. `sql/tests/persistence_schema_checks.sql`은 33개 테이블과 33개 인덱스를 확인하도록 갱신했다.
+- Follow-up: 다음 에이전트는 `positions`, `position_events`, `order_requests`, `order_results`, `execution_reports`부터 repository port와 persistence adapter 필요 범위를 검토한다.
 
 ### 2026-05-24 Module P
 

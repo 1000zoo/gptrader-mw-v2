@@ -1,6 +1,6 @@
 # exposure_limits
 
-- Status: `ready`
+- Status: `done`
 - Domain: risk
 - Source: `src/domain/risk/exposure_limit.py`, `src/application/usecases/trade/dto.py`
 

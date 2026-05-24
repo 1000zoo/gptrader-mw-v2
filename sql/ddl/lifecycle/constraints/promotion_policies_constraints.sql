@@ -1,0 +1,1 @@
+-- Constraints are defined inline in sql/ddl/lifecycle/tables/promotion_policies.sql.

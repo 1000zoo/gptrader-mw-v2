@@ -1,6 +1,6 @@
 # positions
 
-- Status: `ready`
+- Status: `done`
 - Domain: position
 - Source: `src/domain/position/position.py`, `src/application/usecases/trade/sync_position_usecase.py`
 

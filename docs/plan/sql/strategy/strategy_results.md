@@ -1,6 +1,6 @@
 # strategy_results
 
-- Status: `ready`
+- Status: `done`
 - Domain: strategy
 - Source: `src/domain/strategy/strategy_result.py`, `src/domain/signal_generator/signal_generator.py`
 
