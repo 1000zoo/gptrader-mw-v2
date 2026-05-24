@@ -54,7 +54,7 @@
 | P      | `src/infrastructure/llm`                      | `done`        | J, LLM 전략 계약         | D, E             | LLM adapter      |
 | Q      | `src/infrastructure/messaging`                | `not started` | 알림 포트 확정 시           | M                | 운영 알림 보조         |
 | R      | `src/interfaces/api`                          | `not started` | 관련 application 유스케이스 | 운영 연동            | HTTP 진입점         |
-| S      | `src/interfaces/scheduler`                    | `not started` | K, M                 | 운영 배포 설정         | 스케줄 엔트리          |
+| S      | `src/interfaces/scheduler`                    | `done`        | K, M                 | 운영 배포 설정         | 스케줄 엔트리 고정 완료    |
 | T      | `src/interfaces/websocket`                    | `not started` | G, K, N              | 운영 모니터링          | 실시간 포지션 이벤트      |
 
 ## 후속 작업
@@ -77,6 +77,15 @@
 ```
 
 ## 작업 로그
+
+### 2026-05-25 Module S
+
+- Agent: Codex
+- Status: `in progress` -> `done`
+- Plan: `docs/plans/2026-05-25-module-s-interfaces-scheduler.md`
+- Design: `docs/plans/2026-05-25-module-s-interfaces-scheduler-design.md`
+- Summary: `src/interfaces/scheduler`에 framework-neutral trade/lifecycle scheduler entry point를 추가했다. scheduler는 command factory와 application usecase를 받아 호출만 수행하고, schedule name, command, result, timestamps, error 상태를 immutable execution record로 반환한다.
+- Follow-up: 다음 에이전트는 운영 배포 설정에서 APScheduler, cron, 또는 별도 runner가 이 scheduler entry point를 호출하도록 composition root를 구성한다. Module T는 포지션 스트림 이벤트를 application 입력으로 매핑하는 별도 작업으로 남아 있다.
 
 ### 2026-05-25 SQL-DOMAIN-PERSISTENCE
 
