@@ -41,7 +41,7 @@ State that `src/infrastructure/persistence` owns repository implementations, per
 
 **Step 2: Add `./sql` to included outputs**
 
-Add `./sql/ddl/tables`, `./sql/ddl/indexes`, `./sql/ddl/constraints`, `./sql/tests`, and `./sql/plans` to Module O outputs.
+Add `./sql/ddl/<domain>/tables`, `./sql/ddl/<domain>/indexes`, `./sql/ddl/<domain>/constraints`, `./sql/tests`, and `./sql/plans` to Module O outputs.
 
 **Step 3: Verify**
 
@@ -53,9 +53,10 @@ Expected: Both the global plan and Module O reference the SQL DDL structure.
 
 **Files:**
 - Create: `sql/README.md`
-- Create: `sql/ddl/tables/README.md`
-- Create: `sql/ddl/indexes/README.md`
-- Create: `sql/ddl/constraints/README.md`
+- Create: `sql/ddl/README.md`
+- Create: `sql/ddl/<domain>/tables/`
+- Create: `sql/ddl/<domain>/indexes/`
+- Create: `sql/ddl/<domain>/constraints/`
 - Create: `sql/tests/README.md`
 - Create: `sql/plans/README.md`
 - Create: `sql/seeds/README.md`
@@ -73,4 +74,3 @@ Each subdirectory README should explain what belongs there and how agents should
 Run: `find sql -maxdepth 3 -type f | sort`
 
 Expected: The README files are present under each SQL category.
-

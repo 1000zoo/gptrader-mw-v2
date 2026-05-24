@@ -60,9 +60,10 @@ src/
 
 sql/
   ddl/
-    tables/
-    indexes/
-    constraints/
+    <domain>/
+      tables/
+      indexes/
+      constraints/
   tests/
   plans/
   seeds/
@@ -364,9 +365,9 @@ sql/
   - `repositories/`
   - `models/`
   - `migrations/`
-  - `sql/ddl/tables/`
-  - `sql/ddl/indexes/`
-  - `sql/ddl/constraints/`
+  - `sql/ddl/<domain>/tables/`
+  - `sql/ddl/<domain>/indexes/`
+  - `sql/ddl/<domain>/constraints/`
   - `sql/tests/`
   - `sql/plans/`
   - `sql/seeds/`

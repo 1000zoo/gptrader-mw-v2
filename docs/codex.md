@@ -306,9 +306,9 @@
 
 ### 디렉토리 기준
 
-- `sql/ddl/tables/`: 테이블별 `CREATE TABLE` DDL
-- `sql/ddl/indexes/`: 테이블별 또는 기능별 `CREATE INDEX` DDL
-- `sql/ddl/constraints/`: 별도 관리가 필요한 FK, CHECK, UNIQUE 등 제약조건 DDL
+- `sql/ddl/<domain>/tables/`: 도메인별 테이블 `CREATE TABLE` DDL
+- `sql/ddl/<domain>/indexes/`: 도메인별 테이블 또는 기능별 `CREATE INDEX` DDL
+- `sql/ddl/<domain>/constraints/`: 별도 관리가 필요한 도메인별 FK, CHECK, UNIQUE 등 제약조건 DDL
 - `sql/tests/`: DDL 검증용 SQL 또는 스키마 점검 쿼리
 - `sql/plans/`: 스키마 변경 계획과 마이그레이션 전 확인 사항
 - `sql/seeds/`: 기준 데이터 또는 로컬 개발용 seed SQL
@@ -324,7 +324,7 @@ DDL을 생성하거나 수정하는 에이전트는 아래 항목을 반드시 �
 - 신규 테이블에는 필요한 PK, FK, UNIQUE, CHECK 제약조건을 명시해야 한다.
 - 조회 조건, 조인 조건, 정렬 조건에 맞는 인덱스를 함께 검토해야 한다.
 - 인덱스에는 가능한 한 `reg_ymd`를 포함해 날짜 기준 조회와 파티션성 접근을 지원해야 한다.
-- 테이블 DDL을 바꾸면 관련 인덱스, 제약조건, SQL 테스트 또는 점검 쿼리도 같이 확인해야 한다.
+- 테이블 DDL을 바꾸면 같은 도메인의 관련 인덱스, 제약조건, SQL 테스트 또는 점검 쿼리도 같이 확인해야 한다.
 - DB 세부사항은 `application` 또는 `domain` 레이어로 노출하면 안 된다.
 
 ## 17. 에이전트 시작 체크리스트

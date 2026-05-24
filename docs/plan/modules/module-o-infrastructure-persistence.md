@@ -16,9 +16,9 @@
 - `src/infrastructure/persistence/repositories/`
 - `src/infrastructure/persistence/models/`
 - `src/infrastructure/persistence/migrations/`
-- `sql/ddl/tables/`
-- `sql/ddl/indexes/`
-- `sql/ddl/constraints/`
+- `sql/ddl/<domain>/tables/`
+- `sql/ddl/<domain>/indexes/`
+- `sql/ddl/<domain>/constraints/`
 - `sql/tests/`
 - `sql/plans/`
 - `sql/seeds/`

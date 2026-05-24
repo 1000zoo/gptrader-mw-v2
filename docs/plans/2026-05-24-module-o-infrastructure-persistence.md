@@ -90,12 +90,12 @@ Expected: pass.
 ### Task 4: SQL Assets
 
 **Files:**
-- Create: `sql/ddl/tables/strategy_definitions.sql`
-- Create: `sql/ddl/tables/signal_generator_definitions.sql`
-- Create: `sql/ddl/tables/strategy_evaluations.sql`
-- Create: `sql/ddl/tables/signal_logs.sql`
-- Create: `sql/ddl/indexes/persistence_indexes.sql`
-- Create: `sql/ddl/constraints/persistence_constraints.sql`
+- Create: `sql/ddl/strategy/tables/strategy_definitions.sql`
+- Create: `sql/ddl/signal_generator/tables/signal_generator_definitions.sql`
+- Create: `sql/ddl/lifecycle/tables/strategy_evaluations.sql`
+- Create: `sql/ddl/signal/tables/signal_logs.sql`
+- Create: `sql/ddl/<domain>/indexes/<table_name>_indexes.sql`
+- Create: `sql/ddl/<domain>/constraints/<table_name>_constraints.sql`
 - Create: `sql/tests/persistence_schema_checks.sql`
 - Create: `sql/plans/2026-05-24-module-o-persistence.sql.md`
 - Create: `sql/seeds/persistence_seed.sql`
