@@ -1,0 +1,162 @@
+import hashlib
+import hmac
+import json
+import time
+from typing import Mapping
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+from src.infrastructure.exchange.binance.binance_config import BinanceConfig
+
+
+class BinanceRestError(RuntimeError):
+    def __init__(
+        self,
+        status_code: int,
+        body: str,
+        *,
+        code: int | None = None,
+        message: str | None = None,
+        headers: Mapping[str, object] | None = None,
+    ) -> None:
+        detail = message or body
+        super().__init__(f"Binance REST request failed: {status_code} {detail}")
+        self.status_code = status_code
+        self.body = body
+        self.code = code
+        self.message = message
+        self.headers = dict(headers or {})
+
+
+class BinanceRateLimitError(BinanceRestError):
+    pass
+
+
+class BinanceUnknownExecutionStatusError(BinanceRestError):
+    pass
+
+
+class BinanceNetworkError(RuntimeError):
+    pass
+
+
+class BinanceInvalidResponseError(RuntimeError):
+    pass
+
+
+def sign_params(params: Mapping[str, object], secret: str) -> dict[str, object]:
+    signed_params = dict(params)
+    query = urlencode(signed_params)
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        query.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    signed_params["signature"] = signature
+    return signed_params
+
+
+def request_json(
+    config: BinanceConfig,
+    method: str,
+    path: str,
+    params: Mapping[str, object] | None = None,
+    *,
+    signed: bool = False,
+) -> object:
+    request_params = dict(params or {})
+    headers: dict[str, str] = {}
+    if signed:
+        if not config.api_key or not config.api_secret:
+            raise ValueError("signed Binance requests require api_key and api_secret")
+        request_params.setdefault("timestamp", _epoch_millis())
+        request_params.setdefault("recvWindow", config.recv_window)
+        request_params = sign_params(request_params, config.api_secret)
+        headers["X-MBX-APIKEY"] = config.api_key
+
+    query = urlencode(request_params)
+    upper_method = method.upper()
+    url = f"{config.base_url}{path}"
+    data = None
+    if upper_method == "GET" and query:
+        url = f"{url}?{query}"
+    elif query:
+        data = query.encode("utf-8")
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+
+    request = Request(url, data=data, headers=headers, method=upper_method)
+    try:
+        with urlopen(request, timeout=config.timeout) as response:
+            body = response.read().decode("utf-8")
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8")
+        raise _classify_http_error(exc, body) from exc
+    except URLError as exc:
+        raise BinanceNetworkError(f"Binance REST network error: {exc.reason}") from exc
+
+    if not body:
+        return {}
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise BinanceInvalidResponseError(
+            f"Binance REST response was not valid JSON: {body}"
+        ) from exc
+
+
+def _epoch_millis() -> int:
+    return int(time.time() * 1000)
+
+
+def _classify_http_error(exc: HTTPError, body: str) -> BinanceRestError:
+    error_payload = _parse_error_payload(body)
+    code = _optional_int(error_payload.get("code"))
+    message = _optional_str(error_payload.get("msg"))
+    error_type: type[BinanceRestError]
+    if exc.code in {418, 429}:
+        error_type = BinanceRateLimitError
+    elif exc.code == 503 and _is_unknown_execution_status(message or body):
+        error_type = BinanceUnknownExecutionStatusError
+    else:
+        error_type = BinanceRestError
+    return error_type(
+        exc.code,
+        body,
+        code=code,
+        message=message,
+        headers=exc.headers,
+    )
+
+
+def _parse_error_payload(body: str) -> Mapping[str, object]:
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(payload, dict):
+        return payload
+    return {}
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(str(value))
+    except ValueError:
+        return None
+
+
+def _optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _is_unknown_execution_status(message: str) -> bool:
+    normalized_message = message.lower()
+    return (
+        "unknown error" in normalized_message
+        or "execution status unknown" in normalized_message
+    )

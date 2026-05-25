@@ -49,8 +49,15 @@
 | Schema check omits generated indexes | `test-coverage` | `medium` | `sql-persistence` | [by-type/test-coverage/schema-check-missing-indexes.md](by-type/test-coverage/schema-check-missing-indexes.md) |
 | Schema check is too shallow | `test-coverage` | `medium` | `sql-persistence` | [by-type/test-coverage/schema-check-shallow-coverage.md](by-type/test-coverage/schema-check-shallow-coverage.md) |
 | Boolean spec to SQLite integer mapping is undocumented | `documentation` | `low` | `sql-persistence` | [by-type/documentation/boolean-sqlite-integer-mapping.md](by-type/documentation/boolean-sqlite-integer-mapping.md) |
+| Binance LIMIT orders omit required timeInForce | `integration` | `important` | `binance-api-review` | [by-type/integration/binance-limit-order-missing-time-in-force.md](by-type/integration/binance-limit-order-missing-time-in-force.md) |
+| Binance reduceOnly order parameter is encoded with unsafe futures semantics | `integration` | `important` | `binance-api-review` | [by-type/integration/binance-reduce-only-parameter-encoding.md](by-type/integration/binance-reduce-only-parameter-encoding.md) |
+| Binance futures account mapper overstates usable collateral | `runtime` | `important` | `binance-api-review` | [by-type/runtime/binance-futures-account-collateral-mapping.md](by-type/runtime/binance-futures-account-collateral-mapping.md) |
+| Binance REST trade errors are not classified for safe order reconciliation | `runtime` | `important` | `binance-api-review` | [by-type/runtime/binance-rest-trade-error-classification.md](by-type/runtime/binance-rest-trade-error-classification.md) |
+| Binance REST boundary tests do not cover request construction and error paths | `test-coverage` | `medium` | `binance-api-review` | [by-type/test-coverage/binance-rest-boundary-test-gaps.md](by-type/test-coverage/binance-rest-boundary-test-gaps.md) |
+| Binance config lacks explicit testnet mode | `documentation` | `low` | `binance-api-review` | [by-type/documentation/binance-config-explicit-testnet-mode.md](by-type/documentation/binance-config-explicit-testnet-mode.md) |
 
 ## Review Summaries
 
 - [sources/src-code-review/README.md](sources/src-code-review/README.md)
 - [sources/sql-persistence/README.md](sources/sql-persistence/README.md)
+- [sources/binance-api-review/README.md](sources/binance-api-review/README.md)

@@ -6,16 +6,22 @@ from src.domain.execution import ExecutionReport, OrderRequest, OrderResult
 from src.domain.market import Symbol
 from src.domain.ports import OrderExecutionPort
 from src.domain.signal import SignalDirection
+from src.infrastructure.exchange.binance.binance_config import BinanceConfig
 from src.infrastructure.exchange.binance.order_execution import BinanceOrderExecutionAdapter
+from src.infrastructure.exchange.binance.order_execution import (
+    binance_order_execution_adapter,
+)
+from src.infrastructure.exchange.binance.order_execution.binance_order_execution_mapper import (
+    map_order_request_to_binance_params,
+)
 
 
-class FakeBinanceOrderClient:
-    def __init__(self) -> None:
-        self.orders = []
-        self.report_requests = []
+def test_binance_order_execution_adapter_submits_domain_market_order(monkeypatch):
+    config = BinanceConfig.default()
+    orders = []
 
-    def create_order(self, **params):
-        self.orders.append(params)
+    def fake_submit_order_api(received_config: BinanceConfig, params):
+        orders.append((received_config, params))
         return {
             "clientOrderId": params["newClientOrderId"],
             "orderId": 12345,
@@ -24,8 +30,54 @@ class FakeBinanceOrderClient:
             "avgPrice": "42000.5",
         }
 
-    def get_all_orders(self, **params):
-        self.report_requests.append(params)
+    monkeypatch.setattr(
+        binance_order_execution_adapter,
+        "submit_order_api",
+        fake_submit_order_api,
+    )
+    adapter = BinanceOrderExecutionAdapter(config)
+
+    result = adapter.submit_order(
+        OrderRequest.market(
+            client_order_id="entry-1",
+            symbol=Symbol("btc", "usdt"),
+            side=SignalDirection.LONG,
+            quantity=Decimal("0.25"),
+        )
+    )
+
+    assert isinstance(adapter, OrderExecutionPort)
+    assert orders == [
+        (
+            config,
+            {
+            "symbol": "BTCUSDT",
+            "side": "BUY",
+            "type": "MARKET",
+            "quantity": "0.25",
+            "newClientOrderId": "entry-1",
+            },
+        )
+    ]
+    assert result == OrderResult.filled(
+        client_order_id="entry-1",
+        exchange_order_id="12345",
+        executed_quantity=Decimal("0.25"),
+        average_price=Decimal("42000.5"),
+    )
+
+
+def test_binance_order_execution_adapter_loads_execution_reports(monkeypatch):
+    config = BinanceConfig.default()
+    report_requests = []
+
+    def fake_load_orders_api(
+        received_config: BinanceConfig,
+        symbol: str,
+        start_time: int,
+        end_time: int,
+    ):
+        report_requests.append((received_config, symbol, start_time, end_time))
         return [
             {
                 "clientOrderId": "entry-1",
@@ -40,42 +92,12 @@ class FakeBinanceOrderClient:
             }
         ]
 
-
-def test_binance_order_execution_adapter_submits_domain_market_order():
-    client = FakeBinanceOrderClient()
-    adapter = BinanceOrderExecutionAdapter(client)
-
-    result = adapter.submit_order(
-        OrderRequest.market(
-            client_order_id="entry-1",
-            symbol=Symbol("btc", "usdt"),
-            side=SignalDirection.LONG,
-            quantity=Decimal("0.25"),
-        )
+    monkeypatch.setattr(
+        binance_order_execution_adapter,
+        "load_orders_api",
+        fake_load_orders_api,
     )
-
-    assert isinstance(adapter, OrderExecutionPort)
-    assert client.orders == [
-        {
-            "symbol": "BTCUSDT",
-            "side": "BUY",
-            "type": "MARKET",
-            "quantity": "0.25",
-            "newClientOrderId": "entry-1",
-            "reduceOnly": False,
-        }
-    ]
-    assert result == OrderResult.filled(
-        client_order_id="entry-1",
-        exchange_order_id="12345",
-        executed_quantity=Decimal("0.25"),
-        average_price=Decimal("42000.5"),
-    )
-
-
-def test_binance_order_execution_adapter_loads_execution_reports():
-    client = FakeBinanceOrderClient()
-    adapter = BinanceOrderExecutionAdapter(client)
+    adapter = BinanceOrderExecutionAdapter(config)
     since = datetime(2026, 5, 25, 1, 2, 3, tzinfo=timezone.utc)
     until = datetime(2026, 5, 25, 2, 3, 4, tzinfo=timezone.utc)
 
@@ -85,13 +107,7 @@ def test_binance_order_execution_adapter_loads_execution_reports():
         until=until,
     )
 
-    assert client.report_requests == [
-        {
-            "symbol": "BTCUSDT",
-            "startTime": 1779670923000,
-            "endTime": 1779674584000,
-        }
-    ]
+    assert report_requests == [(config, "BTCUSDT", 1779670923000, 1779674584000)]
     assert reports == (
         ExecutionReport(
             request=OrderRequest.market(
@@ -108,3 +124,39 @@ def test_binance_order_execution_adapter_loads_execution_reports():
             ),
         ),
     )
+
+
+def test_binance_order_mapper_adds_limit_time_in_force():
+    params = map_order_request_to_binance_params(
+        OrderRequest.limit(
+            client_order_id="limit-1",
+            symbol=Symbol("eth", "usdt"),
+            side=SignalDirection.SHORT,
+            quantity=Decimal("1.5"),
+            limit_price=Decimal("3150.25"),
+        )
+    )
+
+    assert params == {
+        "symbol": "ETHUSDT",
+        "side": "SELL",
+        "type": "LIMIT",
+        "quantity": "1.5",
+        "newClientOrderId": "limit-1",
+        "price": "3150.25",
+        "timeInForce": "GTC",
+    }
+
+
+def test_binance_order_mapper_encodes_reduce_only_only_when_true():
+    params = map_order_request_to_binance_params(
+        OrderRequest.market(
+            client_order_id="close-1",
+            symbol=Symbol("btc", "usdt"),
+            side=SignalDirection.SHORT,
+            quantity=Decimal("0.25"),
+            reduce_only=True,
+        )
+    )
+
+    assert params["reduceOnly"] == "true"

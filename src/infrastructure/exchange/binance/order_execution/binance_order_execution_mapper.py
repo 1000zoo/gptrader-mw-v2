@@ -14,10 +14,13 @@ def map_order_request_to_binance_params(request: OrderRequest) -> dict[str, obje
         "type": _map_order_type(request.order_type),
         "quantity": str(request.quantity),
         "newClientOrderId": request.client_order_id,
-        "reduceOnly": request.reduce_only,
     }
+    if request.reduce_only:
+        params["reduceOnly"] = "true"
     if request.limit_price is not None:
         params["price"] = str(request.limit_price)
+    if request.order_type is OrderType.LIMIT:
+        params["timeInForce"] = "GTC"
     return params
 
 

@@ -14,15 +14,15 @@ def _map_futures_account_to_snapshot(payload: Mapping[str, object]) -> AccountSn
     balances = tuple(
         AssetBalance(
             asset=str(asset["asset"]),
-            free=Decimal(str(asset["walletBalance"])),
-            locked=Decimal(str(asset.get("maintMargin", "0"))),
+            free=_decimal_field(asset, "availableBalance", "walletBalance"),
+            locked=_futures_locked_margin(asset),
         )
         for asset in payload.get("assets", ())
         if _has_balance(asset)
     )
     return AccountSnapshot(
         balances=balances,
-        total_equity=Decimal(str(payload["totalWalletBalance"])),
+        total_equity=_decimal_field(payload, "totalMarginBalance", "totalWalletBalance"),
     )
 
 
@@ -46,8 +46,8 @@ def _map_spot_account_to_snapshot(payload: Mapping[str, object]) -> AccountSnaps
 
 
 def _has_balance(asset: Mapping[str, object]) -> bool:
-    free = Decimal(str(asset["walletBalance"]))
-    locked = Decimal(str(asset.get("maintMargin", "0")))
+    free = _decimal_field(asset, "availableBalance", "walletBalance")
+    locked = _futures_locked_margin(asset)
     return free > Decimal("0") or locked > Decimal("0")
 
 
@@ -55,3 +55,20 @@ def _has_spot_balance(balance: Mapping[str, object]) -> bool:
     free = Decimal(str(balance["free"]))
     locked = Decimal(str(balance["locked"]))
     return free > Decimal("0") or locked > Decimal("0")
+
+
+def _decimal_field(payload: Mapping[str, object], *names: str) -> Decimal:
+    for name in names:
+        if name in payload:
+            return Decimal(str(payload[name]))
+    return Decimal("0")
+
+
+def _futures_locked_margin(asset: Mapping[str, object]) -> Decimal:
+    if "initialMargin" in asset:
+        return Decimal(str(asset["initialMargin"]))
+    open_order_margin = Decimal(str(asset.get("openOrderInitialMargin", "0")))
+    position_margin = Decimal(str(asset.get("positionInitialMargin", "0")))
+    if open_order_margin or position_margin:
+        return open_order_margin + position_margin
+    return Decimal(str(asset.get("maintMargin", "0")))
