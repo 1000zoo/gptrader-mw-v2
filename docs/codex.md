@@ -11,19 +11,21 @@
 2. `docs/progress.md`를 읽는다.
 3. `docs/plan/modules/README.md`를 읽는다.
 4. 자신이 맡을 모듈의 상세 문서를 읽는다.
-5. `docs/plans/YYYY-MM-DD-module-x-name.md` 형식의 모듈 구현 계획 문서를 작성하거나 최신 상태로 갱신한다.
-6. `docs/progress.md`에서 해당 모듈 상태를 `in progress`로 바꾼다.
-7. 그 뒤에만 구현, 수정, 테스트를 시작한다.
+5. 수정할 기능과 대응되는 `docs/plans/<layer>/<module>/latest.md`를 읽고, 최신 결정과 히스토리를 확인한다.
+6. 새 기획 변경이 있으면 해당 `latest.md`를 갱신하고, 필요하면 과거 원문을 `history/`에 보존한다.
+7. `docs/progress.md`에서 해당 모듈 상태를 `in progress`로 바꾼다.
+8. 그 뒤에만 구현, 수정, 테스트를 시작한다.
 
 이 순서를 건너뛰면 안 된다.
 
 ### 계획 문서 하드 게이트
 
-- 모든 모듈 작업은 구현 전에 `docs/plans/YYYY-MM-DD-module-x-name.md` 계획 문서를 반드시 남긴다.
-- 설계와 구현 계획을 분리한 경우 `docs/plans/YYYY-MM-DD-module-x-name-design.md`와 구현 계획 문서를 모두 남긴다.
+- 모든 모듈 작업은 구현 전에 `docs/plans/<layer>/<module>/latest.md` 최신 계획 문서를 반드시 확인한다.
+- 설계나 구현 계획이 바뀌면 같은 `latest.md`에 현재 결정, 변경 이유, 히스토리 링크, 후속 작업을 갱신한다.
+- 과거 계획 원문은 `docs/plans/<layer>/<module>/history/` 아래에 보존한다.
 - 이미 구현이 끝났더라도 계획 문서가 없으면 작업은 완료가 아니다. 즉시 누락된 계획 문서를 작성하고, `docs/progress.md` 작업 로그에 보완 사실을 남긴다.
 - 계획 문서가 없거나 최신 상태가 아니면 `docs/progress.md` 상태를 `done`으로 바꾸면 안 된다.
-- 에이전트는 구현 시작 전과 종료 전 두 번, 담당 모듈의 `docs/plans` 문서가 존재하는지 확인해야 한다.
+- 에이전트는 구현 시작 전과 종료 전 두 번, 담당 모듈의 `latest.md`가 존재하고 실제 코드/계획과 맞는지 확인해야 한다.
 - 다음 에이전트가 이어받을 때 계획 문서가 누락된 선행 작업을 발견하면, 새 구현보다 먼저 누락 문서를 보완한다.
 
 ## 2. 프로젝트 목표
@@ -43,10 +45,11 @@
 
 1. `docs/codex.md`
 2. `docs/progress.md`
-3. `docs/plan/plan.md`
-4. `docs/plan/modules/*.md`
-5. 로컬 코드
-6. `v2-backup`
+3. 관련 `docs/plans/<layer>/<module>/latest.md`
+4. `docs/plan/plan.md`
+5. `docs/plan/modules/*.md`
+6. 로컬 코드
+7. `v2-backup`
 
 ### 문서 역할
 
@@ -61,6 +64,11 @@
   - 전체 모듈 구조와 병렬 진행 순서
 - `docs/plan/modules/*.md`
   - 각 모듈의 상세 범위와 완료 기준
+- `docs/plans/<layer>/<module>/latest.md`
+  - 기능별 최신 기획
+  - 변경 히스토리 요약
+  - 과거 계획 원문 링크
+  - 다음 에이전트가 반드시 알아야 할 후속 작업
 
 ## 4. 작업 단위 원칙
 
@@ -124,7 +132,7 @@
 
 - Agent: 담당 세션 또는 이름
 - Status: `in progress` -> `done`
-- Plan: `docs/plans/YYYY-MM-DD-module-x-name.md`
+- Plan: `docs/plans/<layer>/<module>/latest.md`
 - Summary: 무엇을 했는지
 - Follow-up: 다음 에이전트가 이어서 할 일
 ```
@@ -133,7 +141,7 @@
 
 - 상태를 바꾸지 않고 작업 완료라고 주장하는 것
 - 로그를 남기지 않고 다음 모듈로 넘어가는 것
-- `docs/plans` 계획 문서 없이 구현을 시작하거나 완료 처리하는 것
+- 관련 `docs/plans/<layer>/<module>/latest.md` 확인과 갱신 없이 구현을 시작하거나 완료 처리하는 것
 - 다른 모듈의 상태를 임의로 `done` 처리하는 것
 
 ## 7. 아키텍처 원칙
@@ -334,7 +342,8 @@ DDL을 생성하거나 수정하는 에이전트는 아래 항목을 반드시 �
 - `docs/progress.md`에서 내가 맡을 모듈이 `ready` 또는 합리적으로 `not started`인지 확인했는가
 - 선행 모듈이 완료 또는 계약 확정 상태인지 확인했는가
 - 모듈 상세 문서를 읽었는가
-- `docs/plans/YYYY-MM-DD-module-x-name.md` 계획 문서를 작성했거나 최신 상태로 갱신했는가
+- 관련 `docs/plans/<layer>/<module>/latest.md`를 읽고 최신 결정과 히스토리를 확인했는가
+- 기획 변경이 있다면 해당 `latest.md`를 갱신했는가
 - 범위 밖 수정이 필요한지 판단했는가
 - 상태를 `in progress`로 바꿨는가
 
@@ -345,7 +354,7 @@ DDL을 생성하거나 수정하는 에이전트는 아래 항목을 반드시 �
 작업 종료 전 아래를 모두 확인한다.
 
 - 내가 맡은 범위만 수정했는가
-- 담당 모듈의 `docs/plans` 계획 문서가 존재하고 실제 구현 내용과 맞는가
+- 담당 모듈의 `docs/plans/<layer>/<module>/latest.md`가 존재하고 실제 구현 내용과 맞는가
 - 필요 테스트를 실행했는가
 - 테스트를 못 돌렸다면 이유를 남겼는가
 - `docs/progress.md` 상태를 갱신했는가

@@ -6,8 +6,9 @@
 
 - 작업 시작 전 `docs/progress.md`에서 상태와 선행 의존성을 먼저 확인한다.
 - 담당 모듈 문서를 읽고, 범위 밖 수정은 하지 않는다.
-- 구현 전에 `docs/plans/YYYY-MM-DD-module-x-name.md` 형식의 실행 계획 문서를 작성하거나 갱신한다.
-- 설계와 구현 계획을 분리한 작업은 `docs/plans/YYYY-MM-DD-module-x-name-design.md`와 구현 계획 문서를 모두 남긴다.
+- 구현 전에 관련 `docs/plans/<layer>/<module>/latest.md`를 읽고 최신 결정과 히스토리를 확인한다.
+- 설계나 구현 계획이 바뀌면 해당 `latest.md`에 변경 이유, 현재 결정, 히스토리 링크, 후속 작업을 남긴다.
+- 과거 계획 원문은 `docs/plans/<layer>/<module>/history/` 아래에 보존한다.
 - 계획 문서가 없으면 구현을 시작하거나 완료 처리하지 않는다.
 - 작업 완료 후 `docs/progress.md`의 상태를 갱신한다.
 - 작업 로그에는 `Plan:` 항목으로 해당 `docs/plans` 문서 경로를 남긴다.
