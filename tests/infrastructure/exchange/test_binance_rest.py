@@ -54,17 +54,32 @@ def test_binance_config_from_env_reads_credentials(monkeypatch):
     assert config.api_secret == "api-secret"
 
 
-def test_binance_config_from_env_selects_testnet(monkeypatch):
+def test_binance_config_from_env_selects_testnet_credentials_and_base_url(monkeypatch):
     monkeypatch.setenv("BINANCE_TESTNET", "true")
+    monkeypatch.setenv("BINANCE_API_KEY", "api-key")
+    monkeypatch.setenv("BINANCE_API_SECRET", "api-secret")
+    monkeypatch.setenv("BINANCE_TEST_API_KEY", "test-api-key")
+    monkeypatch.setenv("BINANCE_TEST_API_SECRET", "test-api-secret")
 
     config = BinanceConfig.from_env()
 
-    assert config.base_url == "https://testnet.binancefuture.com"
+    assert config.base_url == "https://demo-fapi.binance.com"
+    assert config.api_key == "test-api-key"
+    assert config.api_secret == "test-api-secret"
 
 
-def test_binance_config_base_url_override_takes_precedence(monkeypatch):
+def test_binance_config_base_url_override_is_used_for_live_mode(monkeypatch):
+    monkeypatch.setenv("BINANCE_BASE_URL", "https://example.live")
+
+    config = BinanceConfig.from_env()
+
+    assert config.base_url == "https://example.live"
+
+
+def test_binance_config_test_base_url_override_is_used_for_testnet(monkeypatch):
     monkeypatch.setenv("BINANCE_TESTNET", "true")
-    monkeypatch.setenv("BINANCE_BASE_URL", "https://example.test")
+    monkeypatch.setenv("BINANCE_BASE_URL", "https://example.live")
+    monkeypatch.setenv("BINANCE_TEST_BASE_URL", "https://example.test")
 
     config = BinanceConfig.from_env()
 
