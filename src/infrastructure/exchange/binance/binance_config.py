@@ -13,6 +13,8 @@ class BinanceConfig:
     base_url: str = BINANCE_USDM_FUTURES_BASE_URL
     timeout: float = 10.0
     recv_window: int = 5000
+    retry_attempts: int = 1
+    retry_delay: float = 0.0
 
     @classmethod
     def default(cls) -> "BinanceConfig":
@@ -29,6 +31,10 @@ class BinanceConfig:
             base_url=base_url or cls.base_url,
             timeout=float(os.getenv("BINANCE_TIMEOUT", str(cls.timeout))),
             recv_window=int(os.getenv("BINANCE_RECV_WINDOW", str(cls.recv_window))),
+            retry_attempts=int(
+                os.getenv("BINANCE_RETRY_ATTEMPTS", str(cls.retry_attempts))
+            ),
+            retry_delay=float(os.getenv("BINANCE_RETRY_DELAY", str(cls.retry_delay))),
         )
 
 

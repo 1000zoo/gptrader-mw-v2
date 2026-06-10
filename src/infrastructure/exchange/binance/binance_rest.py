@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import time
+from time import sleep
 from typing import Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -64,16 +65,47 @@ def request_json(
     params: Mapping[str, object] | None = None,
     *,
     signed: bool = False,
+    api_key_required: bool = False,
+) -> object:
+    attempts = max(1, config.retry_attempts)
+    for attempt_index in range(attempts):
+        try:
+            return _request_json_once(
+                config,
+                method,
+                path,
+                params,
+                signed=signed,
+                api_key_required=api_key_required,
+            )
+        except (BinanceNetworkError, BinanceRateLimitError) as exc:
+            if attempt_index == attempts - 1:
+                raise
+            sleep(_retry_delay(config, exc))
+    raise RuntimeError("unreachable Binance REST retry state")
+
+
+def _request_json_once(
+    config: BinanceConfig,
+    method: str,
+    path: str,
+    params: Mapping[str, object] | None = None,
+    *,
+    signed: bool = False,
+    api_key_required: bool = False,
 ) -> object:
     request_params = dict(params or {})
     headers: dict[str, str] = {}
+    if signed or api_key_required:
+        if not config.api_key:
+            raise ValueError("Binance requests requiring API key need api_key")
+        headers["X-MBX-APIKEY"] = config.api_key
     if signed:
-        if not config.api_key or not config.api_secret:
-            raise ValueError("signed Binance requests require api_key and api_secret")
+        if not config.api_secret:
+            raise ValueError("signed Binance requests require api_secret")
         request_params.setdefault("timestamp", _epoch_millis())
         request_params.setdefault("recvWindow", config.recv_window)
         request_params = sign_params(request_params, config.api_secret)
-        headers["X-MBX-APIKEY"] = config.api_key
 
     query = urlencode(request_params)
     upper_method = method.upper()
@@ -103,6 +135,24 @@ def request_json(
         raise BinanceInvalidResponseError(
             f"Binance REST response was not valid JSON: {body}"
         ) from exc
+
+
+def _retry_delay(config: BinanceConfig, exc: BaseException) -> float:
+    if isinstance(exc, BinanceRateLimitError):
+        retry_after = _header_value(exc.headers, "Retry-After")
+        if retry_after is not None:
+            try:
+                return float(retry_after)
+            except ValueError:
+                pass
+    return config.retry_delay
+
+
+def _header_value(headers: Mapping[str, object], name: str) -> str | None:
+    for key, value in headers.items():
+        if key.lower() == name.lower():
+            return str(value)
+    return None
 
 
 def _epoch_millis() -> int:

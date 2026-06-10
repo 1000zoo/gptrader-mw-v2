@@ -2,7 +2,7 @@
 
 - Source path: `src/infrastructure/exchange`
 - Module: N
-- Status: `done` for first adapter boundary, `follow-up required` for live Binance readiness.
+- Status: `done` for first adapter boundary and first Binance REST/stream runtime hardening, `follow-up required` for Module T integration and production tuning.
 - Governs: exchange-specific adapters, mappers, and position stream infrastructure.
 
 ## Current Plan
@@ -21,6 +21,17 @@ Development reference: [`binance-usdm-futures-api-spec-2026.md`](binance-usdm-fu
 - `BINANCE_TESTNET=true`: selects the USD-M Futures testnet REST base URL, `https://testnet.binancefuture.com`.
 - `BINANCE_BASE_URL`: explicit base URL override. This takes precedence over `BINANCE_TESTNET`.
 - `BINANCE_TIMEOUT` and `BINANCE_RECV_WINDOW`: request timeout and signed request receive window.
+- `BINANCE_RETRY_ATTEMPTS` and `BINANCE_RETRY_DELAY`: retry count and delay for transient network/rate-limit errors.
+
+`request_json()` now retries transient network failures and Binance rate-limit responses. Rate-limit responses with `Retry-After` take precedence over the configured retry delay. HTTP error classification still distinguishes generic REST failures, rate limits, and unknown execution status responses so order reconciliation can treat ambiguous order submission separately.
+
+## Binance User Data Stream Runtime
+
+`src/infrastructure/exchange/binance/position_stream` owns the authenticated Binance User Data Stream runtime:
+
+- `start_user_data_stream_api`, `keepalive_user_data_stream_api`, and `close_user_data_stream_api` manage `/fapi/v1/listenKey` through API-key-only REST calls.
+- `BinanceUserDataStreamRuntime.consume()` connects to the listen-key websocket URL, keeps the listen key alive, reconnects after stream connection failures, and emits mapped domain `PositionEvent` objects through a caller-provided handler.
+- Raw Binance `ORDER_TRADE_UPDATE` payloads are mapped inside infrastructure and do not cross into application or interfaces code.
 
 ## Documentation Placement
 
@@ -40,7 +51,6 @@ Exchange infrastructure plans and design notes must stay under `docs/plans/infra
 
 ## Follow-Up
 
-- Refactor Binance adapters to accept `BinanceConfig` and optional internal gateway rather than raw vendor clients.
-- Align the gateway with the actual selected Binance SDK or direct REST API.
-- Add retry, timeout, rate-limit, and exchange error translation.
-- Implement authenticated user-data/position stream runtime with reconnect and heartbeat handling.
+- Module T should connect `BinanceUserDataStreamRuntime` to application/domain position update flows without exposing Binance payloads.
+- Add production observability around reconnect counts, listen-key keepalive failures, and dropped/ignored stream event types.
+- Add broader integration tests against Binance testnet before live trading.

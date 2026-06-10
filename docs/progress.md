@@ -78,6 +78,23 @@
 
 ## 작업 로그
 
+### 2026-06-10 Module N Binance Runtime Hardening
+
+- Agent: Codex
+- Status: `follow-up required` -> `done`
+- Plan: `docs/plans/infrastructure/exchange/latest.md`
+- Summary: `BinanceConfig`와 `request_json()`에 transient network/rate-limit retry 설정을 추가하고, API-key-only REST 호출을 지원하도록 보강했다. `src/infrastructure/exchange/binance/position_stream`에는 listen-key 발급/연장/종료 함수, websocket URL 생성, reconnect 가능한 `BinanceUserDataStreamRuntime`, Binance `ORDER_TRADE_UPDATE` -> domain `PositionEvent` 매핑을 추가했다.
+- Follow-up: Module T에서 `BinanceUserDataStreamRuntime`을 application/domain position update 흐름에 연결한다. 운영 전에는 Binance testnet 통합 테스트, reconnect/keepalive observability, ignored event 모니터링을 추가한다.
+
+### 2026-05-26 Module N Binance Direct REST
+
+- Agent: Codex
+- Status: `follow-up required` -> `done`
+- Plan: `docs/plans/infrastructure/exchange/latest.md`
+- History: `docs/plans/infrastructure/exchange/history/2026-05-26-binance-direct-rest.md`, `docs/plans/infrastructure/exchange/history/2026-05-26-binance-direct-rest-design.md`
+- Summary: Binance exchange adapters가 raw vendor client를 직접 주입받지 않도록 `BinanceConfig`와 project-owned direct REST helper를 추가했다. market data, account, order execution adapter는 Binance endpoint별 local API function을 통해 REST helper를 호출하고, 기존 mapper를 통해 domain output으로 변환한다. Binance API review에서 확인한 LIMIT `timeInForce`, reduce-only encoding, futures account collateral mapping, REST trade error classification, boundary test gap, explicit testnet mode 문서도 해결 상태로 정리했다.
+- Follow-up: 다음 에이전트는 `docs/plans/infrastructure/exchange/latest.md` 기준으로 retry, timeout, rate-limit, exchange error translation을 보강하고 authenticated user-data/position stream runtime을 구현한다. Module T 연결은 position stream runtime 이후 별도 interfaces 작업으로 진행한다.
+
 ### 2026-05-26 Planning Docs Reorganization
 
 - Agent: Codex

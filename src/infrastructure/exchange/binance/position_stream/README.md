@@ -1,10 +1,15 @@
 # Binance Position Stream
 
-This package is reserved for the authenticated Binance position/user-data stream.
+This package contains the authenticated Binance User Data Stream runtime.
+
+Implemented:
+
+- listen-key start, keepalive, and close calls through `/fapi/v1/listenKey`.
+- websocket URL construction for production, testnet, and custom base URLs.
+- async runtime with reconnect delay and listen-key keepalive task.
+- `ORDER_TRADE_UPDATE` mapping into domain `PositionEvent` values.
 
 Deferred work:
 
-- Build the Binance user-data stream runtime.
-- Add reconnect, heartbeat, and stale stream handling.
-- Map stream events into domain position events without exposing vendor payloads.
 - Wire the stream into Module T websocket monitoring once Module T exists.
+- Add production metrics/logging for reconnects, keepalive failures, and ignored events.

@@ -40,6 +40,8 @@ def test_binance_config_default_uses_usdm_futures_base_url():
     assert config.api_secret is None
     assert config.timeout == 10.0
     assert config.recv_window == 5000
+    assert config.retry_attempts == 1
+    assert config.retry_delay == 0.0
 
 
 def test_binance_config_from_env_reads_credentials(monkeypatch):
@@ -145,6 +147,83 @@ def test_request_json_builds_signed_post_form(monkeypatch):
     assert body["timestamp"] == ["1499827319559"]
     assert body["recvWindow"] == ["6000"]
     assert "signature" in body
+
+
+def test_request_json_builds_api_key_only_request(monkeypatch):
+    requests = []
+
+    def fake_urlopen(request, timeout):
+        requests.append(request)
+        return _Response('{"listenKey": "listen-key"}')
+
+    monkeypatch.setattr(binance_rest, "urlopen", fake_urlopen)
+
+    result = request_json(
+        BinanceConfig(api_key="api-key", base_url="https://api.test"),
+        "POST",
+        "/fapi/v1/listenKey",
+        api_key_required=True,
+    )
+
+    request = requests[0]
+    assert result == {"listenKey": "listen-key"}
+    assert request.full_url == "https://api.test/fapi/v1/listenKey"
+    assert request.headers["X-mbx-apikey"] == "api-key"
+    assert request.data is None
+
+
+def test_request_json_retries_network_errors(monkeypatch):
+    attempts = []
+    sleeps = []
+
+    def fake_urlopen(request, timeout):
+        attempts.append(request)
+        if len(attempts) == 1:
+            raise URLError("temporary reset")
+        return _Response('{"ok": true}')
+
+    monkeypatch.setattr(binance_rest, "urlopen", fake_urlopen)
+    monkeypatch.setattr(binance_rest, "sleep", lambda seconds: sleeps.append(seconds))
+
+    result = request_json(
+        BinanceConfig(base_url="https://api.test", retry_attempts=2, retry_delay=0.25),
+        "GET",
+        "/fapi/v1/time",
+    )
+
+    assert result == {"ok": True}
+    assert len(attempts) == 2
+    assert sleeps == [0.25]
+
+
+def test_request_json_retries_rate_limit_errors_with_retry_after(monkeypatch):
+    attempts = []
+    sleeps = []
+
+    def fake_urlopen(request, timeout):
+        attempts.append(request)
+        if len(attempts) == 1:
+            raise HTTPError(
+                request.full_url,
+                429,
+                "Too Many Requests",
+                {"Retry-After": "2"},
+                BytesIO(b'{"code": -1003, "msg": "Too many requests"}'),
+            )
+        return _Response('{"ok": true}')
+
+    monkeypatch.setattr(binance_rest, "urlopen", fake_urlopen)
+    monkeypatch.setattr(binance_rest, "sleep", lambda seconds: sleeps.append(seconds))
+
+    result = request_json(
+        BinanceConfig(base_url="https://api.test", retry_attempts=2, retry_delay=0.25),
+        "GET",
+        "/fapi/v1/time",
+    )
+
+    assert result == {"ok": True}
+    assert len(attempts) == 2
+    assert sleeps == [2.0]
 
 
 def test_request_json_classifies_rate_limit_errors(monkeypatch):
