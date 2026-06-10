@@ -221,6 +221,7 @@ v2-backup/test.py
 test.py
 ws_test.py
 .env
+.env.test
 
 /logs
 /_study
