@@ -1,7 +1,7 @@
 # Gptrader V3 Agent Charter
 
 이 문서는 `gptrader v3`에서 작업하는 모든 에이전트의 공통 운영 헌장이다.
-아키텍처 원칙, 작업 시작 절차, 상태 갱신 규칙, 런타임 작업 경계 규칙을 한 문서에 통합한다.
+아키텍처 원칙, 작업 시작 절차, 상태 갱신 규칙, 모듈 경계 규칙을 한 문서에 통합한다.
 
 ## 1. 이 프로젝트에서 가장 먼저 할 일
 
@@ -9,22 +9,23 @@
 
 1. `docs/codex.md`를 읽는다.
 2. `docs/progress.md`를 읽는다.
-3. 현재 phase의 기준 문서인 `docs/plans/operations/runtime/latest.md`를 읽는다.
-4. 수정할 기능과 대응되는 `docs/plans/<layer>/<module>/latest.md` 또는 운영 문서를 읽고, 최신 결정과 히스토리를 확인한다.
-5. 새 기획 변경이 있으면 해당 `latest.md`를 갱신하고, 필요하면 과거 원문을 `history/`에 보존한다.
-6. `docs/progress.md`에서 해당 OP 단계 상태를 `in progress`로 바꾼다.
-7. 그 뒤에만 구현, 수정, 테스트를 시작한다.
+3. `docs/plan/modules/README.md`를 읽는다.
+4. 자신이 맡을 모듈의 상세 문서를 읽는다.
+5. 수정할 기능과 대응되는 `docs/plans/<layer>/<module>/latest.md`를 읽고, 최신 결정과 히스토리를 확인한다.
+6. 새 기획 변경이 있으면 해당 `latest.md`를 갱신하고, 필요하면 과거 원문을 `history/`에 보존한다.
+7. `docs/progress.md`에서 해당 모듈 상태를 `in progress`로 바꾼다.
+8. 그 뒤에만 구현, 수정, 테스트를 시작한다.
 
 이 순서를 건너뛰면 안 된다.
 
 ### 계획 문서 하드 게이트
 
-- 모든 런타임 작업은 구현 전에 `docs/plans/operations/runtime/latest.md`와 관련 `docs/plans/<layer>/<module>/latest.md` 최신 계획 문서를 반드시 확인한다.
+- 모든 모듈 작업은 구현 전에 `docs/plans/<layer>/<module>/latest.md` 최신 계획 문서를 반드시 확인한다.
 - 설계나 구현 계획이 바뀌면 같은 `latest.md`에 현재 결정, 변경 이유, 히스토리 링크, 후속 작업을 갱신한다.
 - 과거 계획 원문은 `docs/plans/<layer>/<module>/history/` 아래에 보존한다.
 - 이미 구현이 끝났더라도 계획 문서가 없으면 작업은 완료가 아니다. 즉시 누락된 계획 문서를 작성하고, `docs/progress.md` 작업 로그에 보완 사실을 남긴다.
 - 계획 문서가 없거나 최신 상태가 아니면 `docs/progress.md` 상태를 `done`으로 바꾸면 안 된다.
-- 에이전트는 구현 시작 전과 종료 전 두 번, 담당 OP 단계와 관련 `latest.md`가 실제 코드/계획과 맞는지 확인해야 한다.
+- 에이전트는 구현 시작 전과 종료 전 두 번, 담당 모듈의 `latest.md`가 존재하고 실제 코드/계획과 맞는지 확인해야 한다.
 - 다음 에이전트가 이어받을 때 계획 문서가 누락된 선행 작업을 발견하면, 새 구현보다 먼저 누락 문서를 보완한다.
 
 ## 2. 프로젝트 목표
@@ -44,12 +45,11 @@
 
 1. `docs/codex.md`
 2. `docs/progress.md`
-3. `docs/plans/operations/runtime/latest.md`
-4. 관련 `docs/plans/<layer>/<module>/latest.md`
-5. `docs/plan/plan.md`
-6. `docs/plan/modules/*.md`
-7. 로컬 코드
-8. `v2-backup`
+3. 관련 `docs/plans/<layer>/<module>/latest.md`
+4. `docs/plan/plan.md`
+5. `docs/plan/modules/*.md`
+6. 로컬 코드
+7. `v2-backup`
 
 ### 문서 역할
 
@@ -58,10 +58,8 @@
   - 아키텍처 제약
   - 에이전트 행동 규칙
 - `docs/progress.md`
-  - 현재 어떤 실행 준비 단계를 진행해야 하는지 보여주는 작업 보드
+  - 현재 누가 무엇을 해야 하는지 보여주는 작업 보드
   - 상태 갱신의 단일 기준
-- `docs/plans/operations/runtime/latest.md`
-  - 실제 실행, 배포, testnet, live arming까지의 최신 운영 계획
 - `docs/plan/plan.md`
   - 전체 모듈 구조와 병렬 진행 순서
 - `docs/plan/modules/*.md`
@@ -74,17 +72,15 @@
 
 ## 4. 작업 단위 원칙
 
-- 현재 작업 단위는 기본적으로 `docs/progress.md`의 OP 단계 하나다.
-- 한 세션은 하나의 OP 단계를 소유하는 것을 원칙으로 한다.
+- 작업 단위는 기본적으로 모듈 하나다.
+- 한 세션은 하나의 모듈만 소유하는 것을 원칙으로 한다.
 - 다른 모듈을 수정해야 하면 먼저 그 이유를 문서에 남긴다.
 - 선행 계약이 없는 상태에서 하위 구현으로 내려가면 안 된다.
 - 구현보다 먼저 경계와 책임을 고정한다.
 
-## 5. 현재 런타임 운영 방식
+## 5. 현재 모듈 운영 방식
 
-이전 Module A-T 구현 진행판은 완료되었고, 현재 기준은 runtime operations다.
-기존 모듈 문서는 `docs/plan/modules/`와 각 `docs/plans/**/history/`에 보존한다.
-새 작업은 `docs/plans/operations/runtime/latest.md`와 `docs/progress.md`의 OP 단계를 기준으로 진행한다.
+모든 모듈 상세 계획은 `docs/plan/modules/` 아래에 있다.
 
 예시:
 
@@ -103,7 +99,7 @@
 - 완료 기준
 - 다음 연결 모듈
 
-에이전트는 운영 단계의 선행 조건과 exit criteria를 벗어나지 않는 방향으로만 작업해야 한다.
+에이전트는 이 범위를 벗어나지 않는 방향으로만 작업해야 한다.
 
 ## 6. Progress Board 규칙
 
@@ -111,7 +107,7 @@
 
 ### 허용 상태
 
-- `queued`
+- `not started`
 - `ready`
 - `in progress`
 - `blocked`
@@ -132,11 +128,11 @@
 기본 형식:
 
 ```markdown
-### YYYY-MM-DD OP-X
+### YYYY-MM-DD Module X
 
 - Agent: 담당 세션 또는 이름
 - Status: `in progress` -> `done`
-- Plan: `docs/plans/operations/runtime/latest.md`
+- Plan: `docs/plans/<layer>/<module>/latest.md`
 - Summary: 무엇을 했는지
 - Follow-up: 다음 에이전트가 이어서 할 일
 ```
@@ -144,9 +140,9 @@
 ### 금지 사항
 
 - 상태를 바꾸지 않고 작업 완료라고 주장하는 것
-- 로그를 남기지 않고 다음 OP 단계로 넘어가는 것
+- 로그를 남기지 않고 다음 모듈로 넘어가는 것
 - 관련 `docs/plans/<layer>/<module>/latest.md` 확인과 갱신 없이 구현을 시작하거나 완료 처리하는 것
-- 다른 OP 단계의 상태를 임의로 `done` 처리하는 것
+- 다른 모듈의 상태를 임의로 `done` 처리하는 것
 
 ## 7. 아키텍처 원칙
 
@@ -343,9 +339,9 @@ DDL을 생성하거나 수정하는 에이전트는 아래 항목을 반드시 �
 
 작업 시작 전 아래를 모두 확인한다.
 
-- `docs/progress.md`에서 내가 맡을 OP 단계가 `ready` 또는 `queued`인지 확인했는가
-- 선행 OP 단계가 완료 또는 계약 확정 상태인지 확인했는가
-- `docs/plans/operations/runtime/latest.md`를 읽었는가
+- `docs/progress.md`에서 내가 맡을 모듈이 `ready` 또는 합리적으로 `not started`인지 확인했는가
+- 선행 모듈이 완료 또는 계약 확정 상태인지 확인했는가
+- 모듈 상세 문서를 읽었는가
 - 관련 `docs/plans/<layer>/<module>/latest.md`를 읽고 최신 결정과 히스토리를 확인했는가
 - 기획 변경이 있다면 해당 `latest.md`를 갱신했는가
 - 범위 밖 수정이 필요한지 판단했는가
@@ -358,7 +354,7 @@ DDL을 생성하거나 수정하는 에이전트는 아래 항목을 반드시 �
 작업 종료 전 아래를 모두 확인한다.
 
 - 내가 맡은 범위만 수정했는가
-- 담당 OP 단계와 관련 `latest.md`가 존재하고 실제 구현 내용과 맞는가
+- 담당 모듈의 `docs/plans/<layer>/<module>/latest.md`가 존재하고 실제 구현 내용과 맞는가
 - 필요 테스트를 실행했는가
 - 테스트를 못 돌렸다면 이유를 남겼는가
 - `docs/progress.md` 상태를 갱신했는가
@@ -367,15 +363,15 @@ DDL을 생성하거나 수정하는 에이전트는 아래 항목을 반드시 �
 
 ## 19. 빠른 시작 규칙
 
-현재 바로 시작 가능한 우선 OP 단계는 `docs/progress.md`를 따른다.
+현재 바로 시작 가능한 우선 모듈은 `docs/progress.md`를 따른다.
 새 에이전트는 기본적으로 아래 순서에서 선택한다.
 
-1. `ready` 상태 OP 단계
-2. 현재 목표에 가장 가까운 OP 단계
-3. 선행 의존성이 모두 충족된 `queued` 단계
+1. `ready` 상태 모듈
+2. 현재 우선순위 상단 모듈
+3. 선행 의존성이 모두 충족된 모듈
 
-모호하면 새로운 범위를 임의로 열지 말고, 이미 `ready`인 OP 단계부터 진행한다.
+모호하면 새로운 모듈을 임의로 열지 말고, 이미 `ready`인 모듈부터 진행한다.
 
 ## 20. 한 줄 원칙
 
-이 프로젝트에서 에이전트는 코드를 먼저 쓰는 존재가 아니라, 문서화된 운영 단계와 경계를 따라 안전하게 실제 실행으로 이어가는 존재다.
+이 프로젝트에서 에이전트는 코드를 먼저 쓰는 존재가 아니라, 문서화된 모듈 경계를 따라 안전하게 다음 작업을 이어가는 존재다.
