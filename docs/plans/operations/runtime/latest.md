@@ -38,7 +38,7 @@ No live order path should exist unless the selected mode, credentials, risk sett
 ### 1. Runtime Environment
 
 - Standardize commands on Python 3.10 or newer.
-- Document test and run commands for Windows PowerShell.
+- Document test and run commands for Windows PowerShell. Current runbook: `docs/runbooks/local-runtime.md`.
 - Ensure `requirements.txt` installs into the same interpreter used to run the app.
 - Keep `python -m pytest` green before runtime wiring changes are marked done.
 
@@ -58,6 +58,8 @@ No live order path should exist unless the selected mode, credentials, risk sett
 ### 4. Strategy And Indicator Pipeline
 
 - Add at least one concrete strategy or signal generator that can run outside tests.
+- Start with a deliberately simple example strategy implementation under `src/domain/strategy/implementations`, such as a latest-close-vs-moving-average strategy. The goal is not profitability; it is a deterministic runtime smoke path.
+- Pair the example strategy with a small indicator fixture or loader so local/dry-run composition can build `StrategyContext` without test fakes.
 - Add an indicator loader/calculator for the configured symbol/timeframe.
 - Decide whether strategy definitions from persistence instantiate live Python objects or only document runtime configuration for the first run.
 
@@ -111,12 +113,12 @@ No live order path should exist unless the selected mode, credentials, risk sett
 
 | Step | Status | Exit Criteria |
 |------|--------|---------------|
-| OP-1 Runtime environment | `ready` | Python 3.10+ command documented, dependencies installed, `python -m pytest` green. |
-| OP-2 Local composition root | `ready` | App can start with fake/local adapters and report healthy readiness. |
-| OP-3 Concrete strategy/indicator path | `queued` | A real non-test signal path can produce `ExecuteTradeCommand` inputs. |
-| OP-4 Local persistence/recovery | `queued` | Position/order/run state can be stored and restored locally. |
-| OP-5 API readiness/status | `queued` | Health/readiness/status endpoints reflect runtime dependencies. |
-| OP-6 Scheduler local runner | `queued` | A scheduled dry-run trade command can execute once without overlap. |
+| OP-1 Runtime environment | `done` | Python 3.10+ command documented, dependencies installed, `python -m pytest` green. |
+| OP-2 Local composition root | `done` | App can start with fake/local adapters and report healthy readiness. |
+| OP-3 Concrete strategy/indicator path | `done` | An example strategy implementation plus local indicator fixture/loader can produce `ExecuteTradeCommand` inputs. |
+| OP-4 Local persistence/recovery | `done` | Position/order/run state can be stored and restored locally. |
+| OP-5 API readiness/status | `done` | Health/readiness/status endpoints reflect runtime dependencies. |
+| OP-6 Scheduler local runner | `ready` | A scheduled dry-run trade command can execute once without overlap. |
 | OP-7 Websocket local runner | `queued` | Position listener can process replay/fake stream events and persist updates. |
 | OP-8 Messaging wiring | `queued` | Runtime failure alert can be emitted without breaking the caller. |
 | OP-9 Binance testnet preflight | `blocked` | Requires OP-2 through OP-5 plus testnet credentials. |
@@ -126,6 +128,10 @@ No live order path should exist unless the selected mode, credentials, risk sett
 ## History
 
 - 2026-06-11: Created runtime operations plan and switched progress tracking from module completion to execution readiness.
+- 2026-06-12: Added OP-1/OP-2 local runtime skeleton plan details and local runtime runbook.
+- 2026-06-12: Added OP-3 example moving-average strategy and local market/indicator context builder.
+- 2026-06-12: Added OP-4 SQLite runtime state repository for position, position event, and generic runtime records.
+- 2026-06-12: Added OP-5 local `/status` endpoint and runtime status details.
 
 ## Follow-Up
 
