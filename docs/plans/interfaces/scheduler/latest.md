@@ -7,7 +7,7 @@
 
 ## Current Plan
 
-Schedulers receive already-constructed use cases and command factories, call one use case per scheduled method, and return immutable execution records with timing, command, result, and error state. They do not own APScheduler, cron, process lifecycle, or adapter composition.
+Schedulers receive already-constructed use cases and command factories, call one use case per scheduled method, and return immutable execution records with timing, command, result, and error state. The lifecycle scheduler exposes separate methods for backtest-cycle runs and promotion lifecycle runs. Schedulers do not own APScheduler, cron, process lifecycle, or adapter composition.
 
 ## History
 
@@ -17,5 +17,6 @@ Schedulers receive already-constructed use cases and command factories, call one
 ## Follow-Up
 
 - Operational deployment still needs a runner or composition root that builds adapters, repositories, strategies, command factories, and scheduler triggers.
+- Strategy lifecycle scheduling can call the backtest-cycle scheduler method first, then call the existing promotion lifecycle method per strategy target using the saved `BACKTESTED` evaluations.
 - Align the runner with the runtime readiness checklist in `docs/plans/interfaces/api/latest.md`, especially overlap prevention, idempotent client order ids, persisted scheduler results, and failure visibility.
 

@@ -74,6 +74,18 @@ def test_user_data_stream_api_functions_use_api_key_only_requests(monkeypatch):
     ]
 
 
+def test_testnet_user_data_stream_uses_binance_futures_stream_host(monkeypatch):
+    monkeypatch.setenv("BINANCE_TESTNET", "true")
+
+    config = BinanceConfig.from_env()
+
+    assert config.base_url == "https://demo-fapi.binance.com"
+    assert (
+        build_user_data_stream_url(config, "listen-key")
+        == "wss://fstream.binancefuture.com/ws/listen-key"
+    )
+
+
 def test_map_order_trade_update_to_position_increase_event():
     payload = {
         "e": "ORDER_TRADE_UPDATE",

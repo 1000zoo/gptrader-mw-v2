@@ -29,4 +29,4 @@ Add a named constructor or environment flag such as `BINANCE_TESTNET=true` that 
 
 ## Resolution
 
-`src/infrastructure/exchange/binance/binance_config.py` now supports `BINANCE_TESTNET=true`, which selects `https://testnet.binancefuture.com` unless `BINANCE_BASE_URL` is explicitly set. `docs/plans/infrastructure/exchange/latest.md` documents that precedence, and `tests/infrastructure/exchange/test_binance_rest.py` covers default, testnet, and override behavior.
+`src/infrastructure/exchange/binance/binance_config.py` now supports `BINANCE_TESTNET=true`, which selects `https://demo-fapi.binance.com` unless a testnet base URL override is explicitly set. `docs/plans/infrastructure/exchange/latest.md` documents the REST and websocket testnet endpoints, and `tests/infrastructure/exchange/test_binance_rest.py` plus `tests/infrastructure/exchange/test_binance_position_stream.py` cover default, testnet, override, and stream URL behavior.

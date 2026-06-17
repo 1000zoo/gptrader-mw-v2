@@ -48,9 +48,11 @@ class RuntimeSettings:
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> "RuntimeSettings":
         mode = RuntimeMode(_value(env, "GPTRADER_MODE", RuntimeMode.LOCAL.value))
+        live_armed = _value(env, "GPTRADER_LIVE_ARMED", "false").lower() == "true"
+        _validate_mode_environment(mode, env, live_armed=live_armed)
         return cls(
             mode=mode,
-            live_armed=_value(env, "GPTRADER_LIVE_ARMED", "false").lower() == "true",
+            live_armed=live_armed,
             symbol=_value(env, "GPTRADER_SYMBOL", "BTCUSDT"),
             timeframe=_value(env, "GPTRADER_TIMEFRAME", "1m"),
             candle_limit=int(_value(env, "GPTRADER_CANDLE_LIMIT", "100")),
@@ -67,3 +69,22 @@ class RuntimeSettings:
                 "sqlite:///./gptrader-local.sqlite3",
             ),
         )
+
+
+def _validate_mode_environment(
+    mode: RuntimeMode,
+    env: Mapping[str, str],
+    *,
+    live_armed: bool,
+) -> None:
+    if mode is RuntimeMode.TESTNET:
+        _require_env(env, "BINANCE_TEST_API_KEY")
+        _require_env(env, "BINANCE_TEST_API_SECRET")
+    if mode is RuntimeMode.LIVE_ARMED and live_armed:
+        _require_env(env, "BINANCE_API_KEY")
+        _require_env(env, "BINANCE_API_SECRET")
+
+
+def _require_env(env: Mapping[str, str], name: str) -> None:
+    if not _value(env, name, ""):
+        raise ValueError(f"{name} is required for selected runtime mode")

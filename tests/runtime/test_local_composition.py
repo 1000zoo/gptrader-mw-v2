@@ -25,3 +25,17 @@ def test_local_app_exposes_health_and_readiness_routes() -> None:
     assert readiness.endpoint()["details"]["ready_for"] == "local"
     assert status.endpoint()["data"]["trade_controls"] == "disabled"
     assert status.endpoint()["data"]["live_order_path"] == "disabled"
+
+
+def test_local_runtime_can_run_strategy_backtest_cycle() -> None:
+    runtime = create_local_runtime(RuntimeSettings(symbol="BTCUSDT"))
+
+    result = runtime.run_strategy_backtest_cycle("cycle-local")
+
+    assert result.succeeded_count == 2
+    assert result.failed_count == 0
+    assert {item.strategy_id for item in result.items} == {
+        "latest-close-moving-average",
+        "session-volume-profile",
+    }
+    assert runtime.status_details()["strategy_backtest_cycle"]["succeeded_count"] == 2

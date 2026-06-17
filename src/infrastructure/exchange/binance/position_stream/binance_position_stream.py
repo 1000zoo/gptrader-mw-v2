@@ -114,8 +114,8 @@ def build_user_data_stream_url(config: BinanceConfig, listen_key: str) -> str:
     parsed = urlparse(config.base_url)
     if parsed.netloc == "fapi.binance.com":
         return f"wss://fstream.binance.com/ws/{listen_key}"
-    if parsed.netloc == "testnet.binancefuture.com":
-        return f"wss://stream.binancefuture.com/ws/{listen_key}"
+    if parsed.netloc in {"demo-fapi.binance.com", "testnet.binancefuture.com"}:
+        return f"wss://fstream.binancefuture.com/ws/{listen_key}"
     scheme = "wss" if parsed.scheme == "https" else "ws"
     return f"{scheme}://{parsed.netloc}/ws/{listen_key}"
 

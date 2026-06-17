@@ -7,7 +7,7 @@
 
 ## Current Plan
 
-Persistence currently implements SQLite adapters for strategy repository and signal log repository ports. SQL DDL exists for broader domain persistence, but operational Postgres wiring and repositories for position/order/execution remain follow-up work.
+Persistence currently implements SQLite adapters for strategy repository, signal log repository, and local runtime state. SQL DDL exists for broader domain persistence and now includes the `runtime_positions`, `runtime_position_events`, and `runtime_records` local runtime tables. Operational Postgres wiring and full repositories for order/execution/trade-run state remain follow-up work.
 
 ## History
 
@@ -18,5 +18,5 @@ Persistence currently implements SQLite adapters for strategy repository and sig
 ## Follow-Up
 
 - Before production runners are added, decide whether composition uses SQLite, Postgres, or separate adapters per deployment mode.
-- Implement or explicitly defer operational repositories for positions, position events, order requests, order results, execution reports, and trade runs before live trading. See the runtime readiness checklist in `docs/plans/interfaces/api/latest.md`.
+- Implement or explicitly defer operational repositories for order requests, order results, execution reports, and trade runs before live trading. Local runtime position and generic runtime-record storage exists, but production recovery/reconciliation still needs an explicit deployment adapter decision. See the runtime readiness checklist in `docs/plans/interfaces/api/latest.md`.
 

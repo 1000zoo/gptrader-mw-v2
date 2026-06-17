@@ -23,6 +23,9 @@ WHERE type = 'table'
       'research_runs',
       'risk_checks',
       'risk_policies',
+      'runtime_position_events',
+      'runtime_positions',
+      'runtime_records',
       'signal_generator_regime_routes',
       'strategy_definitions',
       'signal_generator_definitions',
@@ -69,6 +72,9 @@ WHERE type = 'index'
       'idx_research_runs_symbol_timeframe_reg_ymd',
       'idx_risk_checks_allowed_reason_reg_ymd',
       'idx_risk_policies_reg_ymd',
+      'idx_runtime_position_events_position_reg_ymd',
+      'idx_runtime_positions_symbol_status_reg_ymd',
+      'idx_runtime_records_type_reg_ymd',
       'idx_signal_generator_regime_routes_generator',
       'idx_strategy_definitions_reg_ymd',
       'idx_signal_generator_definitions_reg_ymd',
@@ -110,6 +116,9 @@ WITH expected_tables(name) AS (
         ('research_runs'),
         ('risk_checks'),
         ('risk_policies'),
+        ('runtime_position_events'),
+        ('runtime_positions'),
+        ('runtime_records'),
         ('signal_generator_regime_routes'),
         ('strategy_definitions'),
         ('signal_generator_definitions'),
@@ -161,6 +170,9 @@ WITH expected_indexes(name) AS (
         ('idx_research_runs_symbol_timeframe_reg_ymd'),
         ('idx_risk_checks_allowed_reason_reg_ymd'),
         ('idx_risk_policies_reg_ymd'),
+        ('idx_runtime_position_events_position_reg_ymd'),
+        ('idx_runtime_positions_symbol_status_reg_ymd'),
+        ('idx_runtime_records_type_reg_ymd'),
         ('idx_signal_generator_regime_routes_generator'),
         ('idx_strategy_definitions_reg_ymd'),
         ('idx_signal_generator_definitions_reg_ymd'),
@@ -196,21 +208,16 @@ WITH expected_common_columns(table_name, column_name) AS (
     SELECT name, 'upd_dt' FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
     UNION ALL
     SELECT name, 'use_yn' FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-),
-actual_columns AS (
-    SELECT sqlite_master.name AS table_name, table_info.name AS column_name
-    FROM sqlite_master, pragma_table_info(sqlite_master.name) AS table_info
-    WHERE sqlite_master.type = 'table'
-      AND sqlite_master.name NOT LIKE 'sqlite_%'
 )
 SELECT
     'missing_common_column' AS issue,
     expected_common_columns.table_name || '.' || expected_common_columns.column_name AS object_name
 FROM expected_common_columns
-LEFT JOIN actual_columns
-  ON actual_columns.table_name = expected_common_columns.table_name
- AND actual_columns.column_name = expected_common_columns.column_name
-WHERE actual_columns.column_name IS NULL
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM pragma_table_info(expected_common_columns.table_name) AS table_info
+    WHERE table_info.name = expected_common_columns.column_name
+)
 ORDER BY object_name;
 
 SELECT

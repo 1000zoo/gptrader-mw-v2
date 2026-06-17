@@ -3,6 +3,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from src.application.usecases.strategy_lifecycle import (
+    RunStrategyBacktestCycleCommand,
+    RunStrategyBacktestCycleResult,
+    RunStrategyBacktestCycleUseCase,
     RunStrategyLifecycleCommand,
     RunStrategyLifecycleResult,
     RunStrategyLifecycleUseCase,
@@ -27,13 +30,31 @@ class ScheduledStrategyLifecycleRun:
         return self.error is None
 
 
+@dataclass(frozen=True)
+class ScheduledStrategyBacktestCycleRun:
+    schedule_name: str
+    started_at: datetime
+    finished_at: datetime
+    command: RunStrategyBacktestCycleCommand | None = None
+    result: RunStrategyBacktestCycleResult | None = None
+    error: Exception | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.error is None
+
+
 class StrategyLifecycleScheduler:
     def __init__(
         self,
         run_strategy_lifecycle_usecase: RunStrategyLifecycleUseCase,
         now: Callable[[], datetime] | None = None,
+        run_strategy_backtest_cycle_usecase: (
+            RunStrategyBacktestCycleUseCase | None
+        ) = None,
     ) -> None:
         self._run_strategy_lifecycle_usecase = run_strategy_lifecycle_usecase
+        self._run_strategy_backtest_cycle_usecase = run_strategy_backtest_cycle_usecase
         self._now = now or _utc_now
 
     def run_lifecycle(
@@ -51,6 +72,33 @@ class StrategyLifecycleScheduler:
         except Exception as exc:
             error = exc
         return ScheduledStrategyLifecycleRun(
+            schedule_name=schedule_name,
+            started_at=started_at,
+            finished_at=self._now(),
+            command=command,
+            result=result,
+            error=error,
+        )
+
+    def run_backtest_cycle(
+        self,
+        schedule_name: str,
+        command_factory: Callable[[], RunStrategyBacktestCycleCommand],
+    ) -> ScheduledStrategyBacktestCycleRun:
+        started_at = self._now()
+        command: RunStrategyBacktestCycleCommand | None = None
+        result: RunStrategyBacktestCycleResult | None = None
+        error: Exception | None = None
+        try:
+            command = command_factory()
+            if self._run_strategy_backtest_cycle_usecase is None:
+                raise RuntimeError(
+                    "run_strategy_backtest_cycle_usecase is not configured"
+                )
+            result = self._run_strategy_backtest_cycle_usecase.execute(command)
+        except Exception as exc:
+            error = exc
+        return ScheduledStrategyBacktestCycleRun(
             schedule_name=schedule_name,
             started_at=started_at,
             finished_at=self._now(),

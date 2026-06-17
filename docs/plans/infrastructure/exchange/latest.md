@@ -18,8 +18,9 @@ Development reference: [`binance-usdm-futures-api-spec-2026.md`](binance-usdm-fu
 `BinanceConfig.default()` targets live USD-M Futures at `https://fapi.binance.com`. `BinanceConfig.from_env()` reads credentials and runtime settings from environment variables:
 
 - `BINANCE_API_KEY` / `BINANCE_API_SECRET`: credentials for signed endpoints.
-- `BINANCE_TESTNET=true`: selects the USD-M Futures testnet REST base URL, `https://testnet.binancefuture.com`.
-- `BINANCE_BASE_URL`: explicit base URL override. This takes precedence over `BINANCE_TESTNET`.
+- `BINANCE_TESTNET=true`: selects the USD-M Futures testnet REST base URL, `https://demo-fapi.binance.com`. Binance documents the testnet websocket base URL separately as `wss://fstream.binancefuture.com`.
+- `BINANCE_TEST_BASE_URL`: explicit REST base URL override for testnet mode.
+- `BINANCE_BASE_URL`: explicit REST base URL override for live mode.
 - `BINANCE_TIMEOUT` and `BINANCE_RECV_WINDOW`: request timeout and signed request receive window.
 - `BINANCE_RETRY_ATTEMPTS` and `BINANCE_RETRY_DELAY`: retry count and delay for transient network/rate-limit errors.
 
