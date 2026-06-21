@@ -99,6 +99,9 @@ Do not add live trade controls to local runtime until persistence recovery, mode
 Dry-run mode executes the real trade use case path through the scheduler and API
 boundary, but uses a local order adapter that records intended orders in SQLite
 instead of calling Binance or sending Slack/Telegram notifications.
+Runtime logs are written under `logs/YYYY-MM-DD/runtime.log` by default. The
+runtime uses loguru when it is installed from `requirements.txt`, and falls back
+to Python logging in a partially installed local interpreter.
 
 ```powershell
 $env:GPTRADER_MODE='dry-run'

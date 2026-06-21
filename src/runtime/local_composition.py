@@ -43,14 +43,23 @@ from src.runtime.local_data import (
     parse_symbol,
     parse_timeframe,
 )
+from src.observability.logging import ensure_runtime_logging_configured, runtime_logger
 from src.runtime.status import RuntimeDependency, RuntimeStatus
 
 
 class LocalRuntime:
     def __init__(self, settings: RuntimeSettings | None = None) -> None:
+        ensure_runtime_logging_configured()
         self.settings = settings or RuntimeSettings()
         self.status = _runtime_status(self.settings)
         database_path = _sqlite_path_from_url(self.settings.database_url)
+        runtime_logger.info(
+            "runtime creation started",
+            mode=self.settings.mode.value,
+            symbol=self.settings.symbol,
+            timeframe=self.settings.timeframe,
+            database_url=self.settings.database_url,
+        )
         self._runtime_repository = SqliteRuntimeStateRepository(database_path)
         signal_log_repository = SqliteSignalLogRepository(database_path)
         self._strategy_repository = _InMemoryStrategyRepository()
@@ -93,6 +102,12 @@ class LocalRuntime:
             RunStrategyBacktestCycleResult | None
         ) = None
         self._last_trade_execution_result: ExecuteTradeResult | None = None
+        runtime_logger.info(
+            "runtime created",
+            mode=self.settings.mode.value,
+            symbol=self.settings.symbol,
+            timeframe=self.settings.timeframe,
+        )
 
     def health_details(self) -> dict[str, object]:
         return self.status.as_health_details()
@@ -134,18 +149,43 @@ class LocalRuntime:
         self,
         cycle_id: str,
     ) -> RunStrategyBacktestCycleResult:
+        runtime_logger.info(
+            "strategy backtest cycle started",
+            cycle_id=cycle_id,
+            mode=self.settings.mode.value,
+        )
         execution = self._strategy_scheduler.run_backtest_cycle(
             schedule_name="local-strategy-backtest-cycle",
             command_factory=lambda: RunStrategyBacktestCycleCommand(cycle_id=cycle_id),
         )
         if execution.error is not None:
+            runtime_logger.error(
+                "strategy backtest cycle failed",
+                cycle_id=cycle_id,
+                error=str(execution.error),
+            )
             raise execution.error
         if execution.result is None:
-            raise RuntimeError("strategy backtest cycle did not return a result")
+            error = RuntimeError("strategy backtest cycle did not return a result")
+            runtime_logger.error("strategy backtest cycle failed", error=str(error))
+            raise error
         self._last_strategy_backtest_cycle_result = execution.result
+        runtime_logger.info(
+            "strategy backtest cycle succeeded",
+            cycle_id=cycle_id,
+            succeeded_count=execution.result.succeeded_count,
+            failed_count=execution.result.failed_count,
+        )
         return execution.result
 
     def run_trade_execution_once(self, signal_id: str) -> ExecuteTradeResult:
+        runtime_logger.info(
+            "dry-run trade execution started",
+            signal_id=signal_id,
+            mode=self.settings.mode.value,
+            symbol=self.settings.symbol,
+            timeframe=self.settings.timeframe,
+        )
         execution = self._trade_scheduler.run_trade_execution(
             schedule_name=f"{self.settings.symbol}-{self.settings.timeframe}-dry-run",
             command_factory=lambda: self._execute_trade_command(signal_id),
@@ -160,10 +200,27 @@ class LocalRuntime:
             },
         )
         if execution.error is not None:
+            runtime_logger.error(
+                "dry-run trade execution failed",
+                signal_id=signal_id,
+                error=str(execution.error),
+            )
             raise execution.error
         if execution.result is None:
-            raise RuntimeError("dry-run trade execution did not return a result")
+            error = RuntimeError("dry-run trade execution did not return a result")
+            runtime_logger.error("dry-run trade execution failed", error=str(error))
+            raise error
         self._last_trade_execution_result = execution.result
+        runtime_logger.info(
+            "dry-run trade execution succeeded",
+            signal_id=signal_id,
+            status=execution.result.status.value,
+            order_status=(
+                None
+                if execution.result.order_result is None
+                else execution.result.order_result.status.value
+            ),
+        )
         return execution.result
 
     def create_app(self) -> FastAPI:
@@ -184,6 +241,7 @@ class LocalRuntime:
     def _execute_trade_command(self, signal_id: str) -> ExecuteTradeCommand:
         signal_id = signal_id.strip()
         if not signal_id:
+            runtime_logger.error("execute trade command rejected", error="signal_id is required")
             raise ValueError("signal_id is required")
         symbol = parse_symbol(self.settings.symbol)
         timeframe = parse_timeframe(self.settings.timeframe)
@@ -252,6 +310,14 @@ class _DryRunOrderExecution:
         self._runtime_repository = runtime_repository
 
     def submit_order(self, request: OrderRequest) -> OrderResult:
+        runtime_logger.info(
+            "dry-run order recording started",
+            client_order_id=request.client_order_id,
+            symbol=request.symbol.pair,
+            side=request.side.value,
+            quantity=str(request.quantity),
+            reduce_only=request.reduce_only,
+        )
         self._runtime_repository.append_runtime_record(
             record_type="dry_run_order",
             record_id=request.client_order_id,
@@ -264,10 +330,16 @@ class _DryRunOrderExecution:
                 "reduce_only": request.reduce_only,
             },
         )
-        return OrderResult.accepted(
+        result = OrderResult.accepted(
             client_order_id=request.client_order_id,
             exchange_order_id=f"dry-run-{request.client_order_id}",
         )
+        runtime_logger.info(
+            "dry-run order recorded",
+            client_order_id=request.client_order_id,
+            order_status=result.status.value,
+        )
+        return result
 
     def load_execution_reports(self, symbol, since, until):
         return ()

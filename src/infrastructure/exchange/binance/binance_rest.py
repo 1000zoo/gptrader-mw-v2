@@ -9,6 +9,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from src.infrastructure.exchange.binance.binance_config import BinanceConfig
+from src.observability.logging import runtime_logger
 
 
 class BinanceRestError(RuntimeError):
@@ -69,8 +70,17 @@ def request_json(
 ) -> object:
     attempts = max(1, config.retry_attempts)
     for attempt_index in range(attempts):
+        runtime_logger.info(
+            "binance rest request started",
+            method=method.upper(),
+            path=path,
+            attempt=attempt_index + 1,
+            attempts=attempts,
+            signed=signed,
+            api_key_required=api_key_required,
+        )
         try:
-            return _request_json_once(
+            result = _request_json_once(
                 config,
                 method,
                 path,
@@ -78,10 +88,34 @@ def request_json(
                 signed=signed,
                 api_key_required=api_key_required,
             )
+            runtime_logger.info(
+                "binance rest request succeeded",
+                method=method.upper(),
+                path=path,
+                attempt=attempt_index + 1,
+            )
+            return result
         except (BinanceNetworkError, BinanceRateLimitError) as exc:
             if attempt_index == attempts - 1:
+                runtime_logger.exception(
+                    "binance rest request failed without retry",
+                    method=method.upper(),
+                    path=path,
+                    attempt=attempt_index + 1,
+                    error=str(exc),
+                )
                 raise
-            sleep(_retry_delay(config, exc))
+            delay = _retry_delay(config, exc)
+            runtime_logger.warning(
+                "binance rest request retry scheduled",
+                method=method.upper(),
+                path=path,
+                attempt=attempt_index + 1,
+                next_attempt=attempt_index + 2,
+                delay_seconds=delay,
+                error=str(exc),
+            )
+            sleep(delay)
     raise RuntimeError("unreachable Binance REST retry state")
 
 
@@ -123,15 +157,35 @@ def _request_json_once(
             body = response.read().decode("utf-8")
     except HTTPError as exc:
         body = exc.read().decode("utf-8")
+        runtime_logger.exception(
+            "binance rest http error",
+            method=upper_method,
+            path=path,
+            status_code=exc.code,
+            body=body,
+        )
         raise _classify_http_error(exc, body) from exc
     except URLError as exc:
+        runtime_logger.exception(
+            "binance rest network error",
+            method=upper_method,
+            path=path,
+            error=str(exc.reason),
+        )
         raise BinanceNetworkError(f"Binance REST network error: {exc.reason}") from exc
 
     if not body:
+        runtime_logger.info("binance rest empty response", method=upper_method, path=path)
         return {}
     try:
         return json.loads(body)
     except json.JSONDecodeError as exc:
+        runtime_logger.exception(
+            "binance rest invalid json",
+            method=upper_method,
+            path=path,
+            body=body,
+        )
         raise BinanceInvalidResponseError(
             f"Binance REST response was not valid JSON: {body}"
         ) from exc

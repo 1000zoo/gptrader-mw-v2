@@ -10,6 +10,7 @@ from src.application.usecases.strategy_lifecycle import (
     RunStrategyLifecycleResult,
     RunStrategyLifecycleUseCase,
 )
+from src.observability.logging import runtime_logger
 
 
 def _utc_now() -> datetime:
@@ -66,11 +67,26 @@ class StrategyLifecycleScheduler:
         command: RunStrategyLifecycleCommand | None = None
         result: RunStrategyLifecycleResult | None = None
         error: Exception | None = None
+        runtime_logger.info(
+            "strategy lifecycle scheduler started",
+            schedule_name=schedule_name,
+        )
         try:
             command = command_factory()
             result = self._run_strategy_lifecycle_usecase.execute(command)
         except Exception as exc:
             error = exc
+            runtime_logger.exception(
+                "strategy lifecycle scheduler failed",
+                schedule_name=schedule_name,
+                error=str(exc),
+            )
+        else:
+            runtime_logger.info(
+                "strategy lifecycle scheduler succeeded",
+                schedule_name=schedule_name,
+                target_id=getattr(command, "target_id", None),
+            )
         return ScheduledStrategyLifecycleRun(
             schedule_name=schedule_name,
             started_at=started_at,
@@ -89,6 +105,10 @@ class StrategyLifecycleScheduler:
         command: RunStrategyBacktestCycleCommand | None = None
         result: RunStrategyBacktestCycleResult | None = None
         error: Exception | None = None
+        runtime_logger.info(
+            "strategy backtest cycle scheduler started",
+            schedule_name=schedule_name,
+        )
         try:
             command = command_factory()
             if self._run_strategy_backtest_cycle_usecase is None:
@@ -98,6 +118,19 @@ class StrategyLifecycleScheduler:
             result = self._run_strategy_backtest_cycle_usecase.execute(command)
         except Exception as exc:
             error = exc
+            runtime_logger.exception(
+                "strategy backtest cycle scheduler failed",
+                schedule_name=schedule_name,
+                error=str(exc),
+            )
+        else:
+            runtime_logger.info(
+                "strategy backtest cycle scheduler succeeded",
+                schedule_name=schedule_name,
+                cycle_id=getattr(command, "cycle_id", None),
+                succeeded_count=getattr(result, "succeeded_count", None),
+                failed_count=getattr(result, "failed_count", None),
+            )
         return ScheduledStrategyBacktestCycleRun(
             schedule_name=schedule_name,
             started_at=started_at,

@@ -6,6 +6,7 @@ from src.infrastructure.persistence import (
     SqliteSignalLogRepository,
 )
 from src.runtime import RuntimeMode, RuntimeSettings, create_local_app, create_local_runtime
+from src.observability.logging import configure_runtime_logging
 
 
 def _settings(tmp_path: Path) -> RuntimeSettings:
@@ -64,6 +65,30 @@ def test_dry_run_runtime_runs_trade_execution_and_persists_records(tmp_path) -> 
     assert scheduler_runs[0].record_id == "manual-smoke"
     assert scheduler_runs[0].payload["succeeded"] is True
     assert runtime.status_details()["last_trade_execution"]["status"] == "order_submitted"
+
+
+def test_dry_run_runtime_writes_execution_progress_logs(tmp_path) -> None:
+    log_file = configure_runtime_logging(log_root=tmp_path / "logs")
+    runtime = create_local_runtime(_settings(tmp_path))
+
+    runtime.run_trade_execution_once("log-smoke")
+
+    content = log_file.read_text(encoding="utf-8")
+    assert "runtime created" in content
+    assert "dry-run trade execution started" in content
+    assert "strategy signal generated" in content
+    assert "latest-close-moving-average" in content
+    assert "close_above_moving_average" in content
+    assert "trade entry sizing calculated" in content
+    assert "position_direction" in content
+    assert "enter_long" in content
+    assert "entry_price" in content
+    assert "104" in content
+    assert "requested_notional" in content
+    assert "position_notional" in content
+    assert "position_quantity" in content
+    assert "dry-run order recorded" in content
+    assert "dry-run trade execution succeeded" in content
 
 
 def test_dry_run_app_trade_execute_endpoint_is_wired(tmp_path) -> None:

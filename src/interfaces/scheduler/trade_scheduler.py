@@ -14,6 +14,7 @@ from src.application.usecases.trade import (
     SyncPositionResult,
     SyncPositionUseCase,
 )
+from src.observability.logging import runtime_logger
 
 
 CommandT = TypeVar("CommandT")
@@ -88,11 +89,23 @@ class TradeScheduler:
         command: ExecuteTradeCommand | None = None
         result: ExecuteTradeResult | None = None
         error: Exception | None = None
+        runtime_logger.info("trade scheduler execution started", schedule_name=schedule_name)
         try:
             command = command_factory()
             result = self._execute_trade_usecase.execute(command)
         except Exception as exc:
             error = exc
+            runtime_logger.exception(
+                "trade scheduler execution failed",
+                schedule_name=schedule_name,
+                error=str(exc),
+            )
+        else:
+            runtime_logger.info(
+                "trade scheduler execution succeeded",
+                schedule_name=schedule_name,
+                status=getattr(getattr(result, "status", None), "value", None),
+            )
         return ScheduledTradeExecution(
             schedule_name=schedule_name,
             started_at=started_at,
@@ -111,11 +124,23 @@ class TradeScheduler:
         command: ClosePositionCommand | None = None
         result: ClosePositionResult | None = None
         error: Exception | None = None
+        runtime_logger.info("position close scheduler started", schedule_name=schedule_name)
         try:
             command = command_factory()
             result = self._close_position_usecase.close(command)
         except Exception as exc:
             error = exc
+            runtime_logger.exception(
+                "position close scheduler failed",
+                schedule_name=schedule_name,
+                error=str(exc),
+            )
+        else:
+            runtime_logger.info(
+                "position close scheduler succeeded",
+                schedule_name=schedule_name,
+                status=getattr(getattr(result, "status", None), "value", None),
+            )
         return ScheduledPositionClose(
             schedule_name=schedule_name,
             started_at=started_at,
@@ -134,11 +159,23 @@ class TradeScheduler:
         command: SyncPositionCommand | None = None
         result: SyncPositionResult | None = None
         error: Exception | None = None
+        runtime_logger.info("position sync scheduler started", schedule_name=schedule_name)
         try:
             command = command_factory()
             result = self._sync_position_usecase.sync(command)
         except Exception as exc:
             error = exc
+            runtime_logger.exception(
+                "position sync scheduler failed",
+                schedule_name=schedule_name,
+                error=str(exc),
+            )
+        else:
+            runtime_logger.info(
+                "position sync scheduler succeeded",
+                schedule_name=schedule_name,
+                applied_report_count=len(getattr(result, "applied_reports", ())),
+            )
         return ScheduledPositionSync(
             schedule_name=schedule_name,
             started_at=started_at,
