@@ -1,4 +1,4 @@
-from dataclasses import asdict, is_dataclass
+from dataclasses import fields, is_dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
@@ -11,8 +11,8 @@ from fastapi import HTTPException
 def to_response_payload(value: object) -> object:
     if is_dataclass(value) and not isinstance(value, type):
         return {
-            key: to_response_payload(item)
-            for key, item in asdict(value).items()
+            field.name: to_response_payload(getattr(value, field.name))
+            for field in fields(value)
         }
     if isinstance(value, Enum):
         return value.value

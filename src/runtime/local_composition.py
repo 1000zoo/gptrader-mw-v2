@@ -1,54 +1,105 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
+from typing import Mapping
+from urllib.parse import unquote, urlparse
 
 from fastapi import FastAPI
 
+from src.application.usecases.trade import (
+    ClosePositionUseCase,
+    ExecuteTradeCommand,
+    ExecuteTradeResult,
+    ExecuteTradeUseCase,
+    SyncPositionUseCase,
+)
 from src.application.usecases.strategy_lifecycle import (
     RunStrategyBacktestCycleCommand,
     RunStrategyBacktestCycleResult,
     RunStrategyBacktestCycleUseCase,
     RunStrategyLifecycleUseCase,
 )
+from src.domain.execution import OrderRequest, OrderResult
 from src.domain.lifecycle import (
     SignalGeneratorDefinition,
     StrategyDefinition,
     StrategyEvaluation,
 )
 from src.domain.market import Candle, MarketSnapshot
+from src.domain.risk import ExposureLimit
+from src.domain.signal_generator import CompositeSignalGenerator
+from src.infrastructure.persistence import (
+    SqliteRuntimeStateRepository,
+    SqliteSignalLogRepository,
+)
 from src.interfaces.api import create_app
-from src.interfaces.scheduler import StrategyLifecycleScheduler
+from src.interfaces.api.trade_controller import create_trade_router
+from src.interfaces.scheduler import StrategyLifecycleScheduler, TradeScheduler
 from src.domain.strategy.implementations import create_default_strategy_catalog
-from src.runtime.config import RuntimeSettings
-from src.runtime.local_data import evaluate_local_example_strategy
-from src.runtime.status import RuntimeStatus
+from src.runtime.config import RuntimeMode, RuntimeSettings
+from src.runtime.local_data import (
+    build_local_indicator_set,
+    evaluate_local_example_strategy,
+    parse_symbol,
+    parse_timeframe,
+)
+from src.runtime.status import RuntimeDependency, RuntimeStatus
 
 
 class LocalRuntime:
     def __init__(self, settings: RuntimeSettings | None = None) -> None:
         self.settings = settings or RuntimeSettings()
-        self.status = RuntimeStatus.local(self.settings)
+        self.status = _runtime_status(self.settings)
+        database_path = _sqlite_path_from_url(self.settings.database_url)
+        self._runtime_repository = SqliteRuntimeStateRepository(database_path)
+        signal_log_repository = SqliteSignalLogRepository(database_path)
         self._strategy_repository = _InMemoryStrategyRepository()
         strategy_catalog = create_default_strategy_catalog()
+        market_data = _LocalCatalogMarketData()
+        dry_run_order_execution = _DryRunOrderExecution(
+            runtime_repository=self._runtime_repository
+        )
         self._strategy_scheduler = StrategyLifecycleScheduler(
             run_strategy_lifecycle_usecase=RunStrategyLifecycleUseCase(
                 self._strategy_repository
             ),
             run_strategy_backtest_cycle_usecase=RunStrategyBacktestCycleUseCase(
                 strategy_repository=self._strategy_repository,
-                market_data=_LocalCatalogMarketData(),
+                market_data=market_data,
                 strategy_catalog=strategy_catalog,
             ),
+        )
+        self._trade_scheduler = TradeScheduler(
+            execute_trade_usecase=ExecuteTradeUseCase(
+                market_data=market_data,
+                signal_generator=CompositeSignalGenerator(
+                    strategies=(
+                        strategy_catalog.create_strategy(
+                            next(
+                                spec
+                                for spec in strategy_catalog.list_specs()
+                                if spec.strategy_id == "latest-close-moving-average"
+                            )
+                        ),
+                    )
+                ),
+                signal_log_repository=signal_log_repository,
+                order_execution=dry_run_order_execution,
+            ),
+            close_position_usecase=ClosePositionUseCase(dry_run_order_execution),
+            sync_position_usecase=SyncPositionUseCase(dry_run_order_execution),
         )
         self._last_strategy_backtest_cycle_result: (
             RunStrategyBacktestCycleResult | None
         ) = None
+        self._last_trade_execution_result: ExecuteTradeResult | None = None
 
     def health_details(self) -> dict[str, object]:
         return self.status.as_health_details()
 
     def readiness_details(self) -> dict[str, object]:
         details = self.status.as_health_details()
-        details["ready_for"] = "local"
+        details["ready_for"] = self.settings.mode.value
         details["example_strategy"] = evaluate_local_example_strategy(
             self.settings
         ).signal.direction.value
@@ -56,8 +107,10 @@ class LocalRuntime:
 
     def status_details(self) -> dict[str, object]:
         details = self.readiness_details()
-        details["runtime"] = "local"
-        details["trade_controls"] = "disabled"
+        details["runtime"] = self.settings.mode.value
+        details["trade_controls"] = (
+            "enabled" if self.settings.mode is RuntimeMode.DRY_RUN else "disabled"
+        )
         details["live_order_path"] = "disabled"
         if self._last_strategy_backtest_cycle_result is not None:
             details["strategy_backtest_cycle"] = {
@@ -65,6 +118,15 @@ class LocalRuntime:
                     self._last_strategy_backtest_cycle_result.succeeded_count
                 ),
                 "failed_count": self._last_strategy_backtest_cycle_result.failed_count,
+            }
+        if self._last_trade_execution_result is not None:
+            details["last_trade_execution"] = {
+                "status": self._last_trade_execution_result.status.value,
+                "order_status": (
+                    None
+                    if self._last_trade_execution_result.order_result is None
+                    else self._last_trade_execution_result.order_result.status.value
+                ),
             }
         return details
 
@@ -83,11 +145,70 @@ class LocalRuntime:
         self._last_strategy_backtest_cycle_result = execution.result
         return execution.result
 
+    def run_trade_execution_once(self, signal_id: str) -> ExecuteTradeResult:
+        execution = self._trade_scheduler.run_trade_execution(
+            schedule_name=f"{self.settings.symbol}-{self.settings.timeframe}-dry-run",
+            command_factory=lambda: self._execute_trade_command(signal_id),
+        )
+        self._runtime_repository.append_runtime_record(
+            record_type="scheduler_run",
+            record_id=signal_id,
+            payload={
+                "schedule_name": execution.schedule_name,
+                "succeeded": execution.succeeded,
+                "error": None if execution.error is None else str(execution.error),
+            },
+        )
+        if execution.error is not None:
+            raise execution.error
+        if execution.result is None:
+            raise RuntimeError("dry-run trade execution did not return a result")
+        self._last_trade_execution_result = execution.result
+        return execution.result
+
     def create_app(self) -> FastAPI:
         return create_app(
             health_provider=self.health_details,
             readiness_provider=self.readiness_details,
             status_provider=self.status_details,
+            trade_router=(
+                create_trade_router(
+                    execute_trade_usecase=_RuntimeExecuteTradeBoundary(self),
+                    execute_trade_command_factory=_trade_payload_to_signal_id,
+                )
+                if self.settings.mode is RuntimeMode.DRY_RUN
+                else None
+            ),
+        )
+
+    def _execute_trade_command(self, signal_id: str) -> ExecuteTradeCommand:
+        signal_id = signal_id.strip()
+        if not signal_id:
+            raise ValueError("signal_id is required")
+        symbol = parse_symbol(self.settings.symbol)
+        timeframe = parse_timeframe(self.settings.timeframe)
+        market = _LocalCatalogMarketData().load_snapshot(
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=self.settings.candle_limit,
+        )
+        return ExecuteTradeCommand(
+            symbol=symbol,
+            timeframe=timeframe,
+            candle_limit=self.settings.candle_limit,
+            indicators=build_local_indicator_set(market),
+            exposure_limit=ExposureLimit(
+                equity=Decimal("10000"),
+                current_total_exposure=Decimal("0"),
+                current_symbol_exposure=Decimal("0"),
+                max_total_exposure_ratio=Decimal("1"),
+                max_symbol_exposure_ratio=Decimal("1"),
+            ),
+            base_risk_ratio=Decimal("0.01"),
+            leverage=Decimal("1"),
+            client_order_id_prefix=self.settings.client_order_id_prefix,
+            signal_id=signal_id,
+            generator_id=self.settings.generator_id,
         )
 
 
@@ -126,6 +247,45 @@ class _LocalCatalogMarketData:
         return MarketSnapshot(tuple(candles))
 
 
+class _DryRunOrderExecution:
+    def __init__(self, runtime_repository: SqliteRuntimeStateRepository) -> None:
+        self._runtime_repository = runtime_repository
+
+    def submit_order(self, request: OrderRequest) -> OrderResult:
+        self._runtime_repository.append_runtime_record(
+            record_type="dry_run_order",
+            record_id=request.client_order_id,
+            payload={
+                "client_order_id": request.client_order_id,
+                "symbol": request.symbol.pair,
+                "side": request.side.value,
+                "order_type": request.order_type.value,
+                "quantity": str(request.quantity),
+                "reduce_only": request.reduce_only,
+            },
+        )
+        return OrderResult.accepted(
+            client_order_id=request.client_order_id,
+            exchange_order_id=f"dry-run-{request.client_order_id}",
+        )
+
+    def load_execution_reports(self, symbol, since, until):
+        return ()
+
+
+class _RuntimeExecuteTradeBoundary:
+    def __init__(self, runtime: LocalRuntime) -> None:
+        self._runtime = runtime
+
+    def execute(self, signal_id: str) -> ExecuteTradeResult:
+        return self._runtime.run_trade_execution_once(signal_id)
+
+
+def _trade_payload_to_signal_id(payload: Mapping[str, object]) -> str:
+    signal_id = payload.get("signal_id", "")
+    return str(signal_id)
+
+
 class _InMemoryStrategyRepository:
     def __init__(self) -> None:
         self._strategy_definitions: dict[str, StrategyDefinition] = {}
@@ -162,3 +322,46 @@ class _InMemoryStrategyRepository:
             for evaluation in self._evaluations
             if evaluation.target_id == target_id
         )
+
+
+def _runtime_status(settings: RuntimeSettings) -> RuntimeStatus:
+    if settings.mode is RuntimeMode.DRY_RUN:
+        return RuntimeStatus(
+            settings=settings,
+            started_at=datetime.now(timezone.utc),
+            dependencies=(
+                RuntimeDependency(
+                    "exchange",
+                    "dry-run",
+                    "orders are recorded locally and not submitted",
+                ),
+                RuntimeDependency("persistence", "sqlite", settings.database_url),
+                RuntimeDependency("scheduler", "ready", "manual trigger available"),
+                RuntimeDependency("websocket", "not_started", "listener not attached"),
+            ),
+        )
+    return RuntimeStatus.local(settings)
+
+
+def _sqlite_path_from_url(database_url: str) -> str:
+    if database_url.startswith("sqlite:///"):
+        parsed = urlparse(database_url)
+        path = unquote(parsed.path)
+        if parsed.netloc:
+            path = f"//{parsed.netloc}{path}"
+        if len(path) >= 3 and path[0] == "/" and path[2] == ":":
+            path = path[1:]
+        elif path.startswith("/./") or path.startswith("/../"):
+            path = path[1:]
+        _ensure_parent_directory(path)
+        return path
+    if database_url.startswith("sqlite://"):
+        raise ValueError("sqlite database URL must use sqlite:///path")
+    _ensure_parent_directory(database_url)
+    return str(Path(database_url))
+
+
+def _ensure_parent_directory(database_path: str) -> None:
+    parent = Path(database_path).parent
+    if str(parent) not in {"", "."}:
+        parent.mkdir(parents=True, exist_ok=True)

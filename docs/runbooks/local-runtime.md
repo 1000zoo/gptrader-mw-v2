@@ -93,3 +93,33 @@ Initial endpoints:
 - `GET /status`
 
 Do not add live trade controls to local runtime until persistence recovery, mode gating, and testnet rehearsal are complete.
+
+## Dry-Run Trade Smoke Check
+
+Dry-run mode executes the real trade use case path through the scheduler and API
+boundary, but uses a local order adapter that records intended orders in SQLite
+instead of calling Binance or sending Slack/Telegram notifications.
+
+```powershell
+$env:GPTRADER_MODE='dry-run'
+$env:GPTRADER_CLIENT_ORDER_ID_PREFIX='gptrader-dry-run'
+$env:GPTRADER_GENERATOR_ID='dry-run-generator'
+$env:GPTRADER_SIGNAL_ID_PREFIX='dry-run-signal'
+$env:GPTRADER_DB_URL='sqlite:///./gptrader-dry-run.sqlite3'
+C:\Python310\python.exe -c "import os; from src.runtime import RuntimeSettings, create_local_runtime; runtime = create_local_runtime(RuntimeSettings.from_env(os.environ)); result = runtime.run_trade_execution_once('manual-smoke'); print(result.status.value, result.order_result.client_order_id, result.order_result.status.value)"
+```
+
+Expected output starts with:
+
+```text
+order_submitted gptrader-dry-run-manual-smoke accepted
+```
+
+The local API can also expose `/trade/execute` in dry-run mode:
+
+```powershell
+$env:GPTRADER_MODE='dry-run'
+C:\Python310\python.exe -m uvicorn src.runtime.local_composition:create_local_app --factory --host 127.0.0.1 --port 8000
+```
+
+Then POST a JSON body containing a `signal_id` to `/trade/execute`.

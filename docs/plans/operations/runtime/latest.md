@@ -118,7 +118,7 @@ No live order path should exist unless the selected mode, credentials, risk sett
 | OP-3 Concrete strategy/indicator path | `done` | An example strategy implementation plus local indicator fixture/loader can produce `ExecuteTradeCommand` inputs. |
 | OP-4 Local persistence/recovery | `done` | Position/order/run state can be stored and restored locally. |
 | OP-5 API readiness/status | `done` | Health/readiness/status endpoints reflect runtime dependencies. |
-| OP-6 Scheduler local runner | `ready` | A scheduled dry-run trade command can execute once without overlap. |
+| OP-6 Scheduler local runner | `done` | A scheduled dry-run trade command can execute once without overlap. |
 | OP-7 Websocket local runner | `queued` | Position listener can process replay/fake stream events and persist updates. |
 | OP-8 Messaging wiring | `queued` | Runtime failure alert can be emitted without breaking the caller. |
 | OP-9 Binance testnet preflight | `blocked` | Requires OP-2 through OP-5 plus testnet credentials. |
@@ -132,6 +132,7 @@ No live order path should exist unless the selected mode, credentials, risk sett
 - 2026-06-12: Added OP-3 example moving-average strategy and local market/indicator context builder.
 - 2026-06-12: Added OP-4 SQLite runtime state repository for position, position event, and generic runtime records.
 - 2026-06-12: Added OP-5 local `/status` endpoint and runtime status details.
+- 2026-06-20: Added dry-run trade execution wiring through the runtime composition root. Dry-run mode now runs the real `ExecuteTradeUseCase`, records signals, records dry-run order requests and scheduler runs in SQLite, and keeps the live order path disabled.
 
 ## Follow-Up
 
