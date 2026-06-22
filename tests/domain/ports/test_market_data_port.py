@@ -47,6 +47,21 @@ class InMemoryMarketDataPort:
     ) -> MarketSnapshot:
         return MarketSnapshot(self.load_candles(symbol, timeframe, limit))
 
+    def load_candles_between(
+        self,
+        symbol: Symbol,
+        timeframe: Timeframe,
+        start_at: datetime,
+        end_at: datetime,
+    ) -> tuple[Candle, ...]:
+        return tuple(
+            candle
+            for candle in self.candles
+            if candle.symbol == symbol
+            and candle.timeframe == timeframe
+            and start_at <= candle.opened_at < end_at
+        )
+
 
 def test_market_data_port_is_protocol_contract():
     assert issubclass(MarketDataPort, Protocol)
@@ -57,8 +72,15 @@ def test_market_data_port_loads_candles_and_snapshot():
     port = InMemoryMarketDataPort((candle,))
 
     candles = port.load_candles(candle.symbol, candle.timeframe, limit=1)
+    ranged = port.load_candles_between(
+        candle.symbol,
+        candle.timeframe,
+        candle.opened_at,
+        candle.closed_at,
+    )
     snapshot = port.load_snapshot(candle.symbol, candle.timeframe, limit=1)
 
     assert isinstance(port, MarketDataPort)
     assert candles == (candle,)
+    assert ranged == (candle,)
     assert snapshot.latest_candle == candle

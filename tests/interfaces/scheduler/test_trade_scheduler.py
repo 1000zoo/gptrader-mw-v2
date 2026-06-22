@@ -36,6 +36,16 @@ class RecordingSyncPositionUseCase:
         return self.result
 
 
+class RecordingManageOpenPositionUseCase:
+    def __init__(self, result: object | None = None) -> None:
+        self.result = result or object()
+        self.commands: list[object] = []
+
+    def manage(self, command: object) -> object:
+        self.commands.append(command)
+        return self.result
+
+
 def test_run_trade_execution_calls_execute_usecase_with_factory_command() -> None:
     command = object()
     result = object()
@@ -44,6 +54,7 @@ def test_run_trade_execution_calls_execute_usecase_with_factory_command() -> Non
         execute_trade_usecase=execute_usecase,
         close_position_usecase=RecordingClosePositionUseCase(),
         sync_position_usecase=RecordingSyncPositionUseCase(),
+        manage_open_position_usecase=RecordingManageOpenPositionUseCase(),
         now=lambda: datetime(2026, 5, 25, 1, 2, 3, tzinfo=timezone.utc),
     )
 
@@ -70,6 +81,7 @@ def test_close_position_calls_close_usecase() -> None:
         execute_trade_usecase=RecordingExecuteTradeUseCase(),
         close_position_usecase=close_usecase,
         sync_position_usecase=RecordingSyncPositionUseCase(),
+        manage_open_position_usecase=RecordingManageOpenPositionUseCase(),
     )
 
     execution = scheduler.close_position(
@@ -91,6 +103,7 @@ def test_sync_position_calls_sync_usecase() -> None:
         execute_trade_usecase=RecordingExecuteTradeUseCase(),
         close_position_usecase=RecordingClosePositionUseCase(),
         sync_position_usecase=sync_usecase,
+        manage_open_position_usecase=RecordingManageOpenPositionUseCase(),
     )
 
     execution = scheduler.sync_position(
@@ -104,6 +117,28 @@ def test_sync_position_calls_sync_usecase() -> None:
     assert execution.succeeded is True
 
 
+def test_manage_open_position_calls_manage_usecase() -> None:
+    command = object()
+    result = object()
+    manage_usecase = RecordingManageOpenPositionUseCase(result=result)
+    scheduler = TradeScheduler(
+        execute_trade_usecase=RecordingExecuteTradeUseCase(),
+        close_position_usecase=RecordingClosePositionUseCase(),
+        sync_position_usecase=RecordingSyncPositionUseCase(),
+        manage_open_position_usecase=manage_usecase,
+    )
+
+    execution = scheduler.manage_open_position(
+        schedule_name="manage-btc-position",
+        command_factory=lambda: command,
+    )
+
+    assert manage_usecase.commands == [command]
+    assert execution.command is command
+    assert execution.result is result
+    assert execution.succeeded is True
+
+
 def test_run_trade_execution_captures_usecase_error() -> None:
     command = object()
     error = RuntimeError("exchange unavailable")
@@ -112,6 +147,7 @@ def test_run_trade_execution_captures_usecase_error() -> None:
         execute_trade_usecase=execute_usecase,
         close_position_usecase=RecordingClosePositionUseCase(),
         sync_position_usecase=RecordingSyncPositionUseCase(),
+        manage_open_position_usecase=RecordingManageOpenPositionUseCase(),
     )
 
     execution = scheduler.run_trade_execution(
@@ -133,6 +169,7 @@ def test_run_trade_execution_captures_command_factory_error() -> None:
         execute_trade_usecase=execute_usecase,
         close_position_usecase=RecordingClosePositionUseCase(),
         sync_position_usecase=RecordingSyncPositionUseCase(),
+        manage_open_position_usecase=RecordingManageOpenPositionUseCase(),
     )
 
     execution = scheduler.run_trade_execution(

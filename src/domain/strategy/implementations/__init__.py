@@ -2,6 +2,9 @@ from decimal import Decimal
 
 from src.domain.market import Symbol, Timeframe
 from src.domain.strategy import StaticStrategyCatalog, StrategySpec
+from src.domain.strategy.implementations.atr_take_profit_stop_loss import (
+    AtrTakeProfitStopLossStrategy,
+)
 from src.domain.strategy.implementations.moving_average_strategy import (
     LatestCloseMovingAverageStrategy,
 )
@@ -48,6 +51,7 @@ def create_default_strategy_catalog() -> StaticStrategyCatalog:
 
 
 __all__ = [
+    "AtrTakeProfitStopLossStrategy",
     "LatestCloseMovingAverageStrategy",
     "SessionVolumeProfileStrategy",
     "create_default_strategy_catalog",

@@ -96,3 +96,51 @@ def test_binance_market_data_adapter_loads_snapshot(monkeypatch):
     assert isinstance(snapshot, MarketSnapshot)
     assert snapshot.closed_at - snapshot.opened_at == timedelta(minutes=2)
     assert snapshot.latest_candle.close_price == Decimal("111.0")
+
+
+def test_binance_market_data_adapter_loads_candles_between_with_pagination(
+    monkeypatch,
+):
+    config = BinanceConfig.default()
+    requests = []
+
+    def fake_load_klines_api(
+        received_config: BinanceConfig,
+        symbol: str,
+        interval: str,
+        limit: int,
+        start_time: int | None = None,
+        end_time: int | None = None,
+    ):
+        requests.append(
+            (received_config, symbol, interval, limit, start_time, end_time)
+        )
+        if len(requests) == 1:
+            return [_kline_rows()[0]]
+        return [_kline_rows()[1]]
+
+    monkeypatch.setattr(
+        binance_market_data_adapter,
+        "load_klines_api",
+        fake_load_klines_api,
+    )
+    adapter = BinanceMarketDataAdapter(config)
+    symbol = Symbol("btc", "usdt")
+    timeframe = Timeframe(1, "m")
+
+    candles = adapter.load_candles_between(
+        symbol=symbol,
+        timeframe=timeframe,
+        start_at=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+        end_at=datetime(2026, 1, 1, 0, 2, tzinfo=timezone.utc),
+        page_limit=1,
+    )
+
+    assert tuple(candle.opened_at for candle in candles) == (
+        datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+        datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+    )
+    assert requests == [
+        (config, "BTCUSDT", "1m", 1, 1767225600000, 1767225720000),
+        (config, "BTCUSDT", "1m", 1, 1767225660000, 1767225720000),
+    ]

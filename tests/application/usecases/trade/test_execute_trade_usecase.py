@@ -11,6 +11,7 @@ from src.domain.risk import ExposureLimit, RiskCheck, RiskDecisionReason
 from src.domain.signal import Signal, SignalDirection
 from src.domain.signal_generator import GeneratedSignal
 from src.domain.strategy import StrategyContext
+from src.domain.strategy.take_profit_stop_loss import TakeProfitStopLossLevels
 from tests.domain.strategy.test_strategy_context import make_indicators, make_market
 
 
@@ -45,10 +46,27 @@ class FakeSignalLogRepository:
 class FakeOrderExecution:
     def __init__(self):
         self.requests = []
+        self.protective_requests = []
 
     def submit_order(self, request):
         self.requests.append(request)
         return OrderResult.accepted(request.client_order_id, "exchange-1")
+
+    def submit_take_profit_stop_loss_orders(
+        self,
+        symbol,
+        position_direction,
+        take_profit,
+        stop_loss,
+        client_order_id_prefix,
+    ):
+        self.protective_requests.append(
+            (symbol, position_direction, take_profit, stop_loss, client_order_id_prefix)
+        )
+        return (
+            OrderResult.accepted(f"{client_order_id_prefix}-tp", "tp-1"),
+            OrderResult.accepted(f"{client_order_id_prefix}-sl", "sl-1"),
+        )
 
 
 class RejectingRiskPolicy:
@@ -60,6 +78,20 @@ class RejectingRiskPolicy:
         return RiskCheck(
             allowed=False,
             reason=RiskDecisionReason.TOTAL_EXPOSURE_EXCEEDED,
+        )
+
+
+class FakeTakeProfitStopLossStrategy:
+    def __init__(self):
+        self.requests = []
+
+    def calculate(self, context, direction):
+        self.requests.append((context, direction))
+        return TakeProfitStopLossLevels(
+            strategy_name="fake-tpsl",
+            entry_price=context.market.latest_candle.close_price,
+            take_profit=Decimal("120"),
+            stop_loss=Decimal("95"),
         )
 
 
@@ -164,6 +196,61 @@ def test_execute_trade_usecase_submits_market_order_for_entry_signal():
     assert order_request.side is SignalDirection.LONG
     assert order_request.quantity == Decimal("150.00") / market.latest_candle.close_price
     assert order_request.reduce_only is False
+
+
+def test_execute_trade_usecase_calculates_take_profit_stop_loss_for_entry_signal():
+    market = make_market()
+    indicators = make_indicators(market)
+    generated_signal = GeneratedSignal(
+        signal=Signal(direction=SignalDirection.LONG, confidence=Decimal("0.5")),
+    )
+    tpsl_strategy = FakeTakeProfitStopLossStrategy()
+    order_execution = FakeOrderExecution()
+    usecase = ExecuteTradeUseCase(
+        market_data=FakeMarketData(market),
+        signal_generator=FakeSignalGenerator(generated_signal),
+        signal_log_repository=FakeSignalLogRepository(),
+        order_execution=order_execution,
+        take_profit_stop_loss_strategy=tpsl_strategy,
+    )
+
+    result = usecase.execute(
+        ExecuteTradeCommand(
+            symbol=market.symbol,
+            timeframe=market.timeframe,
+            candle_limit=120,
+            indicators=indicators,
+            exposure_limit=_exposure_limit(),
+            base_risk_ratio=Decimal("0.1"),
+            leverage=Decimal("3"),
+            client_order_id_prefix="live-btc",
+            signal_id="signal-1",
+            generator_id="generator-1",
+        )
+    )
+
+    assert result.take_profit_stop_loss == TakeProfitStopLossLevels(
+        strategy_name="fake-tpsl",
+        entry_price=market.latest_candle.close_price,
+        take_profit=Decimal("120"),
+        stop_loss=Decimal("95"),
+    )
+    assert tpsl_strategy.requests[0][0].market == market
+    assert tpsl_strategy.requests[0][0].indicators == indicators
+    assert tpsl_strategy.requests[0][1] is SignalDirection.LONG
+    assert result.protective_order_results == (
+        OrderResult.accepted("live-btc-signal-1-tp", "tp-1"),
+        OrderResult.accepted("live-btc-signal-1-sl", "sl-1"),
+    )
+    assert order_execution.protective_requests == [
+        (
+            market.symbol,
+            SignalDirection.LONG,
+            Decimal("120"),
+            Decimal("95"),
+            "live-btc-signal-1",
+        )
+    ]
 
 
 def test_execute_trade_usecase_skips_order_for_wait_signal():

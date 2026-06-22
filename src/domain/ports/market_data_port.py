@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from src.domain.market import Candle, MarketSnapshot, Symbol, Timeframe
@@ -10,6 +11,15 @@ class MarketDataPort(Protocol):
         symbol: Symbol,
         timeframe: Timeframe,
         limit: int,
+    ) -> tuple[Candle, ...]:
+        ...
+
+    def load_candles_between(
+        self,
+        symbol: Symbol,
+        timeframe: Timeframe,
+        start_at: datetime,
+        end_at: datetime,
     ) -> tuple[Candle, ...]:
         ...
 

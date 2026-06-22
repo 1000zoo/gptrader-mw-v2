@@ -20,6 +20,24 @@ class InMemoryOrderExecutionPort:
         self.reports.append(ExecutionReport(request=request, result=result))
         return result
 
+    def submit_take_profit_stop_loss_orders(
+        self,
+        symbol: Symbol,
+        position_direction: SignalDirection,
+        take_profit: Decimal,
+        stop_loss: Decimal,
+        client_order_id_prefix: str,
+    ) -> tuple[OrderResult, OrderResult]:
+        take_profit_result = OrderResult.accepted(
+            client_order_id=f"{client_order_id_prefix}-tp",
+            exchange_order_id="exchange-tp",
+        )
+        stop_loss_result = OrderResult.accepted(
+            client_order_id=f"{client_order_id_prefix}-sl",
+            exchange_order_id="exchange-sl",
+        )
+        return take_profit_result, stop_loss_result
+
     def load_execution_reports(
         self,
         symbol: Symbol,

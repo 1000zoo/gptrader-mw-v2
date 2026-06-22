@@ -58,9 +58,11 @@ def test_dry_run_runtime_runs_trade_execution_and_persists_records(tmp_path) -> 
 
     assert len(signals) == 1
     assert signals[0].signal_id == "manual-smoke"
-    assert len(dry_run_orders) == 1
+    assert len(dry_run_orders) == 3
     assert dry_run_orders[0].record_id == "gptrader-dry-run-manual-smoke"
     assert dry_run_orders[0].payload["symbol"] == "BTCUSDT"
+    assert dry_run_orders[1].record_id == "gptrader-dry-run-manual-smoke-tp"
+    assert dry_run_orders[2].record_id == "gptrader-dry-run-manual-smoke-sl"
     assert len(scheduler_runs) == 1
     assert scheduler_runs[0].record_id == "manual-smoke"
     assert scheduler_runs[0].payload["succeeded"] is True

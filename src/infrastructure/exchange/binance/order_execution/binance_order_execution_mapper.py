@@ -12,13 +12,18 @@ def map_order_request_to_binance_params(request: OrderRequest) -> dict[str, obje
         "symbol": request.symbol.pair,
         "side": _map_side(request.side),
         "type": _map_order_type(request.order_type),
-        "quantity": str(request.quantity),
         "newClientOrderId": request.client_order_id,
     }
+    if request.quantity is not None:
+        params["quantity"] = str(request.quantity)
     if request.reduce_only:
         params["reduceOnly"] = "true"
+    if request.close_position:
+        params["closePosition"] = "true"
     if request.limit_price is not None:
         params["price"] = str(request.limit_price)
+    if request.stop_price is not None:
+        params["stopPrice"] = str(request.stop_price)
     if request.order_type is OrderType.LIMIT:
         params["timeInForce"] = "GTC"
     return params
@@ -63,14 +68,17 @@ def map_binance_order_to_execution_report(
     payload: Mapping[str, object],
     symbol: Symbol,
 ) -> ExecutionReport:
+    order_type = _map_binance_order_type(str(payload["type"]))
     request = OrderRequest(
         client_order_id=str(payload["clientOrderId"]),
         symbol=symbol,
         side=_map_binance_side(str(payload["side"])),
-        order_type=_map_binance_order_type(str(payload["type"])),
-        quantity=Decimal(str(payload["origQty"])),
+        order_type=order_type,
+        quantity=_report_quantity(payload, order_type),
         limit_price=_optional_decimal(payload.get("price")),
+        stop_price=_optional_decimal(payload.get("stopPrice")),
         reduce_only=_map_bool(payload.get("reduceOnly", False)),
+        close_position=_map_bool(payload.get("closePosition", False)),
     )
     return ExecutionReport(
         request=request,
@@ -91,6 +99,10 @@ def _map_order_type(order_type: OrderType) -> str:
         return "MARKET"
     if order_type is OrderType.LIMIT:
         return "LIMIT"
+    if order_type is OrderType.TAKE_PROFIT_MARKET:
+        return "TAKE_PROFIT_MARKET"
+    if order_type is OrderType.STOP_MARKET:
+        return "STOP_MARKET"
     raise ValueError(f"unsupported order type: {order_type}")
 
 
@@ -109,6 +121,10 @@ def _map_binance_order_type(order_type: str) -> OrderType:
         return OrderType.MARKET
     if normalized_order_type == "LIMIT":
         return OrderType.LIMIT
+    if normalized_order_type == "TAKE_PROFIT_MARKET":
+        return OrderType.TAKE_PROFIT_MARKET
+    if normalized_order_type == "STOP_MARKET":
+        return OrderType.STOP_MARKET
     raise ValueError(f"unsupported Binance order type: {order_type}")
 
 
@@ -125,3 +141,11 @@ def _map_bool(value: object) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).lower() == "true"
+
+
+def _report_quantity(payload: Mapping[str, object], order_type: OrderType) -> Decimal | None:
+    if order_type in {OrderType.TAKE_PROFIT_MARKET, OrderType.STOP_MARKET} and _map_bool(
+        payload.get("closePosition", False)
+    ):
+        return None
+    return Decimal(str(payload["origQty"]))

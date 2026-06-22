@@ -5,8 +5,10 @@ from src.application.usecases.research.dry_run_strategy_usecase import (
     DryRunStrategyUseCase,
 )
 from src.application.usecases.research.dto import (
+    BacktestPerformance,
     BacktestStrategyCommand,
     BacktestStrategyResult,
+    BacktestTrade,
     DryRunStrategyCommand,
     DryRunStrategyResult,
     EvaluateStrategyCommand,
@@ -19,8 +21,10 @@ from src.application.usecases.research.evaluate_strategy_usecase import (
 
 __all__ = [
     "BacktestStrategyCommand",
+    "BacktestPerformance",
     "BacktestStrategyResult",
     "BacktestStrategyUseCase",
+    "BacktestTrade",
     "DryRunStrategyCommand",
     "DryRunStrategyResult",
     "DryRunStrategyUseCase",

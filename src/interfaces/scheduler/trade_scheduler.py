@@ -10,6 +10,9 @@ from src.application.usecases.trade import (
     ExecuteTradeCommand,
     ExecuteTradeResult,
     ExecuteTradeUseCase,
+    ManageOpenPositionCommand,
+    ManageOpenPositionResult,
+    ManageOpenPositionUseCase,
     SyncPositionCommand,
     SyncPositionResult,
     SyncPositionUseCase,
@@ -67,17 +70,33 @@ class ScheduledPositionSync:
         return self.error is None
 
 
+@dataclass(frozen=True)
+class ScheduledOpenPositionManagement:
+    schedule_name: str
+    started_at: datetime
+    finished_at: datetime
+    command: ManageOpenPositionCommand | None = None
+    result: ManageOpenPositionResult | None = None
+    error: Exception | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.error is None
+
+
 class TradeScheduler:
     def __init__(
         self,
         execute_trade_usecase: ExecuteTradeUseCase,
         close_position_usecase: ClosePositionUseCase,
         sync_position_usecase: SyncPositionUseCase,
+        manage_open_position_usecase: ManageOpenPositionUseCase,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._execute_trade_usecase = execute_trade_usecase
         self._close_position_usecase = close_position_usecase
         self._sync_position_usecase = sync_position_usecase
+        self._manage_open_position_usecase = manage_open_position_usecase
         self._now = now or _utc_now
 
     def run_trade_execution(
@@ -177,6 +196,45 @@ class TradeScheduler:
                 applied_report_count=len(getattr(result, "applied_reports", ())),
             )
         return ScheduledPositionSync(
+            schedule_name=schedule_name,
+            started_at=started_at,
+            finished_at=self._now(),
+            command=command,
+            result=result,
+            error=error,
+        )
+
+    def manage_open_position(
+        self,
+        schedule_name: str,
+        command_factory: Callable[[], ManageOpenPositionCommand],
+    ) -> ScheduledOpenPositionManagement:
+        started_at = self._now()
+        command: ManageOpenPositionCommand | None = None
+        result: ManageOpenPositionResult | None = None
+        error: Exception | None = None
+        runtime_logger.info(
+            "open position management scheduler started",
+            schedule_name=schedule_name,
+        )
+        try:
+            command = command_factory()
+            result = self._manage_open_position_usecase.manage(command)
+        except Exception as exc:
+            error = exc
+            runtime_logger.exception(
+                "open position management scheduler failed",
+                schedule_name=schedule_name,
+                error=str(exc),
+            )
+        else:
+            runtime_logger.info(
+                "open position management scheduler succeeded",
+                schedule_name=schedule_name,
+                status=getattr(getattr(result, "status", None), "value", None),
+                reason=getattr(result, "reason", None),
+            )
+        return ScheduledOpenPositionManagement(
             schedule_name=schedule_name,
             started_at=started_at,
             finished_at=self._now(),

@@ -83,6 +83,10 @@ class RunStrategyBacktestCycleUseCase:
         backtest = BacktestStrategyUseCase(
             market_data=_SnapshotMarketData(snapshot),
             strategy=strategy,
+            indicator_factory=lambda rolling_snapshot: self._indicator_factory(
+                spec,
+                rolling_snapshot,
+            ),
         ).execute(
             BacktestStrategyCommand(
                 target_id=spec.strategy_id,
@@ -103,7 +107,7 @@ class RunStrategyBacktestCycleUseCase:
                 evaluation_id=evaluation_id,
                 target_id=spec.strategy_id,
                 mode=ResearchRunMode.BACKTEST,
-                metrics=_metrics_from_result(backtest.strategy_result),
+                metrics=_metrics_from_backtest(backtest),
                 metadata={
                     **dict(command.metadata),
                     "cycle_id": command.cycle_id,
@@ -182,7 +186,7 @@ def _definition_from_spec(spec: StrategySpec) -> StrategyDefinition:
 
 
 def _metrics_from_result(strategy_result) -> dict[str, Decimal]:
-    return {
+    metrics = {
         "signal_confidence": strategy_result.signal.confidence,
         "direction_score": (
             Decimal("0")
@@ -191,6 +195,28 @@ def _metrics_from_result(strategy_result) -> dict[str, Decimal]:
         ),
         "reason_count": Decimal(len(strategy_result.signal.reasons)),
     }
+    return metrics
+
+
+def _metrics_from_backtest(backtest) -> dict[str, Decimal]:
+    metrics = _metrics_from_result(backtest.strategy_result)
+    performance = backtest.performance
+    if performance is None:
+        return metrics
+    metrics.update(
+        {
+            "initial_equity": performance.initial_equity,
+            "final_equity": performance.final_equity,
+            "net_pnl": performance.net_pnl,
+            "return_ratio": performance.return_ratio,
+            "max_drawdown_ratio": performance.max_drawdown_ratio,
+            "trade_count": Decimal(performance.trade_count),
+            "winning_trade_count": Decimal(performance.winning_trade_count),
+            "losing_trade_count": Decimal(performance.losing_trade_count),
+            "win_rate": performance.win_rate,
+        }
+    )
+    return metrics
 
 
 class _SnapshotMarketData:

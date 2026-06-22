@@ -283,6 +283,9 @@ def test_backtest_cycle_registers_definitions_and_saves_backtested_evaluations()
     assert repository.saved_evaluations[0].metrics["signal_confidence"] == Decimal("0.70")
     assert repository.saved_evaluations[0].metrics["direction_score"] == Decimal("1")
     assert repository.saved_evaluations[0].metrics["reason_count"] == Decimal("0")
+    assert repository.saved_evaluations[0].metrics["trade_count"] == Decimal("1")
+    assert "net_pnl" in repository.saved_evaluations[0].metrics
+    assert "max_drawdown_ratio" in repository.saved_evaluations[0].metrics
     assert market_data.requests == [("snapshot", market.symbol, market.timeframe, 240)]
 
 

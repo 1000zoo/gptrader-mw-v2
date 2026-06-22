@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from types import MappingProxyType
@@ -7,6 +8,7 @@ from typing import Mapping
 from src.domain.indicator import IndicatorSet
 from src.domain.lifecycle import StrategyEvaluation
 from src.domain.market import Symbol, Timeframe
+from src.domain.signal import SignalDirection
 from src.domain.signal_generator import GeneratedSignal
 from src.domain.strategy import StrategyContext, StrategyResult
 
@@ -23,6 +25,13 @@ class BacktestStrategyCommand:
     timeframe: Timeframe
     candle_limit: int
     indicators: IndicatorSet
+    start_at: datetime | None = None
+    end_at: datetime | None = None
+    initial_equity: Decimal = Decimal("10000")
+    risk_ratio: Decimal = Decimal("0.01")
+    leverage: Decimal = Decimal("1")
+    fee_rate: Decimal = Decimal("0")
+    slippage_rate: Decimal = Decimal("0")
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -31,9 +40,54 @@ class BacktestStrategyCommand:
             raise ValueError("target_id is required")
         if self.candle_limit <= 0:
             raise ValueError("candle_limit must be positive")
+        if (self.start_at is None) != (self.end_at is None):
+            raise ValueError("start_at and end_at must be provided together")
+        if (
+            self.start_at is not None
+            and self.end_at is not None
+            and self.end_at <= self.start_at
+        ):
+            raise ValueError("end_at must be after start_at")
+        if self.initial_equity <= Decimal("0"):
+            raise ValueError("initial_equity must be positive")
+        if self.risk_ratio <= Decimal("0"):
+            raise ValueError("risk_ratio must be positive")
+        if self.leverage <= Decimal("0"):
+            raise ValueError("leverage must be positive")
+        if self.fee_rate < Decimal("0"):
+            raise ValueError("fee_rate must be greater than or equal to zero")
+        if self.slippage_rate < Decimal("0"):
+            raise ValueError("slippage_rate must be greater than or equal to zero")
 
         object.__setattr__(self, "target_id", target_id)
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+
+
+@dataclass(frozen=True)
+class BacktestTrade:
+    direction: SignalDirection
+    entry_price: Decimal
+    exit_price: Decimal
+    quantity: Decimal
+    gross_pnl: Decimal
+    fee_paid: Decimal
+    net_pnl: Decimal
+    entry_time: object
+    exit_time: object
+    exit_reason: str
+
+
+@dataclass(frozen=True)
+class BacktestPerformance:
+    initial_equity: Decimal
+    final_equity: Decimal
+    net_pnl: Decimal
+    return_ratio: Decimal
+    max_drawdown_ratio: Decimal
+    trade_count: int
+    winning_trade_count: int
+    losing_trade_count: int
+    win_rate: Decimal
 
 
 @dataclass(frozen=True)
@@ -41,6 +95,8 @@ class BacktestStrategyResult:
     target_id: str
     strategy_result: StrategyResult
     context: StrategyContext
+    trades: tuple[BacktestTrade, ...] = ()
+    performance: BacktestPerformance | None = None
 
 
 @dataclass(frozen=True)

@@ -11,6 +11,7 @@ from src.application.usecases.trade import (
     ExecuteTradeCommand,
     ExecuteTradeResult,
     ExecuteTradeUseCase,
+    ManageOpenPositionUseCase,
     SyncPositionUseCase,
 )
 from src.application.usecases.strategy_lifecycle import (
@@ -27,6 +28,7 @@ from src.domain.lifecycle import (
 )
 from src.domain.market import Candle, MarketSnapshot
 from src.domain.risk import ExposureLimit
+from src.domain.signal import SignalDirection
 from src.domain.signal_generator import CompositeSignalGenerator
 from src.infrastructure.persistence import (
     SqliteRuntimeStateRepository,
@@ -35,7 +37,10 @@ from src.infrastructure.persistence import (
 from src.interfaces.api import create_app
 from src.interfaces.api.trade_controller import create_trade_router
 from src.interfaces.scheduler import StrategyLifecycleScheduler, TradeScheduler
-from src.domain.strategy.implementations import create_default_strategy_catalog
+from src.domain.strategy.implementations import (
+    AtrTakeProfitStopLossStrategy,
+    create_default_strategy_catalog,
+)
 from src.runtime.config import RuntimeMode, RuntimeSettings
 from src.runtime.local_data import (
     build_local_indicator_set,
@@ -94,9 +99,28 @@ class LocalRuntime:
                 ),
                 signal_log_repository=signal_log_repository,
                 order_execution=dry_run_order_execution,
+                take_profit_stop_loss_strategy=AtrTakeProfitStopLossStrategy(
+                    atr_period=3
+                ),
             ),
             close_position_usecase=ClosePositionUseCase(dry_run_order_execution),
             sync_position_usecase=SyncPositionUseCase(dry_run_order_execution),
+            manage_open_position_usecase=ManageOpenPositionUseCase(
+                market_data=market_data,
+                signal_generator=CompositeSignalGenerator(
+                    strategies=(
+                        strategy_catalog.create_strategy(
+                            next(
+                                spec
+                                for spec in strategy_catalog.list_specs()
+                                if spec.strategy_id == "latest-close-moving-average"
+                            )
+                        ),
+                    )
+                ),
+                signal_log_repository=signal_log_repository,
+                close_position_usecase=ClosePositionUseCase(dry_run_order_execution),
+            ),
         )
         self._last_strategy_backtest_cycle_result: (
             RunStrategyBacktestCycleResult | None
@@ -343,6 +367,36 @@ class _DryRunOrderExecution:
 
     def load_execution_reports(self, symbol, since, until):
         return ()
+
+    def submit_take_profit_stop_loss_orders(
+        self,
+        symbol,
+        position_direction,
+        take_profit,
+        stop_loss,
+        client_order_id_prefix,
+    ):
+        close_side = (
+            SignalDirection.SHORT
+            if position_direction is SignalDirection.LONG
+            else SignalDirection.LONG
+        )
+        take_profit_request = OrderRequest.take_profit_market(
+            client_order_id=f"{client_order_id_prefix}-tp",
+            symbol=symbol,
+            side=close_side,
+            stop_price=take_profit,
+        )
+        stop_loss_request = OrderRequest.stop_market(
+            client_order_id=f"{client_order_id_prefix}-sl",
+            symbol=symbol,
+            side=close_side,
+            stop_price=stop_loss,
+        )
+        return (
+            self.submit_order(take_profit_request),
+            self.submit_order(stop_loss_request),
+        )
 
 
 class _RuntimeExecuteTradeBoundary:

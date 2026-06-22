@@ -160,3 +160,82 @@ def test_binance_order_mapper_encodes_reduce_only_only_when_true():
     )
 
     assert params["reduceOnly"] == "true"
+
+
+def test_binance_order_mapper_encodes_close_position_take_profit_market():
+    params = map_order_request_to_binance_params(
+        OrderRequest.take_profit_market(
+            client_order_id="tp-1",
+            symbol=Symbol("btc", "usdt"),
+            side=SignalDirection.SHORT,
+            stop_price=Decimal("72000"),
+        )
+    )
+
+    assert params == {
+        "symbol": "BTCUSDT",
+        "side": "SELL",
+        "type": "TAKE_PROFIT_MARKET",
+        "stopPrice": "72000",
+        "closePosition": "true",
+        "newClientOrderId": "tp-1",
+    }
+
+
+def test_binance_order_execution_adapter_submits_take_profit_stop_loss_orders(
+    monkeypatch,
+):
+    config = BinanceConfig.default()
+    orders = []
+
+    def fake_submit_order_api(received_config: BinanceConfig, params):
+        orders.append((received_config, params))
+        return {
+            "clientOrderId": params["newClientOrderId"],
+            "orderId": len(orders),
+            "status": "NEW",
+        }
+
+    monkeypatch.setattr(
+        binance_order_execution_adapter,
+        "submit_order_api",
+        fake_submit_order_api,
+    )
+    adapter = BinanceOrderExecutionAdapter(config)
+
+    results = adapter.submit_take_profit_stop_loss_orders(
+        symbol=Symbol("btc", "usdt"),
+        position_direction=SignalDirection.LONG,
+        take_profit=Decimal("72000"),
+        stop_loss=Decimal("68000"),
+        client_order_id_prefix="protect-entry-1",
+    )
+
+    assert orders == [
+        (
+            config,
+            {
+                "symbol": "BTCUSDT",
+                "side": "SELL",
+                "type": "TAKE_PROFIT_MARKET",
+                "stopPrice": "72000",
+                "closePosition": "true",
+                "newClientOrderId": "protect-entry-1-tp",
+            },
+        ),
+        (
+            config,
+            {
+                "symbol": "BTCUSDT",
+                "side": "SELL",
+                "type": "STOP_MARKET",
+                "stopPrice": "68000",
+                "closePosition": "true",
+                "newClientOrderId": "protect-entry-1-sl",
+            },
+        ),
+    ]
+    assert results == (
+        OrderResult.accepted("protect-entry-1-tp", "1"),
+        OrderResult.accepted("protect-entry-1-sl", "2"),
+    )

@@ -13,7 +13,7 @@ from src.domain.ports import (
 from src.domain.risk import PositionSizer, RiskPolicy
 from src.domain.signal import Signal, SignalDirection, TradeDecision, TradeDecisionAction
 from src.domain.signal_generator import SignalGenerator
-from src.domain.strategy import StrategyContext
+from src.domain.strategy import StrategyContext, TakeProfitStopLossStrategy
 from src.observability.logging import runtime_logger
 
 
@@ -25,12 +25,14 @@ class ExecuteTradeUseCase:
         signal_log_repository: SignalLogRepositoryPort,
         order_execution: OrderExecutionPort,
         risk_policy: RiskPolicy | None = None,
+        take_profit_stop_loss_strategy: TakeProfitStopLossStrategy | None = None,
     ) -> None:
         self._market_data = market_data
         self._signal_generator = signal_generator
         self._signal_log_repository = signal_log_repository
         self._order_execution = order_execution
         self._risk_policy = risk_policy or RiskPolicy()
+        self._take_profit_stop_loss_strategy = take_profit_stop_loss_strategy
 
     def execute(self, command: ExecuteTradeCommand) -> ExecuteTradeResult:
         runtime_logger.info(
@@ -158,6 +160,21 @@ class ExecuteTradeUseCase:
                 reason=risk_check.reason.value,
             )
 
+        take_profit_stop_loss = None
+        if self._take_profit_stop_loss_strategy is not None:
+            take_profit_stop_loss = self._take_profit_stop_loss_strategy.calculate(
+                context,
+                generated_signal.signal.direction,
+            )
+            runtime_logger.info(
+                "trade take profit stop loss calculated",
+                signal_id=command.signal_id,
+                strategy=take_profit_stop_loss.strategy_name,
+                entry_price=str(take_profit_stop_loss.entry_price),
+                take_profit=str(take_profit_stop_loss.take_profit),
+                stop_loss=str(take_profit_stop_loss.stop_loss),
+            )
+
         client_order_id = self._client_order_id(command)
         runtime_logger.info(
             "trade order request prepared",
@@ -178,6 +195,24 @@ class ExecuteTradeUseCase:
                 quantity=position_size.quantity,
             )
         )
+        protective_order_results = None
+        if take_profit_stop_loss is not None:
+            protective_order_results = (
+                self._order_execution.submit_take_profit_stop_loss_orders(
+                    symbol=command.symbol,
+                    position_direction=generated_signal.signal.direction,
+                    take_profit=take_profit_stop_loss.take_profit,
+                    stop_loss=take_profit_stop_loss.stop_loss,
+                    client_order_id_prefix=client_order_id,
+                )
+            )
+            runtime_logger.info(
+                "trade protective orders submitted",
+                signal_id=command.signal_id,
+                client_order_id=client_order_id,
+                take_profit_order_status=protective_order_results[0].status.value,
+                stop_loss_order_status=protective_order_results[1].status.value,
+            )
         runtime_logger.info(
             "trade order result received",
             signal_id=command.signal_id,
@@ -191,6 +226,8 @@ class ExecuteTradeUseCase:
             generated_signal=generated_signal,
             risk_check=risk_check,
             order_result=order_result,
+            take_profit_stop_loss=take_profit_stop_loss,
+            protective_order_results=protective_order_results,
         )
 
     def _decision_from_signal(self, signal: Signal) -> TradeDecision:
