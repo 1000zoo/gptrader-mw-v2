@@ -292,7 +292,7 @@ class LocalRuntime:
             raise ValueError("signal_id is required")
         symbol = parse_symbol(self.settings.symbol)
         timeframe = parse_timeframe(self.settings.timeframe)
-        market = _LocalCatalogMarketData().load_snapshot(
+        market = self._market_data.load_snapshot(
             symbol=symbol,
             timeframe=timeframe,
             limit=self.settings.candle_limit,

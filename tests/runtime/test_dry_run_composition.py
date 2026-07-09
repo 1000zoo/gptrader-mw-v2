@@ -1,6 +1,9 @@
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from src.application.usecases.trade import TradeExecutionStatus
+from src.domain.market import Candle, MarketSnapshot, Symbol, Timeframe
 from src.infrastructure.persistence import (
     SqliteRuntimeStateRepository,
     SqliteSignalLogRepository,
@@ -18,6 +21,49 @@ def _settings(tmp_path: Path) -> RuntimeSettings:
         generator_id="dry-run-generator",
         signal_id_prefix="dry-run-signal",
     )
+
+
+class FixedMarketData:
+    def __init__(self, snapshot: MarketSnapshot) -> None:
+        self.snapshot = snapshot
+
+    def load_snapshot(self, symbol, timeframe, limit):
+        return self.snapshot
+
+
+def _snapshot(closed_at: datetime) -> MarketSnapshot:
+    symbol = Symbol("BTC", "USDT")
+    timeframe = Timeframe(1, "m")
+    interval = timedelta(seconds=timeframe.duration_seconds)
+    candles = []
+    for index, close_price in enumerate(
+        (Decimal("63000"), Decimal("63010"), Decimal("63020"))
+    ):
+        candle_closed_at = closed_at - interval * (2 - index)
+        candles.append(
+            Candle(
+                symbol=symbol,
+                timeframe=timeframe,
+                opened_at=candle_closed_at - interval,
+                closed_at=candle_closed_at,
+                open_price=close_price - Decimal("10"),
+                high_price=close_price + Decimal("10"),
+                low_price=close_price - Decimal("10"),
+                close_price=close_price,
+                volume=Decimal("100"),
+            )
+        )
+    return MarketSnapshot(tuple(candles))
+
+
+def test_trade_command_indicators_are_built_from_runtime_market_data(tmp_path) -> None:
+    runtime = create_local_runtime(_settings(tmp_path))
+    market = _snapshot(datetime(2026, 7, 9, 17, 47, tzinfo=timezone.utc))
+    runtime._market_data = FixedMarketData(market)
+
+    command = runtime._execute_trade_command("market-smoke")
+
+    assert command.indicators.measured_at == market.latest_candle.closed_at
 
 
 def test_dry_run_runtime_reports_trade_controls_enabled_without_live_order_path(
