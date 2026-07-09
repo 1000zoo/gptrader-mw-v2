@@ -6,6 +6,7 @@ import pytest
 from scripts.live_strategy_scheduler import (
     SchedulerConfig,
     build_signal_id,
+    load_environment,
     parse_interval_seconds,
     run_scheduler,
 )
@@ -51,6 +52,26 @@ def test_build_signal_id_includes_prefix_timestamp_and_sequence() -> None:
     )
 
     assert signal_id == "live-compression-s2-20260710T123456Z-000007"
+
+
+def test_load_environment_reads_dotenv_without_overriding_existing_values(
+    tmp_path, monkeypatch
+) -> None:
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text(
+        "BINANCE_API_KEY=from-file\n"
+        "BINANCE_API_SECRET=secret-from-file\n"
+        "GPTRADER_SCHEDULER_INTERVAL_SECONDS=45\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BINANCE_API_KEY", "from-shell")
+    monkeypatch.delenv("BINANCE_API_SECRET", raising=False)
+
+    env = load_environment(dotenv_path)
+
+    assert env["BINANCE_API_KEY"] == "from-shell"
+    assert env["BINANCE_API_SECRET"] == "secret-from-file"
+    assert env["GPTRADER_SCHEDULER_INTERVAL_SECONDS"] == "45"
 
 
 def test_run_scheduler_triggers_runtime_at_configured_interval() -> None:

@@ -8,6 +8,8 @@ from pathlib import Path
 from time import sleep as default_sleep
 from typing import Callable
 
+from dotenv import load_dotenv
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -37,6 +39,12 @@ def parse_interval_seconds(value: str) -> int:
 def build_signal_id(prefix: str, now: datetime, sequence: int) -> str:
     timestamp = now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"{prefix}-{timestamp}-{sequence:06d}"
+
+
+def load_environment(dotenv_path: Path | None = None) -> dict[str, str]:
+    path = dotenv_path or PROJECT_ROOT / ".env"
+    load_dotenv(path, override=False)
+    return dict(os.environ)
 
 
 def run_scheduler(
@@ -87,9 +95,10 @@ def run_scheduler(
 
 
 def main() -> int:
-    settings = RuntimeSettings.from_env(os.environ)
+    env = load_environment()
+    settings = RuntimeSettings.from_env(env)
     interval_seconds = parse_interval_seconds(
-        os.getenv("GPTRADER_SCHEDULER_INTERVAL_SECONDS", "60")
+        env.get("GPTRADER_SCHEDULER_INTERVAL_SECONDS", "60")
     )
     config = SchedulerConfig(
         interval_seconds=interval_seconds,
