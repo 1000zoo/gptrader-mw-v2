@@ -9,6 +9,7 @@ from src.application.usecases.research.backtest_simulator import (
 from src.domain.indicator import IndicatorSet
 from src.domain.market import MarketSnapshot
 from src.domain.ports import MarketDataPort
+from src.domain.risk import PositionSizingStrategy
 from src.domain.strategy import Strategy
 from src.domain.strategy.take_profit_stop_loss import TakeProfitStopLossStrategy
 
@@ -20,11 +21,13 @@ class BacktestStrategyUseCase:
         strategy: Strategy,
         take_profit_stop_loss_strategy: TakeProfitStopLossStrategy | None = None,
         indicator_factory: BacktestIndicatorFactory | None = None,
+        position_sizing_strategy: PositionSizingStrategy | None = None,
     ) -> None:
         self._market_data = market_data
         self._strategy = strategy
         self._take_profit_stop_loss_strategy = take_profit_stop_loss_strategy
         self._indicator_factory = indicator_factory
+        self._position_sizing_strategy = position_sizing_strategy
 
     def execute(self, command: BacktestStrategyCommand) -> BacktestStrategyResult:
         market = self._market_data.load_snapshot(
@@ -46,6 +49,7 @@ class BacktestStrategyUseCase:
             indicator_factory=self._indicator_factory
             or _command_indicator_factory(command),
             take_profit_stop_loss_strategy=self._take_profit_stop_loss_strategy,
+            position_sizing_strategy=self._position_sizing_strategy,
         )
         return BacktestStrategyResult(
             target_id=command.target_id,

@@ -227,6 +227,8 @@ ws_test.py
 
 /logs
 /_study
+.agents/
+docs/backtests/cache/
 
 .idea/
 python_test/

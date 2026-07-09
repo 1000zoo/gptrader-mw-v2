@@ -10,7 +10,7 @@ from src.domain.ports import (
     SignalLogEntry,
     SignalLogRepositoryPort,
 )
-from src.domain.risk import PositionSizer, RiskPolicy
+from src.domain.risk import FixedPositionSizingStrategy, PositionSize, PositionSizingStrategy, RiskPolicy
 from src.domain.signal import Signal, SignalDirection, TradeDecision, TradeDecisionAction
 from src.domain.signal_generator import SignalGenerator
 from src.domain.strategy import StrategyContext, TakeProfitStopLossStrategy
@@ -26,6 +26,7 @@ class ExecuteTradeUseCase:
         order_execution: OrderExecutionPort,
         risk_policy: RiskPolicy | None = None,
         take_profit_stop_loss_strategy: TakeProfitStopLossStrategy | None = None,
+        position_sizing_strategy: PositionSizingStrategy | None = None,
     ) -> None:
         self._market_data = market_data
         self._signal_generator = signal_generator
@@ -33,6 +34,7 @@ class ExecuteTradeUseCase:
         self._order_execution = order_execution
         self._risk_policy = risk_policy or RiskPolicy()
         self._take_profit_stop_loss_strategy = take_profit_stop_loss_strategy
+        self._position_sizing_strategy = position_sizing_strategy
 
     def execute(self, command: ExecuteTradeCommand) -> ExecuteTradeResult:
         runtime_logger.info(
@@ -104,20 +106,27 @@ class ExecuteTradeUseCase:
                 reason="non_entry_decision",
             )
 
-        sizer = PositionSizer(
-            base_risk_ratio=command.base_risk_ratio,
+        sizing_strategy = self._position_sizing_strategy or FixedPositionSizingStrategy(
+            equity_ratio=command.base_risk_ratio,
             leverage=command.leverage,
+        )
+        sizing_decision = sizing_strategy.decide(
+            decision=decision,
+            exposure_limit=command.exposure_limit,
         )
         requested_notional = (
             command.exposure_limit.equity
-            * command.base_risk_ratio
-            * generated_signal.signal.confidence
-            * command.leverage
+            * sizing_decision.equity_ratio
+            * sizing_decision.leverage
         )
-        position_size = sizer.size(
-            decision=decision,
-            exposure_limit=command.exposure_limit,
-            entry_price=entry_price,
+        capped_notional = min(
+            requested_notional,
+            command.exposure_limit.remaining_total_exposure,
+            command.exposure_limit.remaining_symbol_exposure,
+        )
+        position_size = PositionSize(
+            notional=capped_notional,
+            quantity=capped_notional / entry_price,
         )
         runtime_logger.info(
             "trade entry sizing calculated",
@@ -128,8 +137,8 @@ class ExecuteTradeUseCase:
             position_notional=str(position_size.notional),
             position_quantity=str(position_size.quantity),
             equity=str(command.exposure_limit.equity),
-            base_risk_ratio=str(command.base_risk_ratio),
-            leverage=str(command.leverage),
+            base_risk_ratio=str(sizing_decision.equity_ratio),
+            leverage=str(sizing_decision.leverage),
             max_total_exposure=str(command.exposure_limit.max_total_exposure),
             max_symbol_exposure=str(command.exposure_limit.max_symbol_exposure),
         )

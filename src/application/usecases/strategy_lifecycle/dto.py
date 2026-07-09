@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from types import MappingProxyType
 from typing import Mapping
 
@@ -104,13 +105,29 @@ class RunStrategyLifecycleResult:
 class RunStrategyBacktestCycleCommand:
     cycle_id: str
     metadata: Mapping[str, object] | None = None
+    enabled_strategy_ids: tuple[str, ...] = ()
+    disabled_strategy_ids: tuple[str, ...] = ()
+    start_at: datetime | None = None
+    end_at: datetime | None = None
 
     def __post_init__(self) -> None:
         cycle_id = self.cycle_id.strip()
         if not cycle_id:
             raise ValueError("cycle_id is required")
+        if (self.start_at is None) != (self.end_at is None):
+            raise ValueError("start_at and end_at must be provided together")
+        if (
+            self.start_at is not None
+            and self.end_at is not None
+            and self.end_at <= self.start_at
+        ):
+            raise ValueError("end_at must be after start_at")
+        enabled_strategy_ids = _normalize_ids(self.enabled_strategy_ids)
+        disabled_strategy_ids = _normalize_ids(self.disabled_strategy_ids)
 
         object.__setattr__(self, "cycle_id", cycle_id)
+        object.__setattr__(self, "enabled_strategy_ids", enabled_strategy_ids)
+        object.__setattr__(self, "disabled_strategy_ids", disabled_strategy_ids)
         object.__setattr__(
             self,
             "metadata",
@@ -156,3 +173,10 @@ class RunStrategyBacktestCycleResult:
     @property
     def failed_count(self) -> int:
         return sum(1 for item in self.items if not item.succeeded)
+
+
+def _normalize_ids(values: tuple[str, ...]) -> tuple[str, ...]:
+    normalized = tuple(value.strip() for value in values if value.strip())
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("strategy ids must be unique")
+    return normalized

@@ -20,6 +20,7 @@ from src.domain.strategy import (
     StrategyResult,
     StrategySpec,
 )
+from src.domain.strategy.take_profit_stop_loss import TakeProfitStopLossLevels
 from src.domain.strategy.implementations import (
     LatestCloseMovingAverageStrategy,
     create_default_strategy_catalog,
@@ -28,13 +29,23 @@ from tests.domain.strategy.test_strategy_context import make_market
 
 
 def test_run_strategy_backtest_cycle_command_stores_cycle_inputs() -> None:
+    start_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    end_at = datetime(2026, 7, 1, tzinfo=timezone.utc)
     command = RunStrategyBacktestCycleCommand(
         cycle_id="cycle-20260617",
         metadata={"lookback": "recent"},
+        enabled_strategy_ids=(" always-long ",),
+        disabled_strategy_ids=("disabled-one",),
+        start_at=start_at,
+        end_at=end_at,
     )
 
     assert command.cycle_id == "cycle-20260617"
     assert command.metadata["lookback"] == "recent"
+    assert command.enabled_strategy_ids == ("always-long",)
+    assert command.disabled_strategy_ids == ("disabled-one",)
+    assert command.start_at == start_at
+    assert command.end_at == end_at
 
 
 def test_run_strategy_backtest_cycle_result_splits_successes_and_failures() -> None:
@@ -81,6 +92,14 @@ class FakeMarketData:
     def load_snapshot(self, symbol, timeframe, limit):
         self.requests.append(("snapshot", symbol, timeframe, limit))
         return self._market_for(symbol, timeframe)
+
+    def load_candles_between(self, symbol, timeframe, start_at, end_at):
+        self.requests.append((symbol, timeframe, start_at, end_at))
+        return tuple(
+            candle
+            for candle in self._market_for(symbol, timeframe).candles
+            if start_at <= candle.opened_at < end_at
+        )
 
     def _market_for(self, symbol, timeframe):
         if isinstance(self.market, dict):
@@ -138,6 +157,17 @@ class AlwaysWaitStrategy:
         return StrategyResult(
             name="always-wait",
             signal=Signal.wait(metadata={"reason": "steady"}),
+        )
+
+
+class FixedTakeProfitStopLossStrategy:
+    def calculate(self, context: StrategyContext, direction: SignalDirection):
+        entry = context.market.latest_candle.close_price
+        return TakeProfitStopLossLevels(
+            strategy_name="fixed",
+            entry_price=entry,
+            take_profit=entry + Decimal("10"),
+            stop_loss=entry - Decimal("5"),
         )
 
 
@@ -238,6 +268,33 @@ def make_market_with_closes(close_prices: tuple[Decimal, ...]) -> MarketSnapshot
     return MarketSnapshot(candles=tuple(candles))
 
 
+def make_backtest_cycle_market() -> MarketSnapshot:
+    symbol = Symbol("BTC", "USDT")
+    timeframe = Timeframe(1, "m")
+    start = datetime(2026, 6, 17, 0, 0, tzinfo=timezone.utc)
+    values = (
+        (Decimal("100"), Decimal("101"), Decimal("99"), Decimal("100")),
+        (Decimal("110"), Decimal("111"), Decimal("99"), Decimal("110")),
+    )
+    candles = []
+    for index, (close_price, high_price, low_price, open_price) in enumerate(values):
+        opened_at = start + timedelta(minutes=index)
+        candles.append(
+            Candle(
+                symbol=symbol,
+                timeframe=timeframe,
+                opened_at=opened_at,
+                closed_at=opened_at + timedelta(minutes=1),
+                open_price=open_price,
+                high_price=high_price,
+                low_price=low_price,
+                close_price=close_price,
+                volume=Decimal("10"),
+            )
+        )
+    return MarketSnapshot(tuple(candles))
+
+
 def make_catalog_with_period_4_moving_average_strategy(
     market,
 ) -> StaticStrategyCatalog:
@@ -304,23 +361,109 @@ def test_default_strategy_catalog_backtest_cycle_succeeds_and_saves_evaluations(
         strategy_catalog=catalog,
     ).execute(RunStrategyBacktestCycleCommand(cycle_id="cycle-default"))
 
-    assert result.succeeded_count == 2
+    assert result.succeeded_count == 4
     assert result.failed_count == 0
     assert {item.strategy_id for item in result.items} == {
         "latest-close-moving-average",
         "session-volume-profile",
+        "chart-pattern",
+        "tv-range-seed-s1-t1-p2-fixed",
     }
-    assert len(repository.saved_evaluations) == 2
+    assert len(repository.saved_evaluations) == 4
     assert {evaluation.target_id for evaluation in repository.saved_evaluations} == {
         "latest-close-moving-average",
         "session-volume-profile",
+        "chart-pattern",
+        "tv-range-seed-s1-t1-p2-fixed",
     }
     assert {
         evaluation.evaluation_id for evaluation in repository.saved_evaluations
     } == {
         "cycle-default:latest-close-moving-average:backtest",
         "cycle-default:session-volume-profile:backtest",
+        "cycle-default:chart-pattern:backtest",
+        "cycle-default:tv-range-seed-s1-t1-p2-fixed:backtest",
     }
+
+
+def test_backtest_cycle_filters_enabled_strategy_ids() -> None:
+    market = make_market()
+    repository = FakeStrategyRepository()
+    usecase = RunStrategyBacktestCycleUseCase(
+        strategy_repository=repository,
+        market_data=FakeMarketData(market),
+        strategy_catalog=make_catalog_with_failing_and_wait_strategies(market),
+        indicator_factory=empty_indicator_factory,
+    )
+
+    result = usecase.execute(
+        RunStrategyBacktestCycleCommand(
+            cycle_id="cycle-1",
+            enabled_strategy_ids=("always-wait",),
+        )
+    )
+
+    assert result.succeeded_count == 1
+    assert result.failed_count == 0
+    assert [item.strategy_id for item in result.items] == ["always-wait"]
+    assert [definition.strategy_id for definition in repository.saved_definitions] == [
+        "always-wait"
+    ]
+
+
+def test_backtest_cycle_loads_real_date_range_when_command_has_dates() -> None:
+    market = make_market_with_closes(
+        (Decimal("100"), Decimal("102"), Decimal("104"), Decimal("110"))
+    )
+    repository = FakeStrategyRepository()
+    market_data = FakeMarketData(market)
+    usecase = RunStrategyBacktestCycleUseCase(
+        strategy_repository=repository,
+        market_data=market_data,
+        strategy_catalog=make_catalog_with_always_long_strategy(market),
+        indicator_factory=empty_indicator_factory,
+    )
+
+    result = usecase.execute(
+        RunStrategyBacktestCycleCommand(
+            cycle_id="cycle-range",
+            start_at=market.candles[0].opened_at,
+            end_at=market.candles[-1].closed_at,
+        )
+    )
+
+    assert result.succeeded_count == 1
+    assert repository.saved_evaluations[0].evaluation_id == (
+        "cycle-range:always-long:backtest"
+    )
+    assert market_data.requests == [
+        (
+            market.symbol,
+            market.timeframe,
+            market.candles[0].opened_at,
+            market.candles[-1].closed_at,
+        )
+    ]
+
+
+def test_backtest_cycle_passes_take_profit_stop_loss_strategy_to_simulation() -> None:
+    market = make_backtest_cycle_market()
+    repository = FakeStrategyRepository()
+
+    result = RunStrategyBacktestCycleUseCase(
+        strategy_repository=repository,
+        market_data=FakeMarketData(market),
+        strategy_catalog=make_catalog_with_always_long_strategy(market),
+        indicator_factory=empty_indicator_factory,
+        take_profit_stop_loss_strategy=FixedTakeProfitStopLossStrategy(),
+    ).execute(RunStrategyBacktestCycleCommand(cycle_id="cycle-tpsl"))
+
+    assert result.succeeded_count == 1
+    assert repository.saved_evaluations[0].metrics["trade_count"] == Decimal("1")
+    assert repository.saved_evaluations[0].metrics["winning_trade_count"] == Decimal("1")
+    assert repository.saved_evaluations[0].metrics["average_trade_return"] == Decimal(
+        "0.1"
+    )
 
 
 def test_backtest_cycle_uses_catalog_indicator_key_for_moving_average_strategy() -> None:

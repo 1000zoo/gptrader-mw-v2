@@ -9,7 +9,9 @@ from src.application.usecases.research.dto import (
 )
 from src.domain.indicator import IndicatorSet
 from src.domain.market import Candle, MarketSnapshot
+from src.domain.risk import FixedPositionSizingStrategy, PositionSizingStrategy
 from src.domain.signal import SignalDirection
+from src.domain.signal.trade_decision import TradeDecision, TradeDecisionAction
 from src.domain.strategy import Strategy, StrategyContext, StrategyResult
 from src.domain.strategy.take_profit_stop_loss import (
     TakeProfitStopLossLevels,
@@ -44,6 +46,7 @@ def simulate_backtest(
     strategy: Strategy,
     indicator_factory: BacktestIndicatorFactory,
     take_profit_stop_loss_strategy: TakeProfitStopLossStrategy | None = None,
+    position_sizing_strategy: PositionSizingStrategy | None = None,
 ) -> BacktestSimulation:
     equity = command.initial_equity
     peak_equity = equity
@@ -75,11 +78,44 @@ def simulate_backtest(
                 )
                 position = None
                 exited_this_candle = True
+            else:
+                snapshot = _rolling_snapshot(market, index, command.candle_limit)
+                indicators = indicator_factory(snapshot)
+                context = StrategyContext(
+                    market=snapshot,
+                    indicators=indicators,
+                    metadata=command.metadata,
+                )
+                try:
+                    result = strategy.evaluate(context)
+                except KeyError:
+                    result = None
+                if result is not None:
+                    latest_result = result
+                    latest_context = context
+                    if _is_opposite_signal(position.direction, result.signal.direction):
+                        trade = _close_trade(
+                            position=position,
+                            candle=candle,
+                            exit_price=candle.close_price,
+                            exit_reason="opposite_signal",
+                            fee_rate=command.fee_rate,
+                            slippage_rate=command.slippage_rate,
+                        )
+                        trades.append(trade)
+                        equity += trade.net_pnl
+                        peak_equity = max(peak_equity, equity)
+                        max_drawdown_ratio = max(
+                            max_drawdown_ratio,
+                            _drawdown_ratio(equity, peak_equity),
+                        )
+                        position = None
+                        exited_this_candle = True
 
         if position is not None or exited_this_candle:
             continue
 
-        snapshot = MarketSnapshot(candles=market.candles[: index + 1])
+        snapshot = _rolling_snapshot(market, index, command.candle_limit)
         indicators = indicator_factory(snapshot)
         context = StrategyContext(
             market=snapshot,
@@ -101,11 +137,35 @@ def simulate_backtest(
             direction=result.signal.direction,
             slippage_rate=command.slippage_rate,
         )
-        notional = equity * command.risk_ratio * command.leverage
+        sizing_strategy = position_sizing_strategy or FixedPositionSizingStrategy(
+            equity_ratio=command.risk_ratio,
+            leverage=command.leverage,
+        )
+        sizing_decision = sizing_strategy.decide(
+            decision=TradeDecision(
+                action=_entry_action(result.signal.direction),
+                signal=result.signal,
+            ),
+            exposure_limit=_backtest_exposure_limit(equity),
+        )
+        notional = (
+            equity
+            * sizing_decision.equity_ratio
+            * sizing_decision.leverage
+        )
         quantity = notional / entry_price
         levels = None
         if take_profit_stop_loss_strategy is not None:
-            levels = take_profit_stop_loss_strategy.calculate(
+            try:
+                levels = take_profit_stop_loss_strategy.calculate(
+                    context,
+                    result.signal.direction,
+                )
+            except ValueError:
+                continue
+        else:
+            levels = _levels_from_signal_metadata(
+                result,
                 context,
                 result.signal.direction,
             )
@@ -118,7 +178,11 @@ def simulate_backtest(
         )
 
     if latest_result is None or latest_context is None:
-        snapshot = MarketSnapshot(candles=market.candles)
+        snapshot = _rolling_snapshot(
+            market,
+            len(market.candles) - 1,
+            command.candle_limit,
+        )
         indicators = indicator_factory(snapshot)
         latest_context = StrategyContext(
             market=snapshot,
@@ -179,6 +243,28 @@ def _exit_for_candle(
     return None, None
 
 
+def _rolling_snapshot(
+    market: MarketSnapshot,
+    index: int,
+    candle_limit: int,
+) -> MarketSnapshot:
+    start = max(0, index + 1 - candle_limit)
+    return MarketSnapshot(candles=market.candles[start : index + 1])
+
+
+def _is_opposite_signal(
+    position_direction: SignalDirection,
+    signal_direction: SignalDirection,
+) -> bool:
+    return (
+        position_direction is SignalDirection.LONG
+        and signal_direction is SignalDirection.SHORT
+    ) or (
+        position_direction is SignalDirection.SHORT
+        and signal_direction is SignalDirection.LONG
+    )
+
+
 def _entry_price(
     price: Decimal,
     *,
@@ -237,6 +323,55 @@ def _close_trade(
         exit_time=candle.closed_at,
         exit_reason=exit_reason or "unknown",
     )
+
+
+def _levels_from_signal_metadata(
+    result: StrategyResult,
+    context: StrategyContext,
+    direction: SignalDirection,
+) -> TakeProfitStopLossLevels | None:
+    take_profit = _decimal_metadata(result.signal.metadata.get("take_profit"))
+    stop_loss = _decimal_metadata(result.signal.metadata.get("stop_loss"))
+    entry_price = _decimal_metadata(result.signal.metadata.get("entry_price"))
+    if take_profit is None or stop_loss is None:
+        return None
+    return TakeProfitStopLossLevels(
+        strategy_name=f"{result.name}-metadata",
+        entry_price=entry_price or context.market.latest_candle.close_price,
+        take_profit=take_profit,
+        stop_loss=stop_loss,
+    )
+
+
+def _entry_action(direction: SignalDirection) -> TradeDecisionAction:
+    if direction is SignalDirection.LONG:
+        return TradeDecisionAction.ENTER_LONG
+    if direction is SignalDirection.SHORT:
+        return TradeDecisionAction.ENTER_SHORT
+    return TradeDecisionAction.HOLD
+
+
+def _backtest_exposure_limit(equity: Decimal):
+    from src.domain.risk import ExposureLimit
+
+    return ExposureLimit(
+        equity=equity,
+        current_total_exposure=Decimal("0"),
+        current_symbol_exposure=Decimal("0"),
+        max_total_exposure_ratio=Decimal("1000000"),
+        max_symbol_exposure_ratio=Decimal("1000000"),
+    )
+
+
+def _decimal_metadata(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
 
 
 def _performance(

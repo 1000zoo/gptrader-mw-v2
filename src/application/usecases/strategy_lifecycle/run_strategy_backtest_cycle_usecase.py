@@ -17,8 +17,13 @@ from src.domain.indicator import IndicatorSet, IndicatorValue
 from src.domain.lifecycle import StrategyDefinition
 from src.domain.market import MarketSnapshot
 from src.domain.ports import MarketDataPort, StrategyRepositoryPort
+from src.domain.risk import PositionSizingStrategy
 from src.domain.signal import SignalDirection
-from src.domain.strategy import StrategyCatalog, StrategySpec
+from src.domain.strategy import (
+    StrategyCatalog,
+    StrategySpec,
+    TakeProfitStopLossStrategy,
+)
 
 
 IndicatorFactory = Callable[[StrategySpec, MarketSnapshot], IndicatorSet]
@@ -31,10 +36,14 @@ class RunStrategyBacktestCycleUseCase:
         market_data: MarketDataPort,
         strategy_catalog: StrategyCatalog,
         indicator_factory: IndicatorFactory | None = None,
+        take_profit_stop_loss_strategy: TakeProfitStopLossStrategy | None = None,
+        position_sizing_strategy: PositionSizingStrategy | None = None,
     ) -> None:
         self._strategy_repository = strategy_repository
         self._market_data = market_data
         self._strategy_catalog = strategy_catalog
+        self._take_profit_stop_loss_strategy = take_profit_stop_loss_strategy
+        self._position_sizing_strategy = position_sizing_strategy
         self._indicator_factory = (
             indicator_factory or build_strategy_backtest_cycle_indicators
         )
@@ -45,7 +54,7 @@ class RunStrategyBacktestCycleUseCase:
         command: RunStrategyBacktestCycleCommand,
     ) -> RunStrategyBacktestCycleResult:
         items: list[StrategyBacktestCycleItem] = []
-        for spec in self._strategy_catalog.list_specs():
+        for spec in self._selected_specs(command):
             self._strategy_repository.save_strategy_definition(
                 _definition_from_spec(spec)
             )
@@ -68,16 +77,25 @@ class RunStrategyBacktestCycleUseCase:
 
         return RunStrategyBacktestCycleResult(items=tuple(items))
 
+    def _selected_specs(
+        self,
+        command: RunStrategyBacktestCycleCommand,
+    ) -> tuple[StrategySpec, ...]:
+        specs = self._strategy_catalog.list_specs()
+        if command.enabled_strategy_ids:
+            enabled = set(command.enabled_strategy_ids)
+            specs = tuple(spec for spec in specs if spec.strategy_id in enabled)
+        if command.disabled_strategy_ids:
+            disabled = set(command.disabled_strategy_ids)
+            specs = tuple(spec for spec in specs if spec.strategy_id not in disabled)
+        return specs
+
     def _run_one(
         self,
         command: RunStrategyBacktestCycleCommand,
         spec: StrategySpec,
     ):
-        snapshot = self._market_data.load_snapshot(
-            symbol=spec.symbol,
-            timeframe=spec.timeframe,
-            limit=spec.lookback_candle_limit,
-        )
+        snapshot = self._load_market(command, spec)
         strategy = self._strategy_catalog.create_strategy(spec)
         indicators = self._indicator_factory(spec, snapshot)
         backtest = BacktestStrategyUseCase(
@@ -87,6 +105,8 @@ class RunStrategyBacktestCycleUseCase:
                 spec,
                 rolling_snapshot,
             ),
+            take_profit_stop_loss_strategy=self._take_profit_stop_loss_strategy,
+            position_sizing_strategy=self._position_sizing_strategy,
         ).execute(
             BacktestStrategyCommand(
                 target_id=spec.strategy_id,
@@ -124,6 +144,26 @@ class RunStrategyBacktestCycleUseCase:
                 succeeded=True,
             ),
             evaluation,
+        )
+
+    def _load_market(
+        self,
+        command: RunStrategyBacktestCycleCommand,
+        spec: StrategySpec,
+    ) -> MarketSnapshot:
+        if command.start_at is not None and command.end_at is not None:
+            return MarketSnapshot(
+                self._market_data.load_candles_between(
+                    symbol=spec.symbol,
+                    timeframe=spec.timeframe,
+                    start_at=command.start_at,
+                    end_at=command.end_at,
+                )
+            )
+        return self._market_data.load_snapshot(
+            symbol=spec.symbol,
+            timeframe=spec.timeframe,
+            limit=spec.lookback_candle_limit,
         )
 
 
@@ -214,9 +254,24 @@ def _metrics_from_backtest(backtest) -> dict[str, Decimal]:
             "winning_trade_count": Decimal(performance.winning_trade_count),
             "losing_trade_count": Decimal(performance.losing_trade_count),
             "win_rate": performance.win_rate,
+            "average_trade_return": _average_trade_return(backtest.trades),
         }
     )
     return metrics
+
+
+def _average_trade_return(trades) -> Decimal:
+    if not trades:
+        return Decimal("0")
+    returns = []
+    for trade in trades:
+        notional = trade.entry_price * trade.quantity
+        if notional <= Decimal("0"):
+            continue
+        returns.append(trade.net_pnl / notional)
+    if not returns:
+        return Decimal("0")
+    return sum(returns, Decimal("0")) / Decimal(len(returns))
 
 
 class _SnapshotMarketData:

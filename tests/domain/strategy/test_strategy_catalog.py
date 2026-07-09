@@ -5,7 +5,9 @@ import pytest
 from src.domain.market import Symbol, Timeframe
 from src.domain.strategy import StaticStrategyCatalog, StrategySpec
 from src.domain.strategy.implementations import (
+    ChartPatternStrategy,
     LatestCloseMovingAverageStrategy,
+    RangeEdgeReversionStrategy,
     SessionVolumeProfileStrategy,
     create_default_strategy_catalog,
 )
@@ -93,6 +95,8 @@ def test_static_strategy_catalog_lists_specs_in_stable_order() -> None:
     assert tuple(spec.strategy_id for spec in specs) == (
         "latest-close-moving-average",
         "session-volume-profile",
+        "chart-pattern",
+        "tv-range-seed-s1-t1-p2-fixed",
     )
 
 
@@ -104,6 +108,14 @@ def test_default_strategy_catalog_declares_indicator_requirements() -> None:
         "moving_average.period_3",
     )
     assert specs["session-volume-profile"].indicator_keys == ()
+    assert specs["chart-pattern"].indicator_keys == ()
+    assert specs["tv-range-seed-s1-t1-p2-fixed"].parameters == {
+        "range_period": 300,
+        "lower_band": Decimal("0.06"),
+        "upper_band": Decimal("0.94"),
+        "min_range_width": Decimal("0.010"),
+        "reclaim_return": Decimal("0.0007"),
+    }
 
 
 def test_static_strategy_catalog_instantiates_strategy_from_spec() -> None:
@@ -112,9 +124,13 @@ def test_static_strategy_catalog_instantiates_strategy_from_spec() -> None:
 
     moving_average = catalog.create_strategy(specs["latest-close-moving-average"])
     profile = catalog.create_strategy(specs["session-volume-profile"])
+    chart_pattern = catalog.create_strategy(specs["chart-pattern"])
+    range_edge = catalog.create_strategy(specs["tv-range-seed-s1-t1-p2-fixed"])
 
     assert isinstance(moving_average, LatestCloseMovingAverageStrategy)
     assert isinstance(profile, SessionVolumeProfileStrategy)
+    assert isinstance(chart_pattern, ChartPatternStrategy)
+    assert isinstance(range_edge, RangeEdgeReversionStrategy)
 
 
 def test_static_strategy_catalog_applies_spec_parameters() -> None:

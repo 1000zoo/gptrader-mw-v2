@@ -7,7 +7,10 @@ from src.domain.indicator import IndicatorSet
 from src.domain.market import Candle, MarketSnapshot, Symbol, Timeframe
 from src.domain.signal import SignalDirection
 from src.domain.strategy import StrategyContext
-from src.domain.strategy.implementations import AtrTakeProfitStopLossStrategy
+from src.domain.strategy.implementations import (
+    AtrTakeProfitStopLossStrategy,
+    FixedRatioTakeProfitStopLossStrategy,
+)
 
 
 def _candle(index: int, high: str, low: str, close: str) -> Candle:
@@ -98,3 +101,21 @@ def test_atr_take_profit_stop_loss_strategy_requires_enough_candles():
 
     with pytest.raises(ValueError, match="atr_period"):
         strategy.calculate(context, SignalDirection.LONG)
+
+
+def test_fixed_ratio_take_profit_stop_loss_strategy_calculates_seed_combo_levels():
+    strategy = FixedRatioTakeProfitStopLossStrategy(
+        stop_loss_ratio=Decimal("0.09"),
+        reward_risk_ratio=Decimal("0.15"),
+    )
+
+    levels = strategy.calculate(_context(), SignalDirection.LONG)
+
+    assert levels.strategy_name == "fixed-ratio-take-profit-stop-loss"
+    assert levels.entry_price == Decimal("118")
+    assert levels.stop_loss == Decimal("107.38")
+    assert levels.take_profit == Decimal("119.5930")
+    assert levels.metadata == {
+        "stop_loss_ratio": "0.09",
+        "reward_risk_ratio": "0.15",
+    }

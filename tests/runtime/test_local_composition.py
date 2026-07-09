@@ -1,4 +1,8 @@
-from src.runtime import RuntimeSettings, create_local_app, create_local_runtime
+from decimal import Decimal
+
+from src.infrastructure.exchange.binance.market_data import BinanceMarketDataAdapter
+from src.infrastructure.exchange.binance.order_execution import BinanceOrderExecutionAdapter
+from src.runtime import RuntimeMode, RuntimeSettings, create_local_app, create_local_runtime
 
 
 def test_local_runtime_reports_health_details() -> None:
@@ -32,10 +36,61 @@ def test_local_runtime_can_run_strategy_backtest_cycle() -> None:
 
     result = runtime.run_strategy_backtest_cycle("cycle-local")
 
-    assert result.succeeded_count == 2
+    assert result.succeeded_count == 4
     assert result.failed_count == 0
     assert {item.strategy_id for item in result.items} == {
         "latest-close-moving-average",
         "session-volume-profile",
+        "chart-pattern",
+        "tv-range-seed-s1-t1-p2-fixed",
     }
-    assert runtime.status_details()["strategy_backtest_cycle"]["succeeded_count"] == 2
+    assert runtime.status_details()["strategy_backtest_cycle"]["succeeded_count"] == 4
+
+
+def test_local_runtime_can_filter_backtest_strategies() -> None:
+    runtime = create_local_runtime(
+        RuntimeSettings(
+            symbol="BTCUSDT",
+            backtest_strategy_ids=("chart-pattern",),
+        )
+    )
+
+    result = runtime.run_strategy_backtest_cycle("cycle-local")
+
+    assert result.succeeded_count == 1
+    assert result.failed_count == 0
+    assert [item.strategy_id for item in result.items] == ["chart-pattern"]
+
+
+def test_live_armed_runtime_uses_seed_combo_and_live_exchange_adapters() -> None:
+    runtime = create_local_runtime(
+        RuntimeSettings(
+            mode=RuntimeMode.LIVE_ARMED,
+            live_armed=True,
+            trading_strategy_id="tv-range-seed-s1-t1-p2-fixed",
+            take_profit_stop_loss="fixed",
+            stop_loss_ratio=Decimal("0.09"),
+            reward_risk_ratio=Decimal("0.15"),
+            position_sizing="fixed",
+            fixed_equity_ratio=Decimal("0.10"),
+            fixed_leverage=Decimal("15"),
+        )
+    )
+
+    details = runtime.status_details()
+
+    assert details["trade_controls"] == "enabled"
+    assert details["live_order_path"] == "enabled"
+    assert details["active_strategy_id"] == "tv-range-seed-s1-t1-p2-fixed"
+    assert details["take_profit_stop_loss"] == {
+        "kind": "fixed",
+        "stop_loss_ratio": "0.09",
+        "reward_risk_ratio": "0.15",
+    }
+    assert details["position_sizing"] == {
+        "kind": "fixed",
+        "equity_ratio": "0.10",
+        "leverage": "15",
+    }
+    assert isinstance(runtime._market_data, BinanceMarketDataAdapter)
+    assert isinstance(runtime._order_execution, BinanceOrderExecutionAdapter)

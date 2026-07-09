@@ -95,6 +95,22 @@ class FakeTakeProfitStopLossStrategy:
         )
 
 
+class FixedPositionSizingStrategy:
+    def __init__(self, equity_ratio: Decimal, leverage: Decimal) -> None:
+        self.equity_ratio = equity_ratio
+        self.leverage = leverage
+        self.requests = []
+
+    def decide(self, decision, exposure_limit):
+        self.requests.append((decision, exposure_limit))
+        from src.domain.risk import PositionSizingDecision
+
+        return PositionSizingDecision(
+            equity_ratio=self.equity_ratio,
+            leverage=self.leverage,
+        )
+
+
 def _exposure_limit() -> ExposureLimit:
     return ExposureLimit(
         equity=Decimal("1000"),
@@ -194,8 +210,50 @@ def test_execute_trade_usecase_submits_market_order_for_entry_signal():
     assert order_request.client_order_id == "live-btc-signal-1"
     assert order_request.symbol == market.symbol
     assert order_request.side is SignalDirection.LONG
-    assert order_request.quantity == Decimal("150.00") / market.latest_candle.close_price
+    assert order_request.quantity == Decimal("300.0") / market.latest_candle.close_price
     assert order_request.reduce_only is False
+
+
+def test_execute_trade_usecase_uses_position_sizing_strategy_for_order_size():
+    market = make_market()
+    indicators = make_indicators(market)
+    generated_signal = GeneratedSignal(
+        signal=Signal(direction=SignalDirection.LONG, confidence=Decimal("0.5")),
+    )
+    sizing_strategy = FixedPositionSizingStrategy(
+        equity_ratio=Decimal("0.25"),
+        leverage=Decimal("4"),
+    )
+    risk_policy = RejectingRiskPolicy()
+    order_execution = FakeOrderExecution()
+    usecase = ExecuteTradeUseCase(
+        market_data=FakeMarketData(market),
+        signal_generator=FakeSignalGenerator(generated_signal),
+        signal_log_repository=FakeSignalLogRepository(),
+        order_execution=order_execution,
+        risk_policy=risk_policy,
+        position_sizing_strategy=sizing_strategy,
+    )
+
+    result = usecase.execute(
+        ExecuteTradeCommand(
+            symbol=market.symbol,
+            timeframe=market.timeframe,
+            candle_limit=120,
+            indicators=indicators,
+            exposure_limit=_exposure_limit(),
+            base_risk_ratio=Decimal("0.1"),
+            leverage=Decimal("3"),
+            client_order_id_prefix="live-btc",
+            signal_id="signal-1",
+            generator_id="generator-1",
+        )
+    )
+
+    assert result.status is TradeExecutionStatus.RISK_REJECTED
+    assert sizing_strategy.requests[0][1] == _exposure_limit()
+    assert risk_policy.requests[0][2] == Decimal("1000.00")
+    assert order_execution.requests == []
 
 
 def test_execute_trade_usecase_calculates_take_profit_stop_loss_for_entry_signal():
@@ -326,7 +384,7 @@ def test_execute_trade_usecase_skips_order_when_risk_policy_rejects_entry():
     assert result.reason == "total_exposure_exceeded"
     assert result.order_result is None
     assert order_execution.requests == []
-    assert risk_policy.requests[0][2] == Decimal("150.00")
+    assert risk_policy.requests[0][2] == Decimal("300.0")
 
 
 def test_execute_trade_usecase_rejects_entry_when_exposure_is_exhausted():

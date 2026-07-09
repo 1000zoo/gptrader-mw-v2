@@ -27,7 +27,11 @@ from src.domain.lifecycle import (
     StrategyEvaluation,
 )
 from src.domain.market import Candle, MarketSnapshot
-from src.domain.risk import ExposureLimit
+from src.domain.risk import (
+    ConfidencePositionSizingStrategy,
+    ExposureLimit,
+    FixedPositionSizingStrategy,
+)
 from src.domain.signal import SignalDirection
 from src.domain.signal_generator import CompositeSignalGenerator
 from src.infrastructure.persistence import (
@@ -39,8 +43,12 @@ from src.interfaces.api.trade_controller import create_trade_router
 from src.interfaces.scheduler import StrategyLifecycleScheduler, TradeScheduler
 from src.domain.strategy.implementations import (
     AtrTakeProfitStopLossStrategy,
+    FixedRatioTakeProfitStopLossStrategy,
     create_default_strategy_catalog,
 )
+from src.infrastructure.exchange.binance.binance_config import BinanceConfig
+from src.infrastructure.exchange.binance.market_data import BinanceMarketDataAdapter
+from src.infrastructure.exchange.binance.order_execution import BinanceOrderExecutionAdapter
 from src.runtime.config import RuntimeMode, RuntimeSettings
 from src.runtime.local_data import (
     build_local_indicator_set,
@@ -69,9 +77,26 @@ class LocalRuntime:
         signal_log_repository = SqliteSignalLogRepository(database_path)
         self._strategy_repository = _InMemoryStrategyRepository()
         strategy_catalog = create_default_strategy_catalog()
-        market_data = _LocalCatalogMarketData()
+        market_data = _market_data_for_mode(self.settings)
+        self._market_data = market_data
+        take_profit_stop_loss_strategy = _take_profit_stop_loss_strategy(self.settings)
+        self._take_profit_stop_loss_strategy = take_profit_stop_loss_strategy
+        position_sizing_strategy = _position_sizing_strategy(self.settings)
+        self._position_sizing_strategy = position_sizing_strategy
         dry_run_order_execution = _DryRunOrderExecution(
             runtime_repository=self._runtime_repository
+        )
+        order_execution = _order_execution_for_mode(
+            self.settings,
+            dry_run_order_execution,
+        )
+        self._order_execution = order_execution
+        active_strategy = strategy_catalog.create_strategy(
+            next(
+                spec
+                for spec in strategy_catalog.list_specs()
+                if spec.strategy_id == self.settings.trading_strategy_id
+            )
         )
         self._strategy_scheduler = StrategyLifecycleScheduler(
             run_strategy_lifecycle_usecase=RunStrategyLifecycleUseCase(
@@ -81,45 +106,30 @@ class LocalRuntime:
                 strategy_repository=self._strategy_repository,
                 market_data=market_data,
                 strategy_catalog=strategy_catalog,
+                take_profit_stop_loss_strategy=take_profit_stop_loss_strategy,
+                position_sizing_strategy=position_sizing_strategy,
             ),
         )
         self._trade_scheduler = TradeScheduler(
             execute_trade_usecase=ExecuteTradeUseCase(
                 market_data=market_data,
                 signal_generator=CompositeSignalGenerator(
-                    strategies=(
-                        strategy_catalog.create_strategy(
-                            next(
-                                spec
-                                for spec in strategy_catalog.list_specs()
-                                if spec.strategy_id == "latest-close-moving-average"
-                            )
-                        ),
-                    )
+                    strategies=(active_strategy,)
                 ),
                 signal_log_repository=signal_log_repository,
-                order_execution=dry_run_order_execution,
-                take_profit_stop_loss_strategy=AtrTakeProfitStopLossStrategy(
-                    atr_period=3
-                ),
+                order_execution=order_execution,
+                take_profit_stop_loss_strategy=take_profit_stop_loss_strategy,
+                position_sizing_strategy=position_sizing_strategy,
             ),
-            close_position_usecase=ClosePositionUseCase(dry_run_order_execution),
-            sync_position_usecase=SyncPositionUseCase(dry_run_order_execution),
+            close_position_usecase=ClosePositionUseCase(order_execution),
+            sync_position_usecase=SyncPositionUseCase(order_execution),
             manage_open_position_usecase=ManageOpenPositionUseCase(
                 market_data=market_data,
                 signal_generator=CompositeSignalGenerator(
-                    strategies=(
-                        strategy_catalog.create_strategy(
-                            next(
-                                spec
-                                for spec in strategy_catalog.list_specs()
-                                if spec.strategy_id == "latest-close-moving-average"
-                            )
-                        ),
-                    )
+                    strategies=(active_strategy,)
                 ),
                 signal_log_repository=signal_log_repository,
-                close_position_usecase=ClosePositionUseCase(dry_run_order_execution),
+                close_position_usecase=ClosePositionUseCase(order_execution),
             ),
         )
         self._last_strategy_backtest_cycle_result: (
@@ -148,9 +158,18 @@ class LocalRuntime:
         details = self.readiness_details()
         details["runtime"] = self.settings.mode.value
         details["trade_controls"] = (
-            "enabled" if self.settings.mode is RuntimeMode.DRY_RUN else "disabled"
+            "enabled"
+            if self.settings.mode in {RuntimeMode.DRY_RUN, RuntimeMode.LIVE_ARMED}
+            else "disabled"
         )
-        details["live_order_path"] = "disabled"
+        details["live_order_path"] = (
+            "enabled" if self.settings.mode is RuntimeMode.LIVE_ARMED else "disabled"
+        )
+        details["active_strategy_id"] = self.settings.trading_strategy_id
+        details["take_profit_stop_loss"] = _take_profit_stop_loss_details(
+            self.settings
+        )
+        details["position_sizing"] = _position_sizing_details(self.settings)
         if self._last_strategy_backtest_cycle_result is not None:
             details["strategy_backtest_cycle"] = {
                 "succeeded_count": (
@@ -180,7 +199,11 @@ class LocalRuntime:
         )
         execution = self._strategy_scheduler.run_backtest_cycle(
             schedule_name="local-strategy-backtest-cycle",
-            command_factory=lambda: RunStrategyBacktestCycleCommand(cycle_id=cycle_id),
+            command_factory=lambda: RunStrategyBacktestCycleCommand(
+                cycle_id=cycle_id,
+                enabled_strategy_ids=self.settings.backtest_strategy_ids,
+                disabled_strategy_ids=self.settings.disabled_backtest_strategy_ids,
+            ),
         )
         if execution.error is not None:
             runtime_logger.error(
@@ -257,7 +280,7 @@ class LocalRuntime:
                     execute_trade_usecase=_RuntimeExecuteTradeBoundary(self),
                     execute_trade_command_factory=_trade_payload_to_signal_id,
                 )
-                if self.settings.mode is RuntimeMode.DRY_RUN
+                if self.settings.mode in {RuntimeMode.DRY_RUN, RuntimeMode.LIVE_ARMED}
                 else None
             ),
         )
@@ -286,8 +309,8 @@ class LocalRuntime:
                 max_total_exposure_ratio=Decimal("1"),
                 max_symbol_exposure_ratio=Decimal("1"),
             ),
-            base_risk_ratio=Decimal("0.01"),
-            leverage=Decimal("1"),
+            base_risk_ratio=self.settings.min_equity_ratio,
+            leverage=self.settings.min_leverage,
             client_order_id_prefix=self.settings.client_order_id_prefix,
             signal_id=signal_id,
             generator_id=self.settings.generator_id,
@@ -410,6 +433,76 @@ class _RuntimeExecuteTradeBoundary:
 def _trade_payload_to_signal_id(payload: Mapping[str, object]) -> str:
     signal_id = payload.get("signal_id", "")
     return str(signal_id)
+
+
+def _market_data_for_mode(settings: RuntimeSettings):
+    if settings.mode in {RuntimeMode.TESTNET, RuntimeMode.LIVE_ARMED}:
+        return BinanceMarketDataAdapter(_binance_config_for_mode(settings))
+    return _LocalCatalogMarketData()
+
+
+def _order_execution_for_mode(
+    settings: RuntimeSettings,
+    dry_run_order_execution: _DryRunOrderExecution,
+):
+    if settings.mode is RuntimeMode.LIVE_ARMED:
+        return BinanceOrderExecutionAdapter(_binance_config_for_mode(settings))
+    return dry_run_order_execution
+
+
+def _binance_config_for_mode(settings: RuntimeSettings) -> BinanceConfig:
+    if settings.mode is RuntimeMode.TESTNET:
+        return BinanceConfig.from_env()
+    return BinanceConfig.from_env()
+
+
+def _take_profit_stop_loss_strategy(settings: RuntimeSettings):
+    if settings.take_profit_stop_loss == "fixed":
+        return FixedRatioTakeProfitStopLossStrategy(
+            stop_loss_ratio=settings.stop_loss_ratio,
+            reward_risk_ratio=settings.reward_risk_ratio,
+        )
+    return AtrTakeProfitStopLossStrategy(atr_period=3)
+
+
+def _position_sizing_strategy(settings: RuntimeSettings):
+    if settings.position_sizing == "fixed":
+        return FixedPositionSizingStrategy(
+            equity_ratio=settings.fixed_equity_ratio,
+            leverage=settings.fixed_leverage,
+        )
+    return ConfidencePositionSizingStrategy(
+        min_equity_ratio=settings.min_equity_ratio,
+        max_equity_ratio=settings.max_equity_ratio,
+        min_leverage=settings.min_leverage,
+        max_leverage=settings.max_leverage,
+    )
+
+
+def _take_profit_stop_loss_details(settings: RuntimeSettings) -> dict[str, str]:
+    if settings.take_profit_stop_loss == "fixed":
+        return {
+            "kind": "fixed",
+            "stop_loss_ratio": str(settings.stop_loss_ratio),
+            "reward_risk_ratio": str(settings.reward_risk_ratio),
+        }
+    return {"kind": "atr"}
+
+
+def _position_sizing_details(settings: RuntimeSettings) -> dict[str, str]:
+    if settings.position_sizing == "fixed":
+        return {
+            "kind": "fixed",
+            "equity_ratio": str(settings.fixed_equity_ratio),
+            "leverage": str(settings.fixed_leverage),
+        }
+    return {
+        "kind": "confidence",
+        "min_equity_ratio": str(settings.min_equity_ratio),
+        "max_equity_ratio": str(settings.max_equity_ratio),
+        "min_leverage": str(settings.min_leverage),
+        "max_leverage": str(settings.max_leverage),
+    }
 
 
 class _InMemoryStrategyRepository:
