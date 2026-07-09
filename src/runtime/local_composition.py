@@ -227,14 +227,17 @@ class LocalRuntime:
 
     def run_trade_execution_once(self, signal_id: str) -> ExecuteTradeResult:
         runtime_logger.info(
-            "dry-run trade execution started",
+            "trade execution started",
             signal_id=signal_id,
             mode=self.settings.mode.value,
             symbol=self.settings.symbol,
             timeframe=self.settings.timeframe,
         )
         execution = self._trade_scheduler.run_trade_execution(
-            schedule_name=f"{self.settings.symbol}-{self.settings.timeframe}-dry-run",
+            schedule_name=(
+                f"{self.settings.symbol}-{self.settings.timeframe}-"
+                f"{self.settings.mode.value}"
+            ),
             command_factory=lambda: self._execute_trade_command(signal_id),
         )
         self._runtime_repository.append_runtime_record(
@@ -248,19 +251,25 @@ class LocalRuntime:
         )
         if execution.error is not None:
             runtime_logger.error(
-                "dry-run trade execution failed",
+                "trade execution failed",
                 signal_id=signal_id,
+                mode=self.settings.mode.value,
                 error=str(execution.error),
             )
             raise execution.error
         if execution.result is None:
-            error = RuntimeError("dry-run trade execution did not return a result")
-            runtime_logger.error("dry-run trade execution failed", error=str(error))
+            error = RuntimeError("trade execution did not return a result")
+            runtime_logger.error(
+                "trade execution failed",
+                mode=self.settings.mode.value,
+                error=str(error),
+            )
             raise error
         self._last_trade_execution_result = execution.result
         runtime_logger.info(
-            "dry-run trade execution succeeded",
+            "trade execution succeeded",
             signal_id=signal_id,
+            mode=self.settings.mode.value,
             status=execution.result.status.value,
             order_status=(
                 None

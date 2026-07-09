@@ -111,6 +111,7 @@ def test_dry_run_runtime_runs_trade_execution_and_persists_records(tmp_path) -> 
     assert dry_run_orders[2].record_id == "gptrader-dry-run-manual-smoke-sl"
     assert len(scheduler_runs) == 1
     assert scheduler_runs[0].record_id == "manual-smoke"
+    assert scheduler_runs[0].payload["schedule_name"] == "BTCUSDT-1m-dry-run"
     assert scheduler_runs[0].payload["succeeded"] is True
     assert runtime.status_details()["last_trade_execution"]["status"] == "order_submitted"
 
@@ -123,7 +124,7 @@ def test_dry_run_runtime_writes_execution_progress_logs(tmp_path) -> None:
 
     content = log_file.read_text(encoding="utf-8")
     assert "runtime created" in content
-    assert "dry-run trade execution started" in content
+    assert "trade execution started" in content
     assert "strategy signal generated" in content
     assert "latest-close-moving-average" in content
     assert "close_above_moving_average" in content
@@ -136,7 +137,7 @@ def test_dry_run_runtime_writes_execution_progress_logs(tmp_path) -> None:
     assert "position_notional" in content
     assert "position_quantity" in content
     assert "dry-run order recorded" in content
-    assert "dry-run trade execution succeeded" in content
+    assert "trade execution succeeded" in content
 
 
 def test_dry_run_app_trade_execute_endpoint_is_wired(tmp_path) -> None:
