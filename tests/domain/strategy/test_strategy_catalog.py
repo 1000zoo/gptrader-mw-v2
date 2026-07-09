@@ -9,6 +9,7 @@ from src.domain.strategy.implementations import (
     LatestCloseMovingAverageStrategy,
     RangeEdgeReversionStrategy,
     SessionVolumeProfileStrategy,
+    VolatilityCompressionBreakoutStrategy,
     create_default_strategy_catalog,
 )
 
@@ -97,6 +98,7 @@ def test_static_strategy_catalog_lists_specs_in_stable_order() -> None:
         "session-volume-profile",
         "chart-pattern",
         "tv-range-seed-s1-t1-p2-fixed",
+        "live-compression-s2-sl0030-rr045-balanced",
     )
 
 
@@ -116,6 +118,16 @@ def test_default_strategy_catalog_declares_indicator_requirements() -> None:
         "min_range_width": Decimal("0.010"),
         "reclaim_return": Decimal("0.0007"),
     }
+    assert specs["live-compression-s2-sl0030-rr045-balanced"].parameters == {
+        "lookback": 180,
+        "compression_period": 45,
+        "compression_ratio": Decimal("0.45"),
+        "breakout_buffer": Decimal("0.0006"),
+        "min_volume_ratio": Decimal("1.00"),
+        "direction_filter_period": 1440,
+        "min_filter_return": Decimal("0.002"),
+    }
+    assert specs["live-compression-s2-sl0030-rr045-balanced"].lookback_candle_limit == 1442
 
 
 def test_static_strategy_catalog_instantiates_strategy_from_spec() -> None:
@@ -126,11 +138,15 @@ def test_static_strategy_catalog_instantiates_strategy_from_spec() -> None:
     profile = catalog.create_strategy(specs["session-volume-profile"])
     chart_pattern = catalog.create_strategy(specs["chart-pattern"])
     range_edge = catalog.create_strategy(specs["tv-range-seed-s1-t1-p2-fixed"])
+    compression = catalog.create_strategy(
+        specs["live-compression-s2-sl0030-rr045-balanced"]
+    )
 
     assert isinstance(moving_average, LatestCloseMovingAverageStrategy)
     assert isinstance(profile, SessionVolumeProfileStrategy)
     assert isinstance(chart_pattern, ChartPatternStrategy)
     assert isinstance(range_edge, RangeEdgeReversionStrategy)
+    assert isinstance(compression, VolatilityCompressionBreakoutStrategy)
 
 
 def test_static_strategy_catalog_applies_spec_parameters() -> None:

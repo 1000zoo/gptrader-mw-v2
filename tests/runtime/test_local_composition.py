@@ -36,15 +36,16 @@ def test_local_runtime_can_run_strategy_backtest_cycle() -> None:
 
     result = runtime.run_strategy_backtest_cycle("cycle-local")
 
-    assert result.succeeded_count == 4
+    assert result.succeeded_count == 5
     assert result.failed_count == 0
     assert {item.strategy_id for item in result.items} == {
         "latest-close-moving-average",
         "session-volume-profile",
         "chart-pattern",
         "tv-range-seed-s1-t1-p2-fixed",
+        "live-compression-s2-sl0030-rr045-balanced",
     }
-    assert runtime.status_details()["strategy_backtest_cycle"]["succeeded_count"] == 4
+    assert runtime.status_details()["strategy_backtest_cycle"]["succeeded_count"] == 5
 
 
 def test_local_runtime_can_filter_backtest_strategies() -> None:
@@ -94,3 +95,38 @@ def test_live_armed_runtime_uses_seed_combo_and_live_exchange_adapters() -> None
     }
     assert isinstance(runtime._market_data, BinanceMarketDataAdapter)
     assert isinstance(runtime._order_execution, BinanceOrderExecutionAdapter)
+
+
+def test_live_armed_runtime_uses_compression_s2_combo_settings() -> None:
+    runtime = create_local_runtime(
+        RuntimeSettings(
+            mode=RuntimeMode.LIVE_ARMED,
+            live_armed=True,
+            trading_strategy_id="live-compression-s2-sl0030-rr045-balanced",
+            candle_limit=1442,
+            take_profit_stop_loss="fixed",
+            stop_loss_ratio=Decimal("0.030"),
+            reward_risk_ratio=Decimal("0.45"),
+            position_sizing="confidence",
+            min_equity_ratio=Decimal("0.02"),
+            max_equity_ratio=Decimal("0.14"),
+            min_leverage=Decimal("1"),
+            max_leverage=Decimal("8"),
+        )
+    )
+
+    details = runtime.status_details()
+
+    assert details["active_strategy_id"] == "live-compression-s2-sl0030-rr045-balanced"
+    assert details["take_profit_stop_loss"] == {
+        "kind": "fixed",
+        "stop_loss_ratio": "0.030",
+        "reward_risk_ratio": "0.45",
+    }
+    assert details["position_sizing"] == {
+        "kind": "confidence",
+        "min_equity_ratio": "0.02",
+        "max_equity_ratio": "0.14",
+        "min_leverage": "1",
+        "max_leverage": "8",
+    }

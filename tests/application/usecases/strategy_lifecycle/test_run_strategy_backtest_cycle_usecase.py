@@ -361,20 +361,22 @@ def test_default_strategy_catalog_backtest_cycle_succeeds_and_saves_evaluations(
         strategy_catalog=catalog,
     ).execute(RunStrategyBacktestCycleCommand(cycle_id="cycle-default"))
 
-    assert result.succeeded_count == 4
+    assert result.succeeded_count == 5
     assert result.failed_count == 0
     assert {item.strategy_id for item in result.items} == {
         "latest-close-moving-average",
         "session-volume-profile",
         "chart-pattern",
         "tv-range-seed-s1-t1-p2-fixed",
+        "live-compression-s2-sl0030-rr045-balanced",
     }
-    assert len(repository.saved_evaluations) == 4
+    assert len(repository.saved_evaluations) == 5
     assert {evaluation.target_id for evaluation in repository.saved_evaluations} == {
         "latest-close-moving-average",
         "session-volume-profile",
         "chart-pattern",
         "tv-range-seed-s1-t1-p2-fixed",
+        "live-compression-s2-sl0030-rr045-balanced",
     }
     assert {
         evaluation.evaluation_id for evaluation in repository.saved_evaluations
@@ -383,6 +385,7 @@ def test_default_strategy_catalog_backtest_cycle_succeeds_and_saves_evaluations(
         "cycle-default:session-volume-profile:backtest",
         "cycle-default:chart-pattern:backtest",
         "cycle-default:tv-range-seed-s1-t1-p2-fixed:backtest",
+        "cycle-default:live-compression-s2-sl0030-rr045-balanced:backtest",
     }
 
 

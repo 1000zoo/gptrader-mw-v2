@@ -21,6 +21,9 @@ from src.domain.strategy.implementations.range_edge_reversion_strategy import (
 from src.domain.strategy.implementations.session_volume_profile import (
     SessionVolumeProfileStrategy,
 )
+from src.domain.strategy.implementations.volatility_compression_breakout_strategy import (
+    VolatilityCompressionBreakoutStrategy,
+)
 
 
 def create_default_strategy_catalog() -> StaticStrategyCatalog:
@@ -102,6 +105,31 @@ def create_default_strategy_catalog() -> StaticStrategyCatalog:
                 ),
                 RangeEdgeReversionStrategy,
             ),
+            (
+                StrategySpec(
+                    strategy_id="live-compression-s2-sl0030-rr045-balanced",
+                    name="Live Compression S2 SL0030 RR045 Balanced",
+                    implementation="src.domain.strategy.implementations.VolatilityCompressionBreakoutStrategy",
+                    version="2026.07.09",
+                    symbol=Symbol("BTC", "USDT"),
+                    timeframe=Timeframe(1, "m"),
+                    lookback_candle_limit=1442,
+                    parameters={
+                        "lookback": 180,
+                        "compression_period": 45,
+                        "compression_ratio": Decimal("0.45"),
+                        "breakout_buffer": Decimal("0.0006"),
+                        "min_volume_ratio": Decimal("1.00"),
+                        "direction_filter_period": 1440,
+                        "min_filter_return": Decimal("0.002"),
+                    },
+                    metadata={
+                        "family": "volatility_compression_breakout",
+                        "source_combo_id": "final-compression-s2-sl0.030-rr0.45-balanced",
+                    },
+                ),
+                VolatilityCompressionBreakoutStrategy,
+            ),
         )
     )
 
@@ -114,5 +142,6 @@ __all__ = [
     "PivotDetector",
     "RangeEdgeReversionStrategy",
     "SessionVolumeProfileStrategy",
+    "VolatilityCompressionBreakoutStrategy",
     "create_default_strategy_catalog",
 ]
