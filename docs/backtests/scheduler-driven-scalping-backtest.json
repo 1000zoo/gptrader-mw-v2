@@ -1,0 +1,22 @@
+{
+  "average_net_trade_roe": "-0.02609553917356077445866632839",
+  "cost_model": {
+    "fee_rate_per_side": "0.0004",
+    "funding_fee": "excluded",
+    "slippage_rate_per_side": "0.0002",
+    "venue": "binance_usd_m_futures"
+  },
+  "end_at": "2025-11-13T00:00:00+00:00",
+  "engine": "scheduler_driven",
+  "fee_paid": "58.47847006472955544465254235",
+  "gross_pnl": "-260.1379279032461659788223170",
+  "max_drawdown_ratio": "0.0416792093351675927819867941",
+  "net_pnl": "-318.6163979679757214234748594",
+  "net_win_rate": "0.2857142857142857142857142857",
+  "return_ratio": "-0.03186163979679757214234748594",
+  "scheduler_path": "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute",
+  "signal_count": 39,
+  "start_at": "2025-11-09T00:00:00+00:00",
+  "trade_count": 14,
+  "trades_per_day": "3.5"
+}
