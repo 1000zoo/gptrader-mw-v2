@@ -1,22 +1,620 @@
 {
-  "average_net_trade_roe": "-0.02609553917356077445866632839",
-  "cost_model": {
-    "fee_rate_per_side": "0.0004",
-    "funding_fee": "excluded",
-    "slippage_rate_per_side": "0.0002",
-    "venue": "binance_usd_m_futures"
+  "mode": "train_test",
+  "result_count": 6,
+  "results": [
+    {
+      "candidate": {
+        "candidate_id": "selective-trend-p4-tp0105-sl0070-e0050-l5-guard-c",
+        "equity_ratio": "0.050",
+        "guard": {
+          "max_1m_range_ratio": "0.0075",
+          "max_consecutive_losses": 2,
+          "max_daily_loss_ratio": "0.006",
+          "max_daily_trades": 15,
+          "max_peak_drawdown_ratio": "0.08",
+          "min_1m_range_ratio": "0.0004",
+          "min_minutes_between_entries": 20,
+          "min_signal_confidence": "0.64",
+          "pause_minutes_after_loss": 45
+        },
+        "leverage": "5",
+        "stop_loss_ratio": "0.0070",
+        "strategy_params": {
+          "burst_params": {
+            "breakout_buffer": "0.0000",
+            "breakout_period": 12,
+            "impulse_period": 1,
+            "min_impulse_return": "0.0008",
+            "min_volume_ratio": "1.2",
+            "mode": "fade",
+            "volume_period": 20
+          },
+          "max_abs_trend_for_range": "0.006",
+          "range_params": {
+            "edge_ratio": "0.18",
+            "min_range_ratio": "0.0015",
+            "min_reversal_body_ratio": "0.15",
+            "range_period": 45
+          },
+          "range_regime_period": 240,
+          "router_order": [
+            "trend",
+            "burst",
+            "range"
+          ],
+          "trend_params": {
+            "min_pullback": "0.0008",
+            "min_range_ratio": "0.0008",
+            "min_trend_return": "0.003",
+            "min_trigger_return": "0.0002",
+            "pullback_period": 5,
+            "trend_period": 60,
+            "trigger_period": 1
+          },
+          "trend_regime_period": 240
+        },
+        "take_profit_ratio": "0.0105"
+      },
+      "candidate_id": "selective-trend-p4-tp0105-sl0070-e0050-l5-guard-c",
+      "test_average_net_trade_roe": "-0.003252012499646868613325724926",
+      "test_candidate_id": "selective-trend-p4-tp0105-sl0070-e0050-l5-guard-c",
+      "test_cost_model": {
+        "fee_rate_per_side": "0.0004",
+        "funding_fee": "excluded",
+        "slippage_rate_per_side": "0.0002",
+        "venue": "binance_usd_m_futures"
+      },
+      "test_daily_return_ratio": "-0.0003380547485197635904691262667",
+      "test_end_at": "2026-07-09T00:00:00+00:00",
+      "test_engine": "scheduler_driven",
+      "test_fee_paid": "306.3865722938226152636287601",
+      "test_gross_pnl": "100.1731756967668250774617376",
+      "test_max_drawdown_ratio": "0.03552885437894320577953310548",
+      "test_net_pnl": "-206.2133965970557901861670227",
+      "test_net_win_rate": "0.4379084967320261437908496732",
+      "test_return_ratio": "-0.02062133965970557901861670227",
+      "test_scheduler_path": "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute",
+      "test_signal_count": 1900,
+      "test_skipped_by_guard": 28644,
+      "test_start_at": "2026-05-09T00:00:00+00:00",
+      "test_trade_count": 153,
+      "test_trades_per_day": "2.508196721311475409836065574",
+      "train_average_net_trade_roe": "-0.007881684043417274397241434619",
+      "train_candidate_id": "selective-trend-p4-tp0105-sl0070-e0050-l5-guard-c",
+      "train_cost_model": {
+        "fee_rate_per_side": "0.0004",
+        "funding_fee": "excluded",
+        "slippage_rate_per_side": "0.0002",
+        "venue": "binance_usd_m_futures"
+      },
+      "train_daily_return_ratio": "-0.0003794910772101709750117201709",
+      "train_end_at": "2026-05-09T00:00:00+00:00",
+      "train_engine": "scheduler_driven",
+      "train_fee_paid": "423.6486880213536082715055926",
+      "train_gross_pnl": "-263.2301617290558564997079168",
+      "train_max_drawdown_ratio": "0.08053481751351990391959233352",
+      "train_net_pnl": "-686.8788497504094647712135094",
+      "train_net_win_rate": "0.3944954128440366972477064220",
+      "train_return_ratio": "-0.06868788497504094647712135094",
+      "train_scheduler_path": "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute",
+      "train_signal_count": 3997,
+      "train_skipped_by_guard": 204042,
+      "train_start_at": "2025-11-09T00:00:00+00:00",
+      "train_trade_count": 218,
+      "train_trades_per_day": "1.204419889502762430939226519"
+    },
+    {
+      "candidate": {
+        "candidate_id": "liquid-burst-p2-tp0060-sl0045-e0035-l3-guard-e",
+        "equity_ratio": "0.035",
+        "guard": {
+          "max_1m_range_ratio": "0.0080",
+          "max_consecutive_losses": 2,
+          "max_daily_loss_ratio": "0.006",
+          "max_daily_trades": 15,
+          "max_peak_drawdown_ratio": "0.08",
+          "min_1m_range_ratio": "0.0003",
+          "min_minutes_between_entries": 10,
+          "min_signal_confidence": "0.64",
+          "pause_minutes_after_loss": 30
+        },
+        "leverage": "3",
+        "stop_loss_ratio": "0.0045",
+        "strategy_params": {
+          "burst_params": {
+            "breakout_buffer": "0.0000",
+            "breakout_period": 12,
+            "impulse_period": 1,
+            "min_impulse_return": "0.0010",
+            "min_volume_ratio": "1.3",
+            "mode": "fade",
+            "volume_period": 20
+          },
+          "max_abs_trend_for_range": "0.008",
+          "range_params": {
+            "edge_ratio": "0.18",
+            "min_range_ratio": "0.0015",
+            "min_reversal_body_ratio": "0.18",
+            "range_period": 45
+          },
+          "range_regime_period": 240,
+          "router_order": [
+            "trend",
+            "burst",
+            "range"
+          ],
+          "trend_params": {
+            "min_pullback": "0.0006",
+            "min_range_ratio": "0.0012",
+            "min_trend_return": "0.002",
+            "min_trigger_return": "0.0002",
+            "pullback_period": 5,
+            "trend_period": 60,
+            "trigger_period": 1
+          },
+          "trend_regime_period": 240
+        },
+        "take_profit_ratio": "0.0060"
+      },
+      "candidate_id": "liquid-burst-p2-tp0060-sl0045-e0035-l3-guard-e",
+      "test_average_net_trade_roe": "-0.006437345572131891456704229679",
+      "test_candidate_id": "liquid-burst-p2-tp0060-sl0045-e0035-l3-guard-e",
+      "test_cost_model": {
+        "fee_rate_per_side": "0.0004",
+        "funding_fee": "excluded",
+        "slippage_rate_per_side": "0.0002",
+        "venue": "binance_usd_m_futures"
+      },
+      "test_daily_return_ratio": "-0.0004038028107195055567168898807",
+      "test_end_at": "2026-07-09T00:00:00+00:00",
+      "test_engine": "scheduler_driven",
+      "test_fee_paid": "186.4130654508640894624795209",
+      "test_gross_pnl": "-59.90664908803430013482330622",
+      "test_max_drawdown_ratio": "0.02512294103721259964759504607",
+      "test_net_pnl": "-246.3197145388983895973028272",
+      "test_net_win_rate": "0.4419642857142857142857142857",
+      "test_return_ratio": "-0.02463197145388983895973028272",
+      "test_scheduler_path": "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute",
+      "test_signal_count": 2468,
+      "test_skipped_by_guard": 45944,
+      "test_start_at": "2026-05-09T00:00:00+00:00",
+      "test_trade_count": 224,
+      "test_trades_per_day": "3.672131147540983606557377049",
+      "train_average_net_trade_roe": "-0.005224923157568324426930892803",
+      "train_candidate_id": "liquid-burst-p2-tp0060-sl0045-e0035-l3-guard-e",
+      "train_cost_model": {
+        "fee_rate_per_side": "0.0004",
+        "funding_fee": "excluded",
+        "slippage_rate_per_side": "0.0002",
+        "venue": "binance_usd_m_futures"
+      },
+      "train_daily_return_ratio": "-0.0004132011967656911932540847344",
+      "train_end_at": "2026-05-09T00:00:00+00:00",
+      "train_engine": "scheduler_driven",
+      "train_fee_paid": "694.5012135588925269474989718",
+      "train_gross_pnl": "-53.39295258700853284239439463",
+      "train_max_drawdown_ratio": "0.07509789507216024002972752605",
+      "train_net_pnl": "-747.8941661459010597898933692",
+      "train_net_win_rate": "0.4604651162790697674418604651",
+      "train_return_ratio": "-0.07478941661459010597898933692",
+      "train_scheduler_path": "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute",
+      "train_signal_count": 10245,
+      "train_skipped_by_guard": 153947,
+      "train_start_at": "2025-11-09T00:00:00+00:00",
+      "train_trade_count": 860,
+      "train_trades_per_day": "4.751381215469613259668508287"
+    },
+    {
+      "candidate": {
+        "candidate_id": "selective-trend-p2-tp0060-sl0045-e0035-l3-guard-e",
+        "equity_ratio": "0.035",
+        "guard": {
+          "max_1m_range_ratio": "0.0080",
+          "max_consecutive_losses": 2,
+          "max_daily_loss_ratio": "0.006",
+          "max_daily_trades": 15,
+          "max_peak_drawdown_ratio": "0.08",
+          "min_1m_range_ratio": "0.0003",
+          "min_minutes_between_entries": 10,
+          "min_signal_confidence": "0.64",
+          "pause_minutes_after_loss": 30
+        },
+        "leverage": "3",
+        "stop_loss_ratio": "0.0045",
+        "strategy_params": {
+          "burst_params": {
+            "breakout_buffer": "0.0000",
+            "breakout_period": 12,
+            "impulse_period": 1,
+            "min_impulse_return": "0.0008",
+            "min_volume_ratio": "1.2",
+            "mode": "fade",
+            "volume_period": 20
+          },
+          "max_abs_trend_for_range": "0.006",
+          "range_params": {
+            "edge_ratio": "0.18",
+            "min_range_ratio": "0.0015",
+            "min_reversal_body_ratio": "0.15",
+            "range_period": 45
+          },
+          "range_regime_period": 240,
+          "router_order": [
+            "trend",
+            "burst",
+            "range"
+          ],
+          "trend_params": {
+            "min_pullback": "0.0008",
+            "min_range_ratio": "0.0008",
+            "min_trend_return": "0.003",
+            "min_trigger_return": "0.0002",
+            "pullback_period": 5,
+            "trend_period": 60,
+            "trigger_period": 1
+          },
+          "trend_regime_period": 240
+        },
+        "take_profit_ratio": "0.0060"
+      },
+      "candidate_id": "selective-trend-p2-tp0060-sl0045-e0035-l3-guard-e",
+      "test_average_net_trade_roe": "-0.007301329638368908621777826144",
+      "test_candidate_id": "selective-trend-p2-tp0060-sl0045-e0035-l3-guard-e",
+      "test_cost_model": {
+        "fee_rate_per_side": "0.0004",
+        "funding_fee": "excluded",
+        "slippage_rate_per_side": "0.0002",
+        "venue": "binance_usd_m_futures"
+      },
+      "test_daily_return_ratio": "-0.0004410440535848399941228280551",
+      "test_end_at": "2026-07-09T00:00:00+00:00",
+      "test_engine": "scheduler_driven",
+      "test_fee_paid": "178.8469117152456499492111404",
+      "test_gross_pnl": "-90.18996097150674646571397322",
+      "test_max_drawdown_ratio": "0.02739354074264695460406619086",
+      "test_net_pnl": "-269.0368726867523964149251136",
+      "test_net_win_rate": "0.4305555555555555555555555556",
+      "test_return_ratio": "-0.02690368726867523964149251136",
+      "test_scheduler_path": "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute",
+      "test_signal_count": 2400,
+      "test_skipped_by_guard": 43792,
+      "test_start_at": "2026-05-09T00:00:00+00:00",
+      "test_trade_count": 216,
+      "test_trades_per_day": "3.540983606557377049180327869",
+      "train_average_net_trade_roe": "-0.008064098257115704180075047354",
+      "train_candidate_id": "selective-trend-p2-tp0060-sl0045-e0035-l3-guard-e",
+      "train_cost_model": {
+        "fee_rate_per_side": "0.0004",
+        "funding_fee": "excluded",
+        "slippage_rate_per_side": "0.0002",
+        "venue": "binance_usd_m_futures"
+      },
+      "train_daily_return_ratio": "-0.0004384182786452508473392971241",
+      "train_end_at": "2026-05-09T00:00:00+00:00",
+      "train_engine": "scheduler_driven",
+      "train_fee_paid": "478.2351312626570828461042586",
+      "train_gross_pnl": "-315.3019530852469508380235371",
+      "train_max_drawdown_ratio": "0.08019321132410360771918555857",
+      "train_net_pnl": "-793.5370843479040336841277946",
+      "train_net_win_rate": "0.4165261382799325463743676223",
+      "train_return_ratio": "-0.07935370843479040336841277946",
+      "train_scheduler_path": "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute",
+      "train_signal_count": 8795,
+      "train_skipped_by_guard": 186948,
+      "train_start_at": "2025-11-09T00:00:00+00:00",
+      "train_trade_count": 593,
+      "train_trades_per_day": "3.276243093922651933701657459"
+    },
+    {
+      "candidate": {
+        "candidate_id": "liquid-burst-p3-tp0090-sl0060-e0045-l4-guard-e",
+        "equity_ratio": "0.045",
+        "guard": {
+          "max_1m_range_ratio": "0.0080",
+          "max_consecutive_losses": 2,
+          "max_daily_loss_ratio": "0.006",
+          "max_daily_trades": 15,
+          "max_peak_drawdown_ratio": "0.08",
+          "min_1m_range_ratio": "0.0003",
+          "min_minutes_between_entries": 10,
+          "min_signal_confidence": "0.64",
+          "pause_minutes_after_loss": 30
+        },
+        "leverage": "4",
+        "stop_loss_ratio": "0.0060",
+        "strategy_params": {
+          "burst_params": {
+            "breakout_buffer": "0.0000",
+            "breakout_period": 12,
+            "impulse_period": 1,
+            "min_impulse_return": "0.0010",
+            "min_volume_ratio": "1.3",
+            "mode": "fade",
+            "volume_period": 20
+          },
+          "max_abs_trend_for_range": "0.008",
+          "range_params": {
+            "edge_ratio": "0.18",
+            "min_range_ratio": "0.0015",
+            "min_reversal_body_ratio": "0.18",
+            "range_period": 45
+          },
+          "range_regime_period": 240,
+          "router_order": [
+            "trend",
+            "burst",
+            "range"
+          ],
+          "trend_params": {
+            "min_pullback": "0.0006",
+            "min_range_ratio": "0.0012",
+            "min_trend_return": "0.002",
+            "min_trigger_return": "0.0002",
+            "pullback_period": 5,
+            "trend_period": 60,
+            "trigger_period": 1
+          },
+          "trend_regime_period": 240
+        },
+        "take_profit_ratio": "0.0090"
+      },
+      "candidate_id": "liquid-burst-p3-tp0090-sl0060-e0045-l4-guard-e",
+      "test_average_net_trade_roe": "-0.006034932513885289520928822224",
+      "test_candidate_id": "liquid-burst-p3-tp0090-sl0060-e0045-l4-guard-e",
+      "test_cost_model": {
+        "fee_rate_per_side": "0.0004",
+        "funding_fee": "excluded",
+        "slippage_rate_per_side": "0.0002",
+        "venue": "binance_usd_m_futures"
+      },
+      "test_daily_return_ratio": "-0.0005043466665344135409170813341",
+      "test_end_at": "2026-07-09T00:00:00+00:00",
+      "test_engine": "scheduler_driven",
+      "test_fee_paid": "248.7630120264805452998890248",
+      "test_gross_pnl": "-58.88845455951171465953058906",
+      "test_max_drawdown_ratio": "0.03212310516803836902934169056",
+      "test_net_pnl": "-307.6514665859922599594196138",
+      "test_net_win_rate": "0.4137931034482758620689655172",
+      "test_return_ratio": "-0.03076514665859922599594196138",
+      "test_scheduler_path": "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute",
+      "test_signal_count": 1456,
+      "test_skipped_by_guard": 31775,
+      "test_start_at": "2026-05-09T00:00:00+00:00",
+      "test_trade_count": 174,
+      "test_trades_per_day": "2.852459016393442622950819672",
+      "train_average_net_trade_roe": "-0.004933079695037848010282187587",
+      "train_candidate_id": "liquid-burst-p3-tp0090-sl0060-e0045-l4-guard-e",
+      "train_cost_model": {
+        "fee_rate_per_side": "0.0004",
+        "funding_fee": "excluded",
+        "slippage_rate_per_side": "0.0002",
+        "venue": "binance_usd_m_futures"
+      },
+      "train_daily_return_ratio": "-0.0003755505949700578775460072156",
+      "train_end_at": "2026-05-09T00:00:00+00:00",
+      "train_engine": "scheduler_driven",
+      "train_fee_paid": "675.6212685282608922896166133",
+      "train_gross_pnl": "-4.12530836754386606865644872",
+      "train_max_drawdown_ratio": "0.08090246312490292756512997817",
+      "train_net_pnl": "-679.7465768958047583582730602",
+      "train_net_win_rate": "0.4258872651356993736951983299",
+      "train_return_ratio": "-0.06797465768958047583582730602",
+      "train_scheduler_path": "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute",
+      "train_signal_count": 4654,
+      "train_skipped_by_guard": 178885,
+      "train_start_at": "2025-11-09T00:00:00+00:00",
+      "train_trade_count": 479,
+      "train_trades_per_day": "2.646408839779005524861878453"
+    },
+    {
+      "candidate": {
+        "candidate_id": "range-strict-p4-tp0105-sl0070-e0050-l5-guard-c",
+        "equity_ratio": "0.050",
+        "guard": {
+          "max_1m_range_ratio": "0.0075",
+          "max_consecutive_losses": 2,
+          "max_daily_loss_ratio": "0.006",
+          "max_daily_trades": 15,
+          "max_peak_drawdown_ratio": "0.08",
+          "min_1m_range_ratio": "0.0004",
+          "min_minutes_between_entries": 20,
+          "min_signal_confidence": "0.64",
+          "pause_minutes_after_loss": 45
+        },
+        "leverage": "5",
+        "stop_loss_ratio": "0.0070",
+        "strategy_params": {
+          "burst_params": {
+            "breakout_buffer": "0.0000",
+            "breakout_period": 12,
+            "impulse_period": 1,
+            "min_impulse_return": "0.0008",
+            "min_volume_ratio": "1.0",
+            "mode": "fade",
+            "volume_period": 20
+          },
+          "max_abs_trend_for_range": "0.005",
+          "range_params": {
+            "edge_ratio": "0.14",
+            "min_range_ratio": "0.0020",
+            "min_reversal_body_ratio": "0.15",
+            "range_period": 45
+          },
+          "range_regime_period": 240,
+          "router_order": [
+            "trend",
+            "burst",
+            "range"
+          ],
+          "trend_params": {
+            "min_pullback": "0.0006",
+            "min_range_ratio": "0.0008",
+            "min_trend_return": "0.002",
+            "min_trigger_return": "0.0002",
+            "pullback_period": 5,
+            "trend_period": 60,
+            "trigger_period": 1
+          },
+          "trend_regime_period": 240
+        },
+        "take_profit_ratio": "0.0105"
+      },
+      "candidate_id": "range-strict-p4-tp0105-sl0070-e0050-l5-guard-c",
+      "test_average_net_trade_roe": "-0.005824062968321565353552269316",
+      "test_candidate_id": "range-strict-p4-tp0105-sl0070-e0050-l5-guard-c",
+      "test_cost_model": {
+        "fee_rate_per_side": "0.0004",
+        "funding_fee": "excluded",
+        "slippage_rate_per_side": "0.0002",
+        "venue": "binance_usd_m_futures"
+      },
+      "test_daily_return_ratio": "-0.0005649672759626357364835989154",
+      "test_end_at": "2026-07-09T00:00:00+00:00",
+      "test_engine": "scheduler_driven",
+      "test_fee_paid": "286.7509243084693143685100405",
+      "test_gross_pnl": "-57.87911402873848488648529805",
+      "test_max_drawdown_ratio": "0.03893412134206604998368945906",
+      "test_net_pnl": "-344.6300383372077992549953384",
+      "test_net_win_rate": "0.4137931034482758620689655172",
+      "test_return_ratio": "-0.03446300383372077992549953384",
+      "test_scheduler_path": "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute",
+      "test_signal_count": 2054,
+      "test_skipped_by_guard": 33936,
+      "test_start_at": "2026-05-09T00:00:00+00:00",
+      "test_trade_count": 145,
+      "test_trades_per_day": "2.377049180327868852459016393",
+      "train_average_net_trade_roe": "-0.002896509734549124196779782689",
+      "train_candidate_id": "range-strict-p4-tp0105-sl0070-e0050-l5-guard-c",
+      "train_cost_model": {
+        "fee_rate_per_side": "0.0004",
+        "funding_fee": "excluded",
+        "slippage_rate_per_side": "0.0002",
+        "venue": "binance_usd_m_futures"
+      },
+      "train_daily_return_ratio": "-0.0002131958293661815837690444150",
+      "train_end_at": "2026-05-09T00:00:00+00:00",
+      "train_engine": "scheduler_driven",
+      "train_fee_paid": "654.4603022110311037379120852",
+      "train_gross_pnl": "268.5758510582424371159416948",
+      "train_max_drawdown_ratio": "0.08113219314930264287326016986",
+      "train_net_pnl": "-385.8844511527886666219703912",
+      "train_net_win_rate": "0.4413580246913580246913580247",
+      "train_return_ratio": "-0.03858844511527886666219703912",
+      "train_scheduler_path": "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute",
+      "train_signal_count": 5049,
+      "train_skipped_by_guard": 177701,
+      "train_start_at": "2025-11-09T00:00:00+00:00",
+      "train_trade_count": 324,
+      "train_trades_per_day": "1.790055248618784530386740331"
+    },
+    {
+      "candidate": {
+        "candidate_id": "balanced-p3-tp0090-sl0060-e0045-l4-guard-e",
+        "equity_ratio": "0.045",
+        "guard": {
+          "max_1m_range_ratio": "0.0080",
+          "max_consecutive_losses": 2,
+          "max_daily_loss_ratio": "0.006",
+          "max_daily_trades": 15,
+          "max_peak_drawdown_ratio": "0.08",
+          "min_1m_range_ratio": "0.0003",
+          "min_minutes_between_entries": 10,
+          "min_signal_confidence": "0.64",
+          "pause_minutes_after_loss": 30
+        },
+        "leverage": "4",
+        "stop_loss_ratio": "0.0060",
+        "strategy_params": {
+          "burst_params": {
+            "breakout_buffer": "0.0000",
+            "breakout_period": 12,
+            "impulse_period": 1,
+            "min_impulse_return": "0.0008",
+            "min_volume_ratio": "1.0",
+            "mode": "fade",
+            "volume_period": 20
+          },
+          "max_abs_trend_for_range": "0.008",
+          "range_params": {
+            "edge_ratio": "0.18",
+            "min_range_ratio": "0.0015",
+            "min_reversal_body_ratio": "0.15",
+            "range_period": 45
+          },
+          "range_regime_period": 240,
+          "router_order": [
+            "trend",
+            "burst",
+            "range"
+          ],
+          "trend_params": {
+            "min_pullback": "0.0006",
+            "min_range_ratio": "0.0008",
+            "min_trend_return": "0.002",
+            "min_trigger_return": "0.0002",
+            "pullback_period": 5,
+            "trend_period": 60,
+            "trigger_period": 1
+          },
+          "trend_regime_period": 240
+        },
+        "take_profit_ratio": "0.0090"
+      },
+      "candidate_id": "balanced-p3-tp0090-sl0060-e0045-l4-guard-e",
+      "test_average_net_trade_roe": "-0.008398616295160779806431192236",
+      "test_candidate_id": "balanced-p3-tp0090-sl0060-e0045-l4-guard-e",
+      "test_cost_model": {
+        "fee_rate_per_side": "0.0004",
+        "funding_fee": "excluded",
+        "slippage_rate_per_side": "0.0002",
+        "venue": "binance_usd_m_futures"
+      },
+      "test_daily_return_ratio": "-0.0006613323169226712390001024843",
+      "test_end_at": "2026-07-09T00:00:00+00:00",
+      "test_engine": "scheduler_driven",
+      "test_fee_paid": "234.3337082495434364426632635",
+      "test_gross_pnl": "-169.0790050732860193473992520",
+      "test_max_drawdown_ratio": "0.04186749380281040618504509202",
+      "test_net_pnl": "-403.4127133228294557900625154",
+      "test_net_win_rate": "0.3878787878787878787878787879",
+      "test_return_ratio": "-0.04034127133228294557900625154",
+      "test_scheduler_path": "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute",
+      "test_signal_count": 1360,
+      "test_skipped_by_guard": 33670,
+      "test_start_at": "2026-05-09T00:00:00+00:00",
+      "test_trade_count": 165,
+      "test_trades_per_day": "2.704918032786885245901639344",
+      "train_average_net_trade_roe": "-0.004765057184695937387837495461",
+      "train_candidate_id": "balanced-p3-tp0090-sl0060-e0045-l4-guard-e",
+      "train_cost_model": {
+        "fee_rate_per_side": "0.0004",
+        "funding_fee": "excluded",
+        "slippage_rate_per_side": "0.0002",
+        "venue": "binance_usd_m_futures"
+      },
+      "train_daily_return_ratio": "-0.0003873846781010590946722636847",
+      "train_end_at": "2026-05-09T00:00:00+00:00",
+      "train_engine": "scheduler_driven",
+      "train_fee_paid": "720.8692257224123516797973261",
+      "train_gross_pnl": "19.70295835949539032300005633",
+      "train_max_drawdown_ratio": "0.08014298783520769570736579818",
+      "train_net_pnl": "-701.1662673629169613567972693",
+      "train_net_win_rate": "0.427734375",
+      "train_return_ratio": "-0.07011662673629169613567972693",
+      "train_scheduler_path": "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute",
+      "train_signal_count": 4738,
+      "train_skipped_by_guard": 176788,
+      "train_start_at": "2025-11-09T00:00:00+00:00",
+      "train_trade_count": 512,
+      "train_trades_per_day": "2.828729281767955801104972376"
+    }
+  ],
+  "test_period": {
+    "end_at": "2026-07-09T00:00:00+00:00",
+    "start_at": "2026-05-09T00:00:00+00:00"
   },
-  "end_at": "2025-11-13T00:00:00+00:00",
-  "engine": "scheduler_driven",
-  "fee_paid": "58.47847006472955544465254235",
-  "gross_pnl": "-260.1379279032461659788223170",
-  "max_drawdown_ratio": "0.0416792093351675927819867941",
-  "net_pnl": "-318.6163979679757214234748594",
-  "net_win_rate": "0.2857142857142857142857142857",
-  "return_ratio": "-0.03186163979679757214234748594",
-  "scheduler_path": "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute",
-  "signal_count": 39,
-  "start_at": "2025-11-09T00:00:00+00:00",
-  "trade_count": 14,
-  "trades_per_day": "3.5"
+  "train_period": {
+    "end_at": "2026-05-09T00:00:00+00:00",
+    "start_at": "2025-11-09T00:00:00+00:00"
+  }
 }
