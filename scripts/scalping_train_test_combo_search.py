@@ -422,7 +422,15 @@ def _candle_limit_for_scalping_combo(combo: Combo) -> int:
     return max(_candle_limit_for_combo(combo), 260)
 
 
-def _simulate_scalping_fast(*, market, combo: Combo, start_at: datetime, end_at: datetime, fee_rate: float) -> dict[str, object]:
+def _simulate_scalping_fast(
+    *,
+    market,
+    combo: Combo,
+    start_at: datetime,
+    end_at: datetime,
+    fee_rate: float,
+    slippage_rate: float = 0.0,
+) -> dict[str, object]:
     cache_key = (id(market), start_at, end_at)
     data = _DATA_CACHE.get(cache_key)
     if data is None:
@@ -472,7 +480,8 @@ def _simulate_scalping_fast(*, market, combo: Combo, start_at: datetime, end_at:
                 elif low <= take:
                     exit_price = take
             if exit_price is not None:
-                gross_return = (exit_price - entry_price) / entry_price * direction
+                filled_exit_price = _apply_exit_slippage(exit_price, direction, slippage_rate)
+                gross_return = (filled_exit_price - entry_price) / entry_price * direction
                 trade_gross_pnl = notional * gross_return
                 trade_fee = notional * fee_rate * 2.0
                 trade_net_pnl = trade_gross_pnl - trade_fee
@@ -499,11 +508,13 @@ def _simulate_scalping_fast(*, market, combo: Combo, start_at: datetime, end_at:
         lev = _scaled(confidence, float(sizing_params["min_leverage"]), float(sizing_params["max_leverage"]))
         margin = equity * equity_ratio
         notional = margin * lev
-        position = (1 if direction > 0 else -1, close, notional, margin)
+        signed_direction = 1 if direction > 0 else -1
+        entry_price = _apply_entry_slippage(close, signed_direction, slippage_rate)
+        position = (signed_direction, entry_price, notional, margin)
 
     if position is not None:
         direction, entry_price, notional, margin = position
-        exit_price = data["close"][-1]
+        exit_price = _apply_exit_slippage(data["close"][-1], direction, slippage_rate)
         gross_return = (exit_price - entry_price) / entry_price * direction
         trade_gross_pnl = notional * gross_return
         trade_fee = notional * fee_rate * 2.0
@@ -534,6 +545,18 @@ def _simulate_scalping_fast(*, market, combo: Combo, start_at: datetime, end_at:
         "gross_pnl": Decimal(str(gross_pnl)),
         "fee_paid": Decimal(str(fee_paid)),
     }
+
+
+def _apply_entry_slippage(price: float, direction: int, slippage_rate: float) -> float:
+    if direction > 0:
+        return price * (1.0 + slippage_rate)
+    return price * (1.0 - slippage_rate)
+
+
+def _apply_exit_slippage(price: float, direction: int, slippage_rate: float) -> float:
+    if direction > 0:
+        return price * (1.0 - slippage_rate)
+    return price * (1.0 + slippage_rate)
 
 
 def _evaluate_scalping_direction(data: Mapping[str, object], index: int, params: Mapping[str, object]) -> int:

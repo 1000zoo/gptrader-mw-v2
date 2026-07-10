@@ -6,6 +6,8 @@ from scripts.scalping_train_test_combo_search import (
     MomentumBurstScalper,
     RangeEdgeReversionScalper,
     TrendPullbackScalper,
+    _apply_entry_slippage,
+    _apply_exit_slippage,
     combine_result,
 )
 from src.domain.indicator import IndicatorSet
@@ -104,6 +106,13 @@ def test_combined_result_includes_test_trades_per_day() -> None:
     assert Decimal(str(combined["test_trades_per_day"])).quantize(Decimal("0.01")) == (
         Decimal("690") / TEST_DAYS
     ).quantize(Decimal("0.01"))
+
+
+def test_slippage_helpers_apply_adverse_fill_by_direction() -> None:
+    assert _apply_entry_slippage(100.0, 1, 0.001) == 100.1
+    assert _apply_exit_slippage(100.0, 1, 0.001) == 99.9
+    assert _apply_entry_slippage(100.0, -1, 0.001) == 99.9
+    assert _apply_exit_slippage(100.0, -1, 0.001) == 100.1
 
 
 def _context(candles) -> StrategyContext:

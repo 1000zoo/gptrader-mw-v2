@@ -29,6 +29,8 @@ from src.domain.market import Candle, MarketSnapshot, Symbol, Timeframe  # noqa:
 
 
 TIMEFRAME = Timeframe(1, "m")
+DEFAULT_BINANCE_TAKER_FEE_RATE = Decimal("0.0004")
+DEFAULT_SLIPPAGE_RATE = Decimal("0.0002")
 RESULTS_PATH = Path("docs/backtests/scalping-external-period-validation.json")
 SUMMARY_PATH = Path("docs/backtests/scalping-external-period-validation.md")
 CACHE_DIR = Path("docs/backtests/cache/external-periods")
@@ -52,6 +54,19 @@ PERIODS = (
     ("ETHUSDT", "eth-2025-06-01_2025-09-30", "2025/6/1", "2025/9/30"),
 )
 
+BTC_RECHECK_PERIODS = (
+    ("BTCUSDT", "btc-recheck-2020-11-01_2021-01-31", "2020/11/1", "2021/1/31"),
+    ("BTCUSDT", "btc-recheck-2021-03-10_2021-07-10", "2021/3/10", "2021/7/10"),
+    ("BTCUSDT", "btc-recheck-2022-04-25_2022-06-25", "2022/4/25", "2022/6/25"),
+    ("BTCUSDT", "btc-recheck-2022-12-01_2023-01-31", "2022/12/1", "2023/1/31"),
+    ("BTCUSDT", "btc-recheck-2023-09-01_2023-11-01", "2023/9/1", "2023/11/1"),
+    ("BTCUSDT", "btc-recheck-2024-03-01_2024-04-01", "2024/03/01", "2024/04/01"),
+    ("BTCUSDT", "btc-recheck-2024-07-01_2024-09-01", "2024/7/1", "2024/9/1"),
+    ("BTCUSDT", "btc-recheck-2025-01-01_2025-03-01", "2025/1/1", "2025/3/1"),
+    ("BTCUSDT", "btc-recheck-2025-06-01_2025-08-01", "2025/6/1", "2025/8/1"),
+    ("BTCUSDT", "btc-recheck-2025-10-06_2025-12-01", "2025/10/6", "2025/12/1"),
+)
+
 
 @dataclass(frozen=True)
 class PeriodSpec:
@@ -72,46 +87,80 @@ class PeriodSpec:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--symbol", choices=("BTCUSDT", "ETHUSDT"), default="")
+    parser.add_argument(
+        "--period-set",
+        choices=("default", "btc-recheck"),
+        default="default",
+    )
+    parser.add_argument("--fee-rate", type=Decimal, default=DEFAULT_BINANCE_TAKER_FEE_RATE)
+    parser.add_argument("--slippage-rate", type=Decimal, default=DEFAULT_SLIPPAGE_RATE)
     args = parser.parse_args()
 
+    period_source = BTC_RECHECK_PERIODS if args.period_set == "btc-recheck" else PERIODS
+    cost_model = {
+        "venue": "binance_usd_m_futures",
+        "fee_model": "taker_fee_entry_and_exit",
+        "fee_rate_per_side": str(args.fee_rate),
+        "slippage_model": "adverse_fill_entry_and_exit",
+        "slippage_rate_per_side": str(args.slippage_rate),
+        "funding_fee": "excluded",
+    }
     selected = [
         PeriodSpec(*period)
-        for period in PERIODS
+        for period in period_source
         if not args.symbol or period[0] == args.symbol
     ]
     results = []
     for period in selected:
         print(f"running {period.symbol} {period.start}~{period.end}", flush=True)
         market = load_period_market(period)
-        metrics = None if market is None else run_selected_combo(market, period)
-        result = summarize_period_result(period, metrics)
+        metrics = None if market is None else run_selected_combo(
+            market,
+            period,
+            fee_rate=args.fee_rate,
+            slippage_rate=args.slippage_rate,
+        )
+        result = summarize_period_result(period, metrics, cost_model=cost_model)
         results.append(result)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True), flush=True)
     RESULTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    suffix_parts = []
+    if args.period_set != "default":
+        suffix_parts.append(args.period_set)
     if args.symbol:
+        suffix_parts.append(args.symbol.lower())
+    if suffix_parts:
+        suffix = "-" + "-".join(suffix_parts)
         path = RESULTS_PATH.with_name(
-            f"{RESULTS_PATH.stem}-{args.symbol.lower()}{RESULTS_PATH.suffix}"
+            f"{RESULTS_PATH.stem}{suffix}{RESULTS_PATH.suffix}"
         )
         summary_path = SUMMARY_PATH.with_name(
-            f"{SUMMARY_PATH.stem}-{args.symbol.lower()}{SUMMARY_PATH.suffix}"
+            f"{SUMMARY_PATH.stem}{suffix}{SUMMARY_PATH.suffix}"
         )
     else:
         path = RESULTS_PATH
         summary_path = SUMMARY_PATH
     path.write_text(json.dumps(results, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    summary_path.write_text(markdown_summary(results), encoding="utf-8")
+    summary_path.write_text(markdown_summary(results, cost_model=cost_model), encoding="utf-8")
     print(f"RESULTS {path}")
     print(f"SUMMARY {summary_path}")
 
 
-def run_selected_combo(market: MarketSnapshot, period: PeriodSpec) -> dict[str, object]:
+def run_selected_combo(
+    market: MarketSnapshot,
+    period: PeriodSpec,
+    *,
+    fee_rate: Decimal,
+    slippage_rate: Decimal,
+) -> dict[str, object]:
     combo = selected_combo()
     return _simulate_scalping_fast(
         market=market,
         combo=combo,
         start_at=period.start_at,
         end_at=period.end_at,
-        fee_rate=0.0004,
+        fee_rate=float(fee_rate),
+        slippage_rate=float(slippage_rate),
     )
 
 
@@ -177,7 +226,12 @@ def selected_combo() -> Combo:
     )
 
 
-def summarize_period_result(period: PeriodSpec, metrics: dict[str, object] | None) -> dict[str, object]:
+def summarize_period_result(
+    period: PeriodSpec,
+    metrics: dict[str, object] | None,
+    *,
+    cost_model: dict[str, str] | None = None,
+) -> dict[str, object]:
     days = Decimal(str((period.end_at - period.start_at).total_seconds())) / Decimal("86400")
     base = {
         "symbol": period.symbol,
@@ -185,6 +239,7 @@ def summarize_period_result(period: PeriodSpec, metrics: dict[str, object] | Non
         "start_at": period.start_at.isoformat(),
         "end_at": period.end_at.isoformat(),
         "days": str(days),
+        "cost_model": cost_model or {},
     }
     if metrics is None:
         return {**base, "status": "no_data"}
@@ -294,9 +349,20 @@ def candle_from_record(record: dict[str, object], symbol_value: str) -> Candle:
     )
 
 
-def markdown_summary(results: list[dict[str, object]]) -> str:
+def markdown_summary(
+    results: list[dict[str, object]],
+    *,
+    cost_model: dict[str, str] | None = None,
+) -> str:
+    cost = cost_model or {}
     lines = [
         "# Scalping External Period Validation",
+        "",
+        "Cost model:",
+        f"- Venue: {cost.get('venue', '')}",
+        f"- Fee: {cost.get('fee_model', '')}, per side {cost.get('fee_rate_per_side', '')}",
+        f"- Slippage: {cost.get('slippage_model', '')}, per side {cost.get('slippage_rate_per_side', '')}",
+        f"- Funding fee: {cost.get('funding_fee', '')}",
         "",
         "| Symbol | Period | Status | Trades/day | Gross win | Avg gross ROE | Return | Max DD | Trades |",
         "|---|---:|---|---:|---:|---:|---:|---:|---:|",

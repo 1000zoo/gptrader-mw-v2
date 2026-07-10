@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from scripts.validate_scalping_external_periods import (
+    BTC_RECHECK_PERIODS,
     PeriodSpec,
     candle_from_record,
     end_exclusive,
@@ -47,6 +48,38 @@ def test_summarize_period_result_includes_scalping_metrics() -> None:
     assert result["trade_count"] == 31
     assert result["trades_per_day"] == "1"
     assert result["average_gross_trade_roe"] == "0.004"
+
+
+def test_btc_recheck_periods_match_requested_windows() -> None:
+    assert len(BTC_RECHECK_PERIODS) == 10
+    assert BTC_RECHECK_PERIODS[0] == (
+        "BTCUSDT",
+        "btc-recheck-2020-11-01_2021-01-31",
+        "2020/11/1",
+        "2021/1/31",
+    )
+    assert BTC_RECHECK_PERIODS[-1] == (
+        "BTCUSDT",
+        "btc-recheck-2025-10-06_2025-12-01",
+        "2025/10/6",
+        "2025/12/1",
+    )
+
+
+def test_summarize_period_result_records_cost_model() -> None:
+    result = summarize_period_result(
+        PeriodSpec("BTCUSDT", "costed", "2025/1/1", "2025/1/1"),
+        None,
+        cost_model={
+            "venue": "binance_usd_m_futures",
+            "fee_rate_per_side": "0.0004",
+            "slippage_rate_per_side": "0.0002",
+        },
+    )
+
+    assert result["cost_model"]["venue"] == "binance_usd_m_futures"
+    assert result["cost_model"]["fee_rate_per_side"] == "0.0004"
+    assert result["cost_model"]["slippage_rate_per_side"] == "0.0002"
 
 
 def test_candle_from_record_restores_symbol_and_closed_at() -> None:
