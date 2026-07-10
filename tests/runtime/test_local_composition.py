@@ -36,7 +36,7 @@ def test_local_runtime_can_run_strategy_backtest_cycle() -> None:
 
     result = runtime.run_strategy_backtest_cycle("cycle-local")
 
-    assert result.succeeded_count == 5
+    assert result.succeeded_count == 6
     assert result.failed_count == 0
     assert {item.strategy_id for item in result.items} == {
         "latest-close-moving-average",
@@ -44,8 +44,9 @@ def test_local_runtime_can_run_strategy_backtest_cycle() -> None:
         "chart-pattern",
         "tv-range-seed-s1-t1-p2-fixed",
         "live-compression-s2-sl0030-rr045-balanced",
+        "live-scalp-multi-t1-r1-b4-tbr-sl0050-rr025-p2",
     }
-    assert runtime.status_details()["strategy_backtest_cycle"]["succeeded_count"] == 5
+    assert runtime.status_details()["strategy_backtest_cycle"]["succeeded_count"] == 6
 
 
 def test_local_runtime_can_filter_backtest_strategies() -> None:

@@ -16,7 +16,7 @@ if (Test-Path $envPath) {
     }
 }
 
-. "$PSScriptRoot\live_compression_s2_sl0030_rr045_balanced.ps1"
+. "$PSScriptRoot\live_scalp_multi_t1_r1_b4_tbr_sl0050_rr025_p2.ps1"
 
 if (-not $env:GPTRADER_SCHEDULER_INTERVAL_SECONDS) {
     $env:GPTRADER_SCHEDULER_INTERVAL_SECONDS = "60"
