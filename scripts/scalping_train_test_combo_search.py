@@ -499,6 +499,7 @@ def _simulate_scalping_fast(
                     max_drawdown = max(max_drawdown, (peak - equity) / peak)
                 position = None
                 continue
+            continue
 
         direction = _evaluate_scalping_direction(data, index, strategy_params)
         if direction == 0:
