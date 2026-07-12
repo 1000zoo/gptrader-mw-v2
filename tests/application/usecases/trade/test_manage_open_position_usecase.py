@@ -7,6 +7,7 @@ from src.application.usecases.trade import (
     TradeExecutionStatus,
 )
 from src.domain.execution import OrderResult
+from src.domain.market_feature import MarketFeatureSet
 from src.domain.ports import SignalLogEntry
 from src.domain.position import Position
 from src.domain.signal import Signal, SignalDirection
@@ -53,6 +54,16 @@ class FakeClosePositionUseCase:
             status=TradeExecutionStatus.ORDER_SUBMITTED,
             order_result=OrderResult.accepted("close-btc", "exchange-close-1"),
         )
+
+
+class RecordingMarketFeatureProvider:
+    def __init__(self, result):
+        self.result = result
+        self.requests = []
+
+    def load_features(self, symbol, timeframe, as_of):
+        self.requests.append((symbol, timeframe, as_of))
+        return self.result
 
 
 def _command(position: Position, market, indicators) -> ManageOpenPositionCommand:
@@ -134,3 +145,61 @@ def test_manage_open_position_holds_when_signal_matches_position_direction():
             generated_signal=signal,
         )
     ]
+
+
+def test_manage_open_position_injects_features_at_latest_closed_candle():
+    market = make_market()
+    position = Position.open(
+        symbol=market.symbol,
+        direction=SignalDirection.LONG,
+        quantity=Decimal("0.5"),
+        average_entry_price=Decimal("100"),
+    )
+    features = MarketFeatureSet(
+        market.symbol,
+        market.timeframe,
+        market.latest_candle.closed_at,
+        (),
+    )
+    provider = RecordingMarketFeatureProvider(features)
+    signal_generator = FakeSignalGenerator(GeneratedSignal(signal=Signal.wait()))
+    usecase = ManageOpenPositionUseCase(
+        market_data=FakeMarketData(market),
+        signal_generator=signal_generator,
+        signal_log_repository=FakeSignalLogRepository(),
+        close_position_usecase=FakeClosePositionUseCase(),
+        market_feature_provider=provider,
+    )
+
+    usecase.manage(_command(position, market, make_indicators(market)))
+
+    assert provider.requests == [
+        (market.symbol, market.timeframe, market.latest_candle.closed_at)
+    ]
+    assert signal_generator.contexts[0].market_features is features
+
+
+def test_manage_open_position_defaults_to_aligned_empty_market_features():
+    market = make_market()
+    position = Position.open(
+        symbol=market.symbol,
+        direction=SignalDirection.LONG,
+        quantity=Decimal("0.5"),
+        average_entry_price=Decimal("100"),
+    )
+    signal_generator = FakeSignalGenerator(GeneratedSignal(signal=Signal.wait()))
+    usecase = ManageOpenPositionUseCase(
+        market_data=FakeMarketData(market),
+        signal_generator=signal_generator,
+        signal_log_repository=FakeSignalLogRepository(),
+        close_position_usecase=FakeClosePositionUseCase(),
+    )
+
+    usecase.manage(_command(position, market, make_indicators(market)))
+
+    assert signal_generator.contexts[0].market_features == MarketFeatureSet(
+        market.symbol,
+        market.timeframe,
+        market.latest_candle.closed_at,
+        (),
+    )

@@ -4,8 +4,10 @@ from src.application.usecases.trade.dto import (
     TradeExecutionStatus,
 )
 from src.domain.execution import OrderRequest
+from src.domain.market_feature import MARKET_FEATURES_METADATA_KEY
 from src.domain.ports import (
     MarketDataPort,
+    MarketFeatureProviderPort,
     OrderExecutionPort,
     SignalLogEntry,
     SignalLogRepositoryPort,
@@ -14,6 +16,7 @@ from src.domain.risk import FixedPositionSizingStrategy, PositionSize, PositionS
 from src.domain.signal import Signal, SignalDirection, TradeDecision, TradeDecisionAction
 from src.domain.signal_generator import SignalGenerator
 from src.domain.strategy import StrategyContext, TakeProfitStopLossStrategy
+from src.infrastructure.market_feature import EmptyMarketFeatureProvider
 from src.observability.logging import runtime_logger
 
 
@@ -27,6 +30,7 @@ class ExecuteTradeUseCase:
         risk_policy: RiskPolicy | None = None,
         take_profit_stop_loss_strategy: TakeProfitStopLossStrategy | None = None,
         position_sizing_strategy: PositionSizingStrategy | None = None,
+        market_feature_provider: MarketFeatureProviderPort | None = None,
     ) -> None:
         self._market_data = market_data
         self._signal_generator = signal_generator
@@ -35,6 +39,11 @@ class ExecuteTradeUseCase:
         self._risk_policy = risk_policy or RiskPolicy()
         self._take_profit_stop_loss_strategy = take_profit_stop_loss_strategy
         self._position_sizing_strategy = position_sizing_strategy
+        self._market_feature_provider = (
+            market_feature_provider
+            if market_feature_provider is not None
+            else EmptyMarketFeatureProvider()
+        )
 
     def execute(self, command: ExecuteTradeCommand) -> ExecuteTradeResult:
         runtime_logger.info(
@@ -59,7 +68,16 @@ class ExecuteTradeUseCase:
             entry_price=str(entry_price),
             latest_closed_at=market.latest_candle.closed_at.isoformat(),
         )
-        context = StrategyContext(market=market, indicators=command.indicators)
+        market_features = self._market_feature_provider.load_features(
+            symbol=market.symbol,
+            timeframe=market.timeframe,
+            as_of=market.latest_candle.closed_at,
+        )
+        context = StrategyContext(
+            market=market,
+            indicators=command.indicators,
+            metadata={MARKET_FEATURES_METADATA_KEY: market_features},
+        )
         generated_signal = self._signal_generator.generate(context)
         runtime_logger.info(
             "strategy signal generated",

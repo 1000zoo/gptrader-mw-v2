@@ -6,6 +6,7 @@ from src.application.usecases.trade import (
     TradeExecutionStatus,
 )
 from src.domain.execution import OrderResult
+from src.domain.market_feature import MarketFeatureSet
 from src.domain.ports import SignalLogEntry
 from src.domain.risk import ExposureLimit, RiskCheck, RiskDecisionReason
 from src.domain.signal import Signal, SignalDirection
@@ -67,6 +68,21 @@ class FakeOrderExecution:
             OrderResult.accepted(f"{client_order_id_prefix}-tp", "tp-1"),
             OrderResult.accepted(f"{client_order_id_prefix}-sl", "sl-1"),
         )
+
+
+class RecordingMarketFeatureProvider:
+    def __init__(self, result):
+        self.result = result
+        self.requests = []
+
+    def load_features(self, symbol, timeframe, as_of):
+        self.requests.append((symbol, timeframe, as_of))
+        return self.result
+
+
+class FalseyMarketFeatureProvider(RecordingMarketFeatureProvider):
+    def __bool__(self):
+        return False
 
 
 class RejectingRiskPolicy:
@@ -418,3 +434,113 @@ def test_execute_trade_usecase_rejects_entry_when_exposure_is_exhausted():
     assert result.status is TradeExecutionStatus.RISK_REJECTED
     assert result.reason == "total_exposure_exceeded"
     assert order_execution.requests == []
+
+
+def test_execute_trade_usecase_uses_latest_closed_candle_as_feature_cutoff():
+    market = make_market()
+    features = MarketFeatureSet(
+        market.symbol,
+        market.timeframe,
+        market.latest_candle.closed_at,
+        (),
+    )
+    provider = RecordingMarketFeatureProvider(features)
+    signal_generator = FakeSignalGenerator(GeneratedSignal(signal=Signal.wait()))
+    usecase = ExecuteTradeUseCase(
+        market_data=FakeMarketData(market),
+        signal_generator=signal_generator,
+        signal_log_repository=FakeSignalLogRepository(),
+        order_execution=FakeOrderExecution(),
+        market_feature_provider=provider,
+    )
+
+    usecase.execute(
+        ExecuteTradeCommand(
+            symbol=market.symbol,
+            timeframe=market.timeframe,
+            candle_limit=120,
+            indicators=make_indicators(market),
+            exposure_limit=_exposure_limit(),
+            base_risk_ratio=Decimal("0.1"),
+            leverage=Decimal("3"),
+            client_order_id_prefix="live-btc",
+            signal_id="signal-1",
+            generator_id="generator-1",
+        )
+    )
+
+    assert provider.requests == [
+        (market.symbol, market.timeframe, market.latest_candle.closed_at)
+    ]
+    assert signal_generator.contexts[0].market_features is features
+
+
+def test_execute_trade_usecase_defaults_to_aligned_empty_market_features():
+    market = make_market()
+    signal_generator = FakeSignalGenerator(GeneratedSignal(signal=Signal.wait()))
+    usecase = ExecuteTradeUseCase(
+        market_data=FakeMarketData(market),
+        signal_generator=signal_generator,
+        signal_log_repository=FakeSignalLogRepository(),
+        order_execution=FakeOrderExecution(),
+    )
+
+    usecase.execute(
+        ExecuteTradeCommand(
+            symbol=market.symbol,
+            timeframe=market.timeframe,
+            candle_limit=120,
+            indicators=make_indicators(market),
+            exposure_limit=_exposure_limit(),
+            base_risk_ratio=Decimal("0.1"),
+            leverage=Decimal("3"),
+            client_order_id_prefix="live-btc",
+            signal_id="signal-1",
+            generator_id="generator-1",
+        )
+    )
+
+    features = signal_generator.contexts[0].market_features
+    assert features == MarketFeatureSet(
+        market.symbol,
+        market.timeframe,
+        market.latest_candle.closed_at,
+        (),
+    )
+
+
+def test_execute_trade_usecase_preserves_explicit_falsey_feature_provider():
+    market = make_market()
+    features = MarketFeatureSet(
+        market.symbol,
+        market.timeframe,
+        market.latest_candle.closed_at,
+        (),
+        ("explicit",),
+    )
+    provider = FalseyMarketFeatureProvider(features)
+    signal_generator = FakeSignalGenerator(GeneratedSignal(signal=Signal.wait()))
+    usecase = ExecuteTradeUseCase(
+        market_data=FakeMarketData(market),
+        signal_generator=signal_generator,
+        signal_log_repository=FakeSignalLogRepository(),
+        order_execution=FakeOrderExecution(),
+        market_feature_provider=provider,
+    )
+
+    usecase.execute(
+        ExecuteTradeCommand(
+            symbol=market.symbol,
+            timeframe=market.timeframe,
+            candle_limit=120,
+            indicators=make_indicators(market),
+            exposure_limit=_exposure_limit(),
+            base_risk_ratio=Decimal("0.1"),
+            leverage=Decimal("3"),
+            client_order_id_prefix="live-btc",
+            signal_id="signal-1",
+            generator_id="generator-1",
+        )
+    )
+
+    assert signal_generator.contexts[0].market_features is features

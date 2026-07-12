@@ -5,6 +5,7 @@ import pytest
 
 from src.domain.indicator import IndicatorSet, IndicatorValue
 from src.domain.market import Candle, MarketSnapshot, Symbol, Timeframe
+from src.domain.market_feature import MARKET_FEATURES_METADATA_KEY, MarketFeatureSet
 from src.domain.strategy import StrategyContext
 
 
@@ -109,3 +110,84 @@ def test_strategy_context_defensively_copies_metadata():
     assert context.metadata["regime"] == "trend"
     with pytest.raises(TypeError):
         context.metadata["regime"] = "range"
+
+
+def test_strategy_context_returns_aligned_market_features_from_metadata():
+    market = make_market()
+    features = MarketFeatureSet(
+        market.symbol,
+        market.timeframe,
+        market.latest_candle.closed_at,
+        (),
+    )
+
+    context = StrategyContext(
+        market=market,
+        indicators=make_indicators(market),
+        metadata={MARKET_FEATURES_METADATA_KEY: features},
+    )
+
+    assert context.market_features is features
+
+
+def test_strategy_context_returns_none_without_market_features_metadata():
+    market = make_market()
+
+    context = StrategyContext(market=market, indicators=make_indicators(market))
+
+    assert context.market_features is None
+
+
+def test_strategy_context_rejects_explicit_none_market_features_metadata():
+    market = make_market()
+
+    with pytest.raises(TypeError, match="MarketFeatureSet"):
+        StrategyContext(
+            market=market,
+            indicators=make_indicators(market),
+            metadata={MARKET_FEATURES_METADATA_KEY: None},
+        )
+
+
+@pytest.mark.parametrize(
+    ("features", "message"),
+    [
+        ("not-features", "MarketFeatureSet"),
+        (
+            MarketFeatureSet(
+                Symbol("ETH", "USDT"),
+                Timeframe(1, "m"),
+                datetime(2026, 5, 24, 0, 1, tzinfo=timezone.utc),
+                (),
+            ),
+            "symbol",
+        ),
+        (
+            MarketFeatureSet(
+                Symbol("BTC", "USDT"),
+                Timeframe(5, "m"),
+                datetime(2026, 5, 24, 0, 1, tzinfo=timezone.utc),
+                (),
+            ),
+            "timeframe",
+        ),
+        (
+            MarketFeatureSet(
+                Symbol("BTC", "USDT"),
+                Timeframe(1, "m"),
+                datetime(2026, 5, 24, 0, 2, tzinfo=timezone.utc),
+                (),
+            ),
+            "measured_at",
+        ),
+    ],
+)
+def test_strategy_context_rejects_invalid_market_features(features, message):
+    market = make_market()
+
+    with pytest.raises((TypeError, ValueError), match=message):
+        StrategyContext(
+            market=market,
+            indicators=make_indicators(market),
+            metadata={MARKET_FEATURES_METADATA_KEY: features},
+        )

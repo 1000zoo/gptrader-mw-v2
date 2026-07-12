@@ -5,11 +5,18 @@ from src.application.usecases.trade.dto import (
     ManageOpenPositionResult,
     TradeExecutionStatus,
 )
-from src.domain.ports import MarketDataPort, SignalLogEntry, SignalLogRepositoryPort
+from src.domain.market_feature import MARKET_FEATURES_METADATA_KEY
+from src.domain.ports import (
+    MarketDataPort,
+    MarketFeatureProviderPort,
+    SignalLogEntry,
+    SignalLogRepositoryPort,
+)
 from src.domain.position import PositionStatus
 from src.domain.signal import SignalDirection
 from src.domain.signal_generator import SignalGenerator
 from src.domain.strategy import StrategyContext
+from src.infrastructure.market_feature import EmptyMarketFeatureProvider
 from src.observability.logging import runtime_logger
 
 
@@ -20,11 +27,17 @@ class ManageOpenPositionUseCase:
         signal_generator: SignalGenerator,
         signal_log_repository: SignalLogRepositoryPort,
         close_position_usecase: ClosePositionUseCase,
+        market_feature_provider: MarketFeatureProviderPort | None = None,
     ) -> None:
         self._market_data = market_data
         self._signal_generator = signal_generator
         self._signal_log_repository = signal_log_repository
         self._close_position_usecase = close_position_usecase
+        self._market_feature_provider = (
+            market_feature_provider
+            if market_feature_provider is not None
+            else EmptyMarketFeatureProvider()
+        )
 
     def manage(self, command: ManageOpenPositionCommand) -> ManageOpenPositionResult:
         if command.position.status is PositionStatus.CLOSED:
@@ -38,7 +51,16 @@ class ManageOpenPositionUseCase:
             timeframe=command.timeframe,
             limit=command.candle_limit,
         )
-        context = StrategyContext(market=market, indicators=command.indicators)
+        market_features = self._market_feature_provider.load_features(
+            symbol=market.symbol,
+            timeframe=market.timeframe,
+            as_of=market.latest_candle.closed_at,
+        )
+        context = StrategyContext(
+            market=market,
+            indicators=command.indicators,
+            metadata={MARKET_FEATURES_METADATA_KEY: market_features},
+        )
         generated_signal = self._signal_generator.generate(context)
         self._signal_log_repository.append_signal(
             SignalLogEntry(
