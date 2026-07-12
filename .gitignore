@@ -229,6 +229,7 @@ ws_test.py
 /_study
 .agents/
 docs/backtests/cache/
+/.research-data/binance-usdm/
 
 .idea/
 python_test/
