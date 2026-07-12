@@ -15,6 +15,14 @@ from src.domain.strategy.implementations.fixed_ratio_take_profit_stop_loss impor
 from src.domain.strategy.implementations.moving_average_strategy import (
     LatestCloseMovingAverageStrategy,
 )
+from src.domain.strategy.implementations.microstructure_alpha_strategy import (
+    FlowConfirmedBreakoutStrategy,
+    FlowExhaustionReversalStrategy,
+    MicrostructureRegimeRouterStrategy,
+    MultiTimeframeTrendPullbackStrategy,
+    PremiumFundingReversionStrategy,
+    SessionOpeningRangeStrategy,
+)
 from src.domain.strategy.implementations.range_edge_reversion_strategy import (
     RangeEdgeReversionStrategy,
 )
@@ -188,10 +196,16 @@ __all__ = [
     "AtrTakeProfitStopLossStrategy",
     "ChartPatternStrategy",
     "FixedRatioTakeProfitStopLossStrategy",
+    "FlowConfirmedBreakoutStrategy",
+    "FlowExhaustionReversalStrategy",
     "LatestCloseMovingAverageStrategy",
+    "MicrostructureRegimeRouterStrategy",
+    "MultiTimeframeTrendPullbackStrategy",
     "PivotDetector",
+    "PremiumFundingReversionStrategy",
     "RangeEdgeReversionStrategy",
     "RegimeRouterScalperStrategy",
+    "SessionOpeningRangeStrategy",
     "SessionVolumeProfileStrategy",
     "VolatilityCompressionBreakoutStrategy",
     "create_default_strategy_catalog",
