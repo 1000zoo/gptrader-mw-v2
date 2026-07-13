@@ -31,12 +31,16 @@ from scripts.scheduler_driven_scalping_backtest import (  # noqa: E402
     load_market_feature_cache,
     markdown_summary,
     microstructure_alpha_candidates,
+    counter_microstructure_candidates,
+    metrics_positioning_candidates,
+    discovered_metrics_candidates,
     multi_frequency_candidates,
     rank_scheduler_results,
     run_scheduler_driven_backtest,
     summarize_walk_forward_results,
     validate_unique_candidate_ids,
 )
+from scripts.deferred_strategy_registry import ensure_candidate_group_allowed  # noqa: E402
 from scripts.validate_scalping_external_periods import PeriodSpec, load_period_market  # noqa: E402
 from src.domain.market import MarketSnapshot, Symbol  # noqa: E402
 from src.observability.logging import configure_runtime_logging  # noqa: E402
@@ -565,8 +569,14 @@ def run_incremental_walk_forward(
     summary_path: Path,
     feature_cache_path: Path | None = None,
     feature_manifest_path: Path | None = None,
+    include_deferred: bool = False,
 ) -> dict[str, object]:
     symbol = _parse_symbol(spec.symbol)
+    candidates = _select_candidates(
+        spec.candidate_group,
+        spec.candidate_ids,
+        include_deferred=include_deferred,
+    )
     period = PeriodSpec(
         spec.symbol,
         f"scheduler-driven-{spec.symbol.lower()}-{_label_date(spec.data_start_at)}_{_label_date(spec.data_end_at)}",
@@ -576,8 +586,6 @@ def run_incremental_walk_forward(
     market = load_period_market(period)
     if market is None:
         raise RuntimeError("no market data loaded")
-
-    candidates = _select_candidates(spec.candidate_group, spec.candidate_ids)
     universe_hash = candidate_definition_hash([candidate_payload(candidate) for candidate in candidates])
     data_hash = market_data_hash(market)
     folds = build_walk_forward_folds(test_start=spec.start_at, test_end=spec.end_at)
@@ -621,6 +629,7 @@ def run_incremental_walk_forward(
                 candidate=candidate,
                 symbol=symbol,
                 market_feature_provider=feature_provider,
+                include_deferred=include_deferred,
             )
             row = {
                 **{key: value for key, value in result.items() if key != "candidate"},
@@ -663,7 +672,13 @@ def _write_payloads(payload: dict[str, object], payload_path: Path, summary_path
 def _select_candidates(
     candidate_group: str,
     candidate_ids: tuple[str, ...],
+    *,
+    include_deferred: bool = False,
 ) -> tuple[SchedulerBacktestCandidate, ...]:
+    ensure_candidate_group_allowed(
+        candidate_group,
+        include_deferred=include_deferred,
+    )
     if candidate_group == "multi":
         candidates = tuple(multi_frequency_candidates())
     elif candidate_group == "exact":
@@ -672,8 +687,16 @@ def _select_candidates(
         candidates = tuple(alpha_entry_candidates())
     elif candidate_group == "microstructure":
         candidates = tuple(microstructure_alpha_candidates())
+    elif candidate_group == "counter":
+        candidates = tuple(counter_microstructure_candidates())
+    elif candidate_group == "metrics":
+        candidates = tuple(metrics_positioning_candidates())
+    elif candidate_group == "discovered":
+        candidates = tuple(discovered_metrics_candidates())
     else:
-        raise ValueError("candidate_group must be multi, exact, alpha, or microstructure")
+        raise ValueError(
+            "candidate_group must be multi, exact, alpha, microstructure, counter, metrics, or discovered"
+        )
     candidates = validate_unique_candidate_ids(candidates)
     requested_ids = tuple(sorted(set(candidate_ids)))
     by_id = {candidate.candidate_id: candidate for candidate in candidates}
@@ -721,8 +744,17 @@ def main() -> None:
     parser.add_argument("--end", default="2026/7/1")
     parser.add_argument("--data-start", default=None)
     parser.add_argument("--data-end", default=None)
-    parser.add_argument("--candidate-group", choices=("multi", "exact", "alpha", "microstructure"), default="multi")
+    parser.add_argument(
+        "--candidate-group",
+        choices=("multi", "exact", "alpha", "microstructure", "counter", "metrics", "discovered"),
+        default="multi",
+    )
     parser.add_argument("--candidate-id", action="append", default=[])
+    parser.add_argument(
+        "--include-deferred",
+        action="store_true",
+        help="Allow intentional reproduction of a group in the deferred strategy registry.",
+    )
     parser.add_argument("--rows-path", type=Path, default=DEFAULT_ROWS_PATH)
     parser.add_argument("--payload-path", type=Path, default=DEFAULT_PAYLOAD_PATH)
     parser.add_argument("--summary-path", type=Path, default=DEFAULT_SUMMARY_PATH)
@@ -739,6 +771,10 @@ def main() -> None:
         candidate_group=args.candidate_group,
         candidate_ids=tuple(args.candidate_id),
     )
+    ensure_candidate_group_allowed(
+        args.candidate_group,
+        include_deferred=args.include_deferred,
+    )
     payload = run_incremental_walk_forward(
         spec=spec,
         rows_path=args.rows_path,
@@ -746,6 +782,7 @@ def main() -> None:
         summary_path=args.summary_path,
         feature_cache_path=args.feature_cache,
         feature_manifest_path=args.feature_cache_manifest,
+        include_deferred=args.include_deferred,
     )
     print(f"ROWS {args.rows_path}")
     print(f"PAYLOAD {args.payload_path}")

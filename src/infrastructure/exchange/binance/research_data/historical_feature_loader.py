@@ -27,6 +27,7 @@ from src.infrastructure.exchange.binance.binance_rest import request_json
 UTC = timezone.utc
 ONE_MINUTE = timedelta(minutes=1)
 FUNDING_MAX_AGE = timedelta(hours=8)
+METRICS_MAX_AGE = timedelta(minutes=5)
 ARCHIVE_BASE_URL = "https://data.binance.vision"
 DEFAULT_CACHE_ROOT = Path(".research-data/binance-usdm")
 DEFAULT_AGGTRADES_MAX_BYTES = 1_000_000_000
@@ -39,6 +40,7 @@ SUPPORTED_SOURCES = (
     "indexPriceKlines",
     "premiumIndexKlines",
     "fundingRate",
+    "metrics",
 )
 
 _KLINE_SOURCES = {
@@ -62,6 +64,16 @@ _EXPECTED_HEADERS = {
         "transact_time", "is_buyer_maker",
     ),
     "fundingRate": ("calc_time", "funding_interval_hours", "last_funding_rate"),
+    "metrics": (
+        "create_time",
+        "symbol",
+        "sum_open_interest",
+        "sum_open_interest_value",
+        "count_toptrader_long_short_ratio",
+        "sum_toptrader_long_short_ratio",
+        "count_long_short_ratio",
+        "sum_taker_long_short_vol_ratio",
+    ),
 }
 for _price_source in _PRICE_FEATURES:
     _EXPECTED_HEADERS[_price_source] = _EXPECTED_HEADERS["klines"]
@@ -134,6 +146,8 @@ def archive_url(
         raise ValueError("archive granularity must be monthly or daily")
     if source == "fundingRate" and granularity != "monthly":
         raise ValueError("fundingRate archives are monthly only")
+    if source == "metrics" and granularity != "daily":
+        raise ValueError("metrics archives are daily only")
     symbol = _normalize_symbol(symbol)
     filename = (
         f"{symbol}-1m-{period}.zip"
@@ -161,6 +175,21 @@ def iter_archive_requests(
     now = _as_utc(now or datetime.now(UTC))
     if start >= end:
         raise ValueError("start must be before end")
+
+    if source == "metrics":
+        day = start.date()
+        last_day = min(end.date(), now.date())
+        while day < last_day:
+            period = day.isoformat()
+            yield ArchiveRequest(
+                source,
+                _normalize_symbol(symbol),
+                "daily",
+                period,
+                archive_url(source, symbol, period, "daily"),
+            )
+            day += timedelta(days=1)
+        return
 
     current_month = _month_start(now)
     month = _month_start(start)
@@ -379,6 +408,8 @@ def _validate_first_data_row(row: Sequence[object], source: str) -> None:
         next(aggregate_aggtrades([row]))
     elif source in _PRICE_FEATURES:
         parse_price_kline_row(row, source=source)
+    elif source == "metrics":
+        next(parse_metrics_rows([row]))
     else:
         next(parse_funding_rows([row]))
 
@@ -546,6 +577,87 @@ def parse_funding_rows(rows: Iterable[Mapping[str, object] | Sequence[object]]) 
         )
 
 
+def parse_metrics_rows(rows: Iterable[Sequence[object]]) -> Iterator[FeatureRow]:
+    previous_time: datetime | None = None
+    previous_symbol: str | None = None
+    previous_values: dict[str, Decimal] | None = None
+    for row in rows:
+        if len(row) < 8:
+            raise ValueError("Binance metrics row must contain at least 8 fields")
+        try:
+            measured_at = datetime.strptime(
+                str(row[0]).strip(), "%Y-%m-%d %H:%M:%S"
+            ).replace(tzinfo=UTC)
+        except ValueError as exc:
+            raise ValueError("invalid Binance metrics create_time") from exc
+        symbol = _normalize_symbol(str(row[1]))
+        if previous_time is not None and measured_at <= previous_time:
+            raise ValueError("metrics create_time must be strictly increasing")
+        if previous_symbol is not None and symbol != previous_symbol:
+            raise ValueError("metrics archive contains multiple symbols")
+        values: dict[str, Decimal] = {}
+        open_interest = _nonnegative_decimal(row[2], "open interest")
+        open_interest_value = _nonnegative_decimal(row[3], "open interest value")
+        if open_interest > 0 and open_interest_value > 0:
+            values["open_interest"] = open_interest
+            values["open_interest_value"] = open_interest_value
+        optional_ratios = (
+            (4, "top_trader_account_long_short_ratio", "top trader account long short ratio"),
+            (5, "top_trader_position_long_short_ratio", "top trader position long short ratio"),
+            (6, "global_long_short_ratio", "global long short ratio"),
+            (7, "taker_long_short_volume_ratio", "taker long short volume ratio"),
+        )
+        for index, name, label in optional_ratios:
+            if str(row[index]).strip():
+                values[name] = _positive_decimal(row[index], label)
+
+        changes: dict[str, Decimal] = {}
+        is_regular_interval = (
+            previous_time is not None
+            and measured_at - previous_time == timedelta(minutes=5)
+        )
+        change_specs = (
+            (
+                "top_trader_position_long_short_ratio",
+                "top_trader_position_change_5m",
+            ),
+            ("global_long_short_ratio", "global_long_short_change_5m"),
+            (
+                "taker_long_short_volume_ratio",
+                "taker_long_short_change_5m",
+            ),
+        )
+        if "open_interest" in values:
+            if (
+                is_regular_interval
+                and previous_values is not None
+                and "open_interest" in previous_values
+            ):
+                changes["open_interest_change_ratio_5m"] = (
+                    values["open_interest"] - previous_values["open_interest"]
+                ) / previous_values["open_interest"]
+        for value_name, change_name in change_specs:
+            if value_name not in values:
+                continue
+            if (
+                is_regular_interval
+                and previous_values is not None
+                and value_name in previous_values
+            ):
+                changes[change_name] = (
+                    values[value_name] - previous_values[value_name]
+                )
+        yield FeatureRow(
+            minute_end=measured_at,
+            available_at=measured_at,
+            source="metrics",
+            features={**values, **changes},
+        )
+        previous_time = measured_at
+        previous_symbol = symbol
+        previous_values = values
+
+
 def merge_feature_rows(
     base_rows: Iterable[FeatureRow],
     source_rows: Mapping[str, Iterable[FeatureRow]],
@@ -557,7 +669,7 @@ def merge_feature_rows(
     exact = {
         source: _rows_by_timestamp(rows, source)
         for source, rows in source_rows.items()
-        if source != "fundingRate"
+        if source not in {"fundingRate", "metrics"}
     }
     funding = sorted(
         _rows_by_timestamp(
@@ -567,6 +679,12 @@ def merge_feature_rows(
     )
     funding_index = 0
     current_funding: FeatureRow | None = None
+    metrics = sorted(
+        _rows_by_timestamp(source_rows.get("metrics", ()), "metrics").values(),
+        key=lambda row: row.available_at,
+    )
+    metrics_index = 0
+    current_metrics: FeatureRow | None = None
     domain_symbol = _domain_symbol(symbol)
 
     for base in base_rows:
@@ -576,7 +694,7 @@ def merge_feature_rows(
         selected = [base]
         unavailable = []
         for source in requested:
-            if source in {"klines", "fundingRate"}:
+            if source in {"klines", "fundingRate", "metrics"}:
                 continue
             row = exact.get(source, {}).get(close)
             if row is None:
@@ -592,6 +710,32 @@ def merge_feature_rows(
                 unavailable.append("fundingRate")
             else:
                 selected.append(current_funding)
+
+        if "metrics" in requested:
+            while (
+                metrics_index < len(metrics)
+                and metrics[metrics_index].available_at <= close
+            ):
+                current_metrics = metrics[metrics_index]
+                metrics_index += 1
+            if (
+                current_metrics is None
+                or close - current_metrics.available_at > METRICS_MAX_AGE
+            ):
+                unavailable.append("metrics")
+            else:
+                if current_metrics.available_at < close:
+                    current_metrics = FeatureRow(
+                        minute_end=current_metrics.minute_end,
+                        available_at=current_metrics.available_at,
+                        source=current_metrics.source,
+                        features={
+                            name: value
+                            for name, value in current_metrics.features.items()
+                            if not name.endswith("_change_5m")
+                        },
+                    )
+                selected.append(current_metrics)
 
         values = []
         names = set()
@@ -1014,6 +1158,8 @@ class HistoricalFeatureLoader:
             parsed = (parse_kline_feature_row(row) for row in rows)
         elif source in _PRICE_FEATURES:
             parsed = (parse_price_kline_row(row, source=source) for row in rows)
+        elif source == "metrics":
+            parsed = parse_metrics_rows(rows)
         else:
             parsed = parse_funding_rows(rows)
         for row in parsed:

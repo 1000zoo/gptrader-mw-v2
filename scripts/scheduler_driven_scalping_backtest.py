@@ -17,6 +17,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.validate_scalping_external_periods import PeriodSpec, load_period_market  # noqa: E402
+from scripts.deferred_strategy_registry import (  # noqa: E402
+    ensure_candidate_group_allowed,
+    ensure_candidate_ids_allowed,
+)
 from src.application.usecases.trade import (  # noqa: E402
     ClosePositionUseCase,
     ExecuteTradeCommand,
@@ -50,6 +54,11 @@ from src.domain.strategy.implementations.microstructure_alpha_strategy import ( 
     MultiTimeframeTrendPullbackStrategy,
     PremiumFundingReversionStrategy,
     SessionOpeningRangeStrategy,
+    InvertedSignalStrategy,
+    OpenInterestDivergenceStrategy,
+    OpenInterestImpulseStrategy,
+    PositioningCrowdingReversalStrategy,
+    GlobalRatioShockReversalStrategy,
 )
 from src.domain.strategy.implementations.volatility_compression_breakout_strategy import (  # noqa: E402
     VolatilityCompressionBreakoutStrategy,
@@ -67,7 +76,7 @@ from src.observability.logging import configure_runtime_logging  # noqa: E402
 
 SYMBOL = Symbol("BTC", "USDT")
 TIMEFRAME = Timeframe(1, "m")
-BACKTEST_ENGINE_VERSION = "scheduler-driven-scalping-v1"
+BACKTEST_ENGINE_VERSION = "scheduler-driven-scalping-v2"
 GENERATOR_ID = "scheduler-driven-live-scalp-multi-t1-r1-b4-tbr"
 CANDLE_LIMIT = 262
 INITIAL_EQUITY = Decimal("10000")
@@ -134,7 +143,16 @@ class SchedulerBacktestCandidate:
     equity_ratio: Decimal
     leverage: Decimal
     candle_limit: int = CANDLE_LIMIT
+    max_holding_bars: int | None = None
     guard: "DefensiveGuardConfig" = field(default_factory=lambda: DefensiveGuardConfig())
+
+    def __post_init__(self) -> None:
+        if self.max_holding_bars is not None and (
+            not isinstance(self.max_holding_bars, int)
+            or isinstance(self.max_holding_bars, bool)
+            or self.max_holding_bars <= 0
+        ):
+            raise ValueError("max_holding_bars must be a positive integer")
 
 
 @dataclass(frozen=True)
@@ -521,12 +539,26 @@ def main() -> None:
     parser.add_argument("--wf-test-end", default=None)
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--candidate-id", action="append", default=[])
-    parser.add_argument("--candidate-group", choices=("all", "exact", "alpha", "multi", "microstructure"), default="all")
+    parser.add_argument(
+        "--include-deferred",
+        action="store_true",
+        help="Allow intentional reproduction of a group in the deferred strategy registry.",
+    )
+    parser.add_argument(
+        "--candidate-group",
+        choices=("all", "exact", "alpha", "multi", "microstructure", "counter", "metrics", "discovered"),
+        default="all",
+    )
     parser.add_argument("--feature-cache", type=Path, default=None)
     parser.add_argument("--feature-cache-manifest", type=Path, default=None)
     parser.add_argument("--list-candidates", action="store_true")
     parser.add_argument("--manifest-path", type=Path, default=None)
     args = parser.parse_args()
+
+    ensure_candidate_group_allowed(
+        args.candidate_group,
+        include_deferred=args.include_deferred,
+    )
 
     symbol = _parse_symbol(args.symbol)
     if args.candidate_group == "exact":
@@ -537,6 +569,12 @@ def main() -> None:
         candidates = tuple(multi_frequency_candidates())
     elif args.candidate_group == "microstructure":
         candidates = tuple(microstructure_alpha_candidates())
+    elif args.candidate_group == "counter":
+        candidates = tuple(counter_microstructure_candidates())
+    elif args.candidate_group == "metrics":
+        candidates = tuple(metrics_positioning_candidates())
+    elif args.candidate_group == "discovered":
+        candidates = tuple(discovered_metrics_candidates())
     else:
         candidates = build_scheduler_candidates()
     candidates = validate_unique_candidate_ids(candidates)
@@ -577,17 +615,33 @@ def main() -> None:
             if args.wf_test_start and args.wf_test_end
             else WALK_FORWARD_FOLDS
         )
-        payload = run_walk_forward_search(market, candidates, folds=folds, symbol=symbol, market_feature_provider=feature_provider)
+        payload = run_walk_forward_search(
+            market,
+            candidates,
+            folds=folds,
+            symbol=symbol,
+            market_feature_provider=feature_provider,
+            include_deferred=args.include_deferred,
+        )
     elif args.train_test:
-        payload = run_train_test_search(market, candidates, symbol=symbol, market_feature_provider=feature_provider)
+        payload = run_train_test_search(
+            market,
+            candidates,
+            symbol=symbol,
+            market_feature_provider=feature_provider,
+            include_deferred=args.include_deferred,
+        )
     elif args.mode == "single":
+        if len(candidates) != 1:
+            raise ValueError("--mode single requires exactly one selected candidate")
         result = run_scheduler_driven_backtest(
             market,
             start_at=period.start_at,
             end_at=period.end_at,
-            candidate=default_candidate(),
+            candidate=candidates[0],
             symbol=symbol,
             market_feature_provider=feature_provider,
+            include_deferred=args.include_deferred,
         )
         payload = {"results": [result], "result_count": 1}
     else:
@@ -599,6 +653,7 @@ def main() -> None:
                 candidate=candidate,
                 symbol=symbol,
                 market_feature_provider=feature_provider,
+                include_deferred=args.include_deferred,
             )
             for candidate in candidates
         ]
@@ -618,8 +673,13 @@ def run_scheduler_driven_backtest(
     candidate: SchedulerBacktestCandidate | None = None,
     symbol: Symbol = SYMBOL,
     market_feature_provider: MarketFeatureProviderPort | None = None,
+    include_deferred: bool = False,
 ) -> dict[str, object]:
     candidate = candidate or default_candidate()
+    ensure_candidate_ids_allowed(
+        (candidate.candidate_id,),
+        include_deferred=include_deferred,
+    )
     feature_provider = (
         market_feature_provider
         if market_feature_provider is not None
@@ -670,7 +730,12 @@ def run_scheduler_driven_backtest(
     for index in range(start_index, len(selected.candles)):
         market_data.cursor = index
         if open_position is not None:
-            closed = maybe_close_position(open_position, selected, index)
+            closed = maybe_close_position(
+                open_position,
+                selected,
+                index,
+                max_holding_bars=candidate.max_holding_bars,
+            )
             if closed is not None:
                 trades.append(closed)
                 equity += closed.net_pnl
@@ -783,8 +848,13 @@ def run_train_test_search(
     *,
     symbol: Symbol = SYMBOL,
     market_feature_provider: MarketFeatureProviderPort | None = None,
+    include_deferred: bool = False,
 ) -> dict[str, object]:
     candidates = validate_unique_candidate_ids(candidates)
+    ensure_candidate_ids_allowed(
+        tuple(candidate.candidate_id for candidate in candidates),
+        include_deferred=include_deferred,
+    )
     rows = []
     for candidate in candidates:
         train = run_scheduler_driven_backtest(
@@ -794,6 +864,7 @@ def run_train_test_search(
             candidate=candidate,
             symbol=symbol,
             market_feature_provider=market_feature_provider,
+            include_deferred=include_deferred,
         )
         test = run_scheduler_driven_backtest(
             market,
@@ -802,6 +873,7 @@ def run_train_test_search(
             candidate=candidate,
             symbol=symbol,
             market_feature_provider=market_feature_provider,
+            include_deferred=include_deferred,
         )
         rows.append(
             {
@@ -827,8 +899,13 @@ def run_walk_forward_search(
     folds=WALK_FORWARD_FOLDS,
     symbol: Symbol = SYMBOL,
     market_feature_provider: MarketFeatureProviderPort | None = None,
+    include_deferred: bool = False,
 ) -> dict[str, object]:
     candidates = validate_unique_candidate_ids(candidates)
+    ensure_candidate_ids_allowed(
+        tuple(candidate.candidate_id for candidate in candidates),
+        include_deferred=include_deferred,
+    )
     fold_payloads = []
     candidate_monthly_fold_series = []
     by_candidate: dict[str, list[dict[str, object]]] = {candidate.candidate_id: [] for candidate in candidates}
@@ -842,6 +919,7 @@ def run_walk_forward_search(
                 candidate=candidate,
                 symbol=symbol,
                 market_feature_provider=market_feature_provider,
+                include_deferred=include_deferred,
             )
             row = {
                 "fold": fold_index,
@@ -1031,6 +1109,20 @@ def build_strategies(candidate: SchedulerBacktestCandidate) -> tuple[Strategy, .
 
 
 def build_strategy(spec: StrategyCandidateSpec) -> Strategy:
+    counter_types = {
+        "counter_mtf": MultiTimeframeTrendPullbackStrategy,
+        "counter_flow_breakout": FlowConfirmedBreakoutStrategy,
+        "counter_flow_exhaustion": FlowExhaustionReversalStrategy,
+        "counter_session_range": SessionOpeningRangeStrategy,
+        "counter_micro_router": MicrostructureRegimeRouterStrategy,
+    }
+    counter_type = counter_types.get(spec.kind)
+    if counter_type is not None:
+        inner = counter_type(**spec.params)
+        return InvertedSignalStrategy(
+            inner=inner,
+            name=f"counter-{inner.name}",
+        )
     if spec.kind == "regime_router":
         return RegimeRouterScalperStrategy(**spec.params)
     if spec.kind == "compression":
@@ -1051,6 +1143,14 @@ def build_strategy(spec: StrategyCandidateSpec) -> Strategy:
         return SessionOpeningRangeStrategy(**spec.params)
     if spec.kind == "micro_router":
         return MicrostructureRegimeRouterStrategy(**spec.params)
+    if spec.kind == "oi_impulse":
+        return OpenInterestImpulseStrategy(**spec.params)
+    if spec.kind == "positioning_crowding":
+        return PositioningCrowdingReversalStrategy(**spec.params)
+    if spec.kind == "oi_divergence":
+        return OpenInterestDivergenceStrategy(**spec.params)
+    if spec.kind == "global_ratio_shock":
+        return GlobalRatioShockReversalStrategy(**spec.params)
     raise ValueError(f"unsupported strategy candidate kind: {spec.kind}")
 
 
@@ -1132,6 +1232,151 @@ def microstructure_alpha_candidates() -> tuple[SchedulerBacktestCandidate, ...]:
         for family, kind, variants in family_variants
         for strength in ("balanced", "strict")
         for profile, take_profit, stop_loss, equity_ratio, leverage in exit_profiles
+    )
+
+
+def counter_microstructure_candidates() -> tuple[SchedulerBacktestCandidate, ...]:
+    excluded_kinds = {"premium_funding"}
+    return tuple(
+        SchedulerBacktestCandidate(
+            candidate_id=candidate.candidate_id.replace("micro-", "counter-", 1),
+            strategies=tuple(
+                StrategyCandidateSpec(
+                    kind=f"counter_{spec.kind}",
+                    params=dict(spec.params),
+                )
+                for spec in candidate.strategies
+            ),
+            take_profit_ratio=candidate.take_profit_ratio,
+            stop_loss_ratio=candidate.stop_loss_ratio,
+            equity_ratio=candidate.equity_ratio,
+            leverage=candidate.leverage,
+            candle_limit=candidate.candle_limit,
+            max_holding_bars=candidate.max_holding_bars,
+            guard=candidate.guard,
+        )
+        for candidate in microstructure_alpha_candidates()
+        if all(spec.kind not in excluded_kinds for spec in candidate.strategies)
+    )
+
+
+def metrics_positioning_candidates() -> tuple[SchedulerBacktestCandidate, ...]:
+    families: tuple[tuple[str, str, dict[str, dict[str, object]]], ...] = (
+        (
+            "oi-impulse",
+            "oi_impulse",
+            {
+                "balanced": {
+                    "min_price_return": Decimal("0.0015"),
+                    "min_open_interest_change": Decimal("0.0010"),
+                    "taker_ratio_edge": Decimal("0.05"),
+                    "confidence": Decimal("0.72"),
+                },
+                "strict": {
+                    "min_price_return": Decimal("0.0025"),
+                    "min_open_interest_change": Decimal("0.0020"),
+                    "taker_ratio_edge": Decimal("0.10"),
+                    "confidence": Decimal("0.78"),
+                },
+            },
+        ),
+        (
+            "positioning-crowding",
+            "positioning_crowding",
+            {
+                "balanced": {
+                    "crowded_short_ratio": Decimal("0.90"),
+                    "crowded_long_ratio": Decimal("1.15"),
+                    "taker_ratio_edge": Decimal("0.05"),
+                    "min_rejection_wick_ratio": Decimal("0.25"),
+                    "confidence": Decimal("0.72"),
+                },
+                "strict": {
+                    "crowded_short_ratio": Decimal("0.80"),
+                    "crowded_long_ratio": Decimal("1.30"),
+                    "taker_ratio_edge": Decimal("0.10"),
+                    "min_rejection_wick_ratio": Decimal("0.35"),
+                    "confidence": Decimal("0.78"),
+                },
+            },
+        ),
+        (
+            "oi-divergence",
+            "oi_divergence",
+            {
+                "balanced": {
+                    "min_price_return": Decimal("0.0015"),
+                    "min_open_interest_contraction": Decimal("0.0010"),
+                    "taker_ratio_edge": Decimal("0.05"),
+                    "confidence": Decimal("0.70"),
+                },
+                "strict": {
+                    "min_price_return": Decimal("0.0025"),
+                    "min_open_interest_contraction": Decimal("0.0020"),
+                    "taker_ratio_edge": Decimal("0.10"),
+                    "confidence": Decimal("0.76"),
+                },
+            },
+        ),
+    )
+    exits = (
+        ("tight", Decimal("0.0030"), Decimal("0.0020"), Decimal("0.04"), Decimal("3")),
+        ("balanced", Decimal("0.0050"), Decimal("0.0035"), Decimal("0.05"), Decimal("4")),
+        ("wide", Decimal("0.0080"), Decimal("0.0050"), Decimal("0.06"), Decimal("4")),
+    )
+    guard = DefensiveGuardConfig(
+        min_minutes_between_entries=5,
+        max_daily_trades=20,
+    )
+    return tuple(
+        SchedulerBacktestCandidate(
+            candidate_id=f"metrics-{family}-{strength}-{profile}",
+            strategies=(StrategyCandidateSpec(kind, dict(variants[strength])),),
+            take_profit_ratio=take_profit,
+            stop_loss_ratio=stop_loss,
+            equity_ratio=equity_ratio,
+            leverage=leverage,
+            guard=guard,
+        )
+        for family, kind, variants in families
+        for strength in ("balanced", "strict")
+        for profile, take_profit, stop_loss, equity_ratio, leverage in exits
+    )
+
+
+def discovered_metrics_candidates() -> tuple[SchedulerBacktestCandidate, ...]:
+    guard = DefensiveGuardConfig(
+        min_minutes_between_entries=5,
+        max_daily_trades=20,
+    )
+    specs = (
+        ("up", 15),
+        ("up", 30),
+        ("up", 60),
+        ("down", 30),
+        ("down", 60),
+    )
+    return tuple(
+        SchedulerBacktestCandidate(
+            candidate_id=f"discovered-global-{direction}-reversal-hold{holding}",
+            strategies=(
+                StrategyCandidateSpec(
+                    "global_ratio_shock",
+                    {
+                        "min_ratio_change": Decimal("0.05"),
+                        "shock_direction": direction,
+                        "confidence": Decimal("0.74"),
+                    },
+                ),
+            ),
+            take_profit_ratio=Decimal("0.10"),
+            stop_loss_ratio=Decimal("0.10"),
+            equity_ratio=Decimal("0.02"),
+            leverage=Decimal("2"),
+            max_holding_bars=holding,
+            guard=guard,
+        )
+        for direction, holding in specs
     )
 
 
@@ -2243,7 +2488,11 @@ def maybe_close_position(
     position: BacktestPosition,
     market: MarketSnapshot,
     index: int,
+    *,
+    max_holding_bars: int | None = None,
 ) -> BacktestTrade | None:
+    if max_holding_bars is not None and max_holding_bars <= 0:
+        raise ValueError("max_holding_bars must be positive")
     candle = market.candles[index]
     if position.direction is SignalDirection.LONG:
         if candle.low_price <= position.stop_loss:
@@ -2255,6 +2504,16 @@ def maybe_close_position(
             return close_trade(position, _exit_fill_price(position.stop_loss, position.direction), "stop_loss", index)
         if candle.low_price <= position.take_profit:
             return close_trade(position, _exit_fill_price(position.take_profit, position.direction), "take_profit", index)
+    if (
+        max_holding_bars is not None
+        and index - position.opened_index >= max_holding_bars
+    ):
+        return close_trade(
+            position,
+            _exit_fill_price(candle.close_price, position.direction),
+            "max_holding_time",
+            index,
+        )
     return None
 
 
@@ -2346,6 +2605,7 @@ def candidate_payload(candidate: SchedulerBacktestCandidate) -> dict[str, object
         "equity_ratio": str(candidate.equity_ratio),
         "leverage": str(candidate.leverage),
         "candle_limit": candidate.candle_limit,
+        "max_holding_bars": candidate.max_holding_bars,
         "strategies": [
             {"kind": spec.kind, "params": _stringify(spec.params)}
             for spec in candidate.strategies

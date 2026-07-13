@@ -1,5 +1,6 @@
 import hashlib
 import json
+import sys
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from scripts.scheduler_driven_scalping_backtest import (
+    BacktestPosition,
     SchedulerBacktestCandidate,
     StrategyCandidateSpec,
     alpha_entry_candidates,
@@ -14,6 +16,10 @@ from scripts.scheduler_driven_scalping_backtest import (
     build_walk_forward_folds,
     candidate_definition_hash,
     candidate_manifest,
+    counter_microstructure_candidates,
+    metrics_positioning_candidates,
+    discovered_metrics_candidates,
+    maybe_close_position,
     load_market_feature_cache,
     microstructure_alpha_candidates,
     run_walk_forward_search,
@@ -22,6 +28,7 @@ from scripts.scheduler_driven_scalping_backtest import (
     write_candidate_manifest,
 )
 from src.domain.market import Candle, MarketSnapshot, Symbol, Timeframe
+from src.domain.signal import SignalDirection
 from src.domain.strategy.implementations.microstructure_alpha_strategy import (
     FlowConfirmedBreakoutStrategy,
     FlowExhaustionReversalStrategy,
@@ -29,7 +36,223 @@ from src.domain.strategy.implementations.microstructure_alpha_strategy import (
     MultiTimeframeTrendPullbackStrategy,
     PremiumFundingReversionStrategy,
     SessionOpeningRangeStrategy,
+    InvertedSignalStrategy,
+    OpenInterestDivergenceStrategy,
+    OpenInterestImpulseStrategy,
+    PositioningCrowdingReversalStrategy,
 )
+
+
+def test_deferred_strategy_registry_is_complete_and_evidence_exists() -> None:
+    from scripts.deferred_strategy_registry import (
+        REGISTRY_PATH,
+        load_deferred_strategy_registry,
+    )
+
+    payload = load_deferred_strategy_registry()
+    project_root = REGISTRY_PATH.parents[2]
+
+    assert {family["candidate_group"] for family in payload["families"]} == {
+        "all",
+        "exact",
+        "multi",
+        "alpha",
+        "microstructure",
+        "counter",
+        "metrics",
+        "discovered",
+    }
+    for family in payload["families"]:
+        assert family["status"] in {"failed", "deferred", "superseded"}
+        assert family["reason"]
+        assert family["revisit_only_if"]
+        for evidence in family["evidence"]:
+            assert (project_root / evidence).is_file(), evidence
+
+
+def test_scheduler_cli_blocks_deferred_default_group(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    monkeypatch.setattr(sys, "argv", ["scheduler_driven_scalping_backtest.py", "--list-candidates"])
+
+    with pytest.raises(ValueError, match="candidate group 'all' is deferred"):
+        module.main()
+
+
+def test_scheduler_cli_can_list_deferred_candidate_with_explicit_opt_in(
+    monkeypatch,
+    capsys,
+) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "scheduler_driven_scalping_backtest.py",
+            "--candidate-group",
+            "discovered",
+            "--candidate-id",
+            "discovered-global-up-reversal-hold60",
+            "--include-deferred",
+            "--list-candidates",
+        ],
+    )
+
+    module.main()
+
+    payload = json.loads(capsys.readouterr().out)
+    assert [candidate["candidate_id"] for candidate in payload["candidates"]] == [
+        "discovered-global-up-reversal-hold60"
+    ]
+
+
+def test_programmatic_backtest_requires_opt_in_for_deferred_candidate() -> None:
+    candidate = discovered_metrics_candidates()[0]
+    market = _flat_market()
+
+    with pytest.raises(ValueError, match="candidate 'discovered-global-up-reversal-hold15' is deferred"):
+        run_scheduler_driven_backtest(
+            market,
+            start_at=market.candles[0].opened_at,
+            end_at=market.candles[-1].closed_at,
+            candidate=candidate,
+        )
+
+    result = run_scheduler_driven_backtest(
+        market,
+        start_at=market.candles[0].opened_at,
+        end_at=market.candles[-1].closed_at,
+        candidate=candidate,
+        include_deferred=True,
+    )
+
+    assert result["candidate_id"] == candidate.candidate_id
+
+
+def test_programmatic_search_paths_require_opt_in_for_deferred_candidates() -> None:
+    from scripts.scheduler_driven_scalping_backtest import run_train_test_search
+
+    candidate = microstructure_alpha_candidates()[0]
+
+    with pytest.raises(ValueError, match="candidate 'micro-mtf-balanced-tight' is deferred"):
+        run_walk_forward_search(_flat_market(), (candidate,), folds=())
+    with pytest.raises(ValueError, match="candidate 'micro-mtf-balanced-tight' is deferred"):
+        run_train_test_search(_flat_market(), (candidate,))
+
+
+def test_every_legacy_aggregate_candidate_is_deferred() -> None:
+    from scripts.deferred_strategy_registry import ensure_candidate_ids_allowed
+    from scripts.scheduler_driven_scalping_backtest import build_scheduler_candidates
+
+    candidates = build_scheduler_candidates()
+
+    for candidate in candidates:
+        with pytest.raises(ValueError, match="is deferred"):
+            ensure_candidate_ids_allowed((candidate.candidate_id,))
+
+
+def test_programmatic_default_candidate_requires_deferred_opt_in() -> None:
+    market = _flat_market()
+
+    with pytest.raises(ValueError, match="balanced-tp012-sl010-balanced-guard-a"):
+        run_scheduler_driven_backtest(
+            market,
+            start_at=market.candles[0].opened_at,
+            end_at=market.candles[-1].closed_at,
+        )
+
+
+def test_scheduler_single_mode_runs_the_selected_candidate(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    selected_id = "discovered-global-up-reversal-hold60"
+    captured = []
+    monkeypatch.setattr(module, "load_period_market", lambda period: _flat_market())
+    monkeypatch.setattr(module, "RESULTS_PATH", tmp_path / "results.json")
+    monkeypatch.setattr(module, "SUMMARY_PATH", tmp_path / "summary.md")
+    monkeypatch.setattr(module, "markdown_summary", lambda payload, limit: "summary")
+    monkeypatch.setattr(
+        module,
+        "run_scheduler_driven_backtest",
+        lambda *args, **kwargs: captured.append(kwargs["candidate"].candidate_id)
+        or {"candidate_id": kwargs["candidate"].candidate_id},
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "scheduler_driven_scalping_backtest.py",
+            "--mode",
+            "single",
+            "--candidate-group",
+            "discovered",
+            "--candidate-id",
+            selected_id,
+            "--include-deferred",
+        ],
+    )
+
+    module.main()
+
+    assert captured == [selected_id]
+
+
+def test_maybe_close_position_enforces_max_holding_bars() -> None:
+    opened_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    symbol = Symbol("BTC", "USDT")
+    candles = tuple(
+        Candle(
+            symbol=symbol,
+            timeframe=Timeframe(1, "m"),
+            opened_at=opened_at + timedelta(minutes=index),
+            closed_at=opened_at + timedelta(minutes=index + 1),
+            open_price=Decimal("100"),
+            high_price=Decimal("101"),
+            low_price=Decimal("99"),
+            close_price=Decimal("100"),
+            volume=Decimal("1"),
+        )
+        for index in range(3)
+    )
+    position = BacktestPosition(
+        direction=SignalDirection.LONG,
+        entry_price=Decimal("100"),
+        quantity=Decimal("1"),
+        take_profit=Decimal("110"),
+        stop_loss=Decimal("90"),
+        opened_index=0,
+        entry_fee=Decimal("0.04"),
+        margin=Decimal("50"),
+    )
+
+    trade = maybe_close_position(
+        position,
+        MarketSnapshot(candles),
+        2,
+        max_holding_bars=2,
+    )
+
+    assert trade is not None
+    assert trade.exit_reason == "max_holding_time"
+    assert trade.holding_bars == 2
+
+
+@pytest.mark.parametrize("value", (0, -1, True))
+def test_candidate_rejects_invalid_max_holding_bars(value: object) -> None:
+    with pytest.raises(ValueError, match="max_holding_bars"):
+        SchedulerBacktestCandidate(
+            candidate_id="invalid-holding",
+            strategies=(StrategyCandidateSpec("mtf", {}),),
+            take_profit_ratio=Decimal("0.01"),
+            stop_loss_ratio=Decimal("0.01"),
+            equity_ratio=Decimal("0.01"),
+            leverage=Decimal("1"),
+            max_holding_bars=value,
+        )
 
 
 def test_scheduler_driven_backtest_uses_scheduler_path_without_external_io() -> None:
@@ -55,6 +278,7 @@ def test_scheduler_driven_backtest_uses_scheduler_path_without_external_io() -> 
         MarketSnapshot(candles),
         start_at=candles[0].opened_at,
         end_at=candles[-1].closed_at,
+        include_deferred=True,
     )
 
     assert result["engine"] == "scheduler_driven"
@@ -87,6 +311,7 @@ def test_scheduler_driven_backtest_accepts_non_btc_symbol() -> None:
         start_at=candles[0].opened_at,
         end_at=candles[-1].closed_at,
         symbol=symbol,
+        include_deferred=True,
     )
 
     assert result["symbol"] == "ETHUSDT"
@@ -284,6 +509,51 @@ def test_microstructure_candidates_construct_all_six_strategy_classes() -> None:
     assert set(by_kind) == set(expected)
     for kind, strategy_type in expected.items():
         assert isinstance(build_strategies(by_kind[kind])[0], strategy_type)
+
+
+def test_counter_microstructure_candidate_universe_has_five_families() -> None:
+    candidates = counter_microstructure_candidates()
+    ids = [candidate.candidate_id for candidate in candidates]
+
+    assert len(candidates) == 30
+    assert len(set(ids)) == 30
+    for family in (
+        "mtf",
+        "flow-breakout",
+        "flow-exhaustion",
+        "session-range",
+        "micro-router",
+    ):
+        for strength in ("balanced", "strict"):
+            for profile in ("tight", "balanced", "wide"):
+                candidate_id = f"counter-{family}-{strength}-{profile}"
+                assert candidate_id in ids
+                candidate = next(item for item in candidates if item.candidate_id == candidate_id)
+                assert isinstance(build_strategies(candidate)[0], InvertedSignalStrategy)
+
+
+def test_metrics_positioning_candidate_universe_has_three_families() -> None:
+    candidates = metrics_positioning_candidates()
+    by_kind = {candidate.strategies[0].kind: candidate for candidate in candidates}
+
+    assert len(candidates) == 18
+    assert len({candidate.candidate_id for candidate in candidates}) == 18
+    expected = {
+        "oi_impulse": OpenInterestImpulseStrategy,
+        "positioning_crowding": PositioningCrowdingReversalStrategy,
+        "oi_divergence": OpenInterestDivergenceStrategy,
+    }
+    assert set(by_kind) == set(expected)
+    for kind, strategy_type in expected.items():
+        assert isinstance(build_strategies(by_kind[kind])[0], strategy_type)
+
+
+def test_discovered_metrics_candidates_use_time_exit() -> None:
+    candidates = discovered_metrics_candidates()
+
+    assert len(candidates) == 5
+    assert {candidate.max_holding_bars for candidate in candidates} == {15, 30, 60}
+    assert all(candidate.take_profit_ratio == Decimal("0.10") for candidate in candidates)
 
 
 def _write_feature_cache(
@@ -544,6 +814,7 @@ def test_backtest_injects_same_feature_provider_and_exports_provenance(monkeypat
         start_at=market.candles[0].opened_at,
         end_at=market.candles[-1].closed_at,
         market_feature_provider=provider,
+        include_deferred=True,
     )
 
     assert captured == [provider, provider]

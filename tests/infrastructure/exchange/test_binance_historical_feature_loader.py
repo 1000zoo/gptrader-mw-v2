@@ -29,6 +29,7 @@ from src.infrastructure.exchange.binance.research_data.historical_feature_loader
     merge_feature_rows,
     parse_funding_rows,
     parse_kline_feature_row,
+    parse_metrics_rows,
     parse_price_kline_row,
     write_feature_cache,
 )
@@ -70,6 +71,11 @@ def test_archive_urls_use_binance_usdm_filename_patterns():
     )
     with pytest.raises(ValueError, match="monthly only"):
         archive_url("fundingRate", "BTCUSDT", "2026-01-02", "daily")
+    assert archive_url("metrics", "BTCUSDT", "2026-01-02", "daily").endswith(
+        "/daily/metrics/BTCUSDT/BTCUSDT-metrics-2026-01-02.zip"
+    )
+    with pytest.raises(ValueError, match="daily only"):
+        archive_url("metrics", "BTCUSDT", "2026-01", "monthly")
 
 
 def test_archive_periods_are_end_exclusive_and_current_month_uses_daily_fallback():
@@ -103,6 +109,24 @@ def test_funding_current_partial_period_is_not_planned_as_daily_archive():
     )
     assert [(item.granularity, item.period) for item in requests] == [
         ("monthly", "2026-06")
+    ]
+
+
+def test_metrics_archive_periods_are_always_daily() -> None:
+    requests = list(
+        iter_archive_requests(
+            "metrics",
+            "BTCUSDT",
+            _dt("2026-01-30T00:00:00+00:00"),
+            _dt("2026-02-02T00:00:00+00:00"),
+            now=_dt("2026-07-04T12:00:00+00:00"),
+        )
+    )
+
+    assert [(item.granularity, item.period) for item in requests] == [
+        ("daily", "2026-01-30"),
+        ("daily", "2026-01-31"),
+        ("daily", "2026-02-01"),
     ]
 
 
@@ -512,6 +536,97 @@ def test_funding_asof_alignment_rejects_future_and_stale_values():
         )
     )[0]
     assert "fundingRate" in stale.unavailable_sources
+
+
+def test_metrics_parser_derives_positioning_changes_and_asof_carries_five_minutes():
+    rows = list(
+        parse_metrics_rows(
+            [
+                [
+                    "2026-06-01 00:05:00",
+                    "BTCUSDT",
+                    "100",
+                    "10000",
+                    "1.5",
+                    "1.4",
+                    "1.3",
+                    "1.2",
+                ],
+                [
+                    "2026-06-01 00:10:00",
+                    "BTCUSDT",
+                    "110",
+                    "11000",
+                    "1.6",
+                    "1.5",
+                    "1.2",
+                    "0.8",
+                ],
+            ]
+        )
+    )
+
+    assert rows[1].features["open_interest_change_ratio_5m"] == Decimal("0.1")
+    assert rows[1].features["global_long_short_change_5m"] == Decimal("-0.1")
+    assert rows[1].features["taker_long_short_change_5m"] == Decimal("-0.4")
+
+    carried = list(
+        merge_feature_rows(
+            [_base_row(_dt("2026-06-01T00:09:00+00:00"))],
+            {"metrics": rows},
+            requested_sources=("klines", "metrics"),
+            symbol="BTCUSDT",
+        )
+    )[0]
+    assert carried.require("open_interest").value == Decimal("100")
+    assert carried.require("open_interest").available_at == _dt(
+        "2026-06-01T00:05:00+00:00"
+    )
+    assert carried.get("open_interest_change_ratio_5m") is None
+
+    stale = list(
+        merge_feature_rows(
+            [_base_row(_dt("2026-06-01T00:10:00.001+00:00"))],
+            {"metrics": rows[:1]},
+            requested_sources=("klines", "metrics"),
+            symbol="BTCUSDT",
+        )
+    )[0]
+    assert "metrics" in stale.unavailable_sources
+
+
+def test_metrics_parser_omits_exchange_outage_placeholders() -> None:
+    row = next(
+        parse_metrics_rows(
+            [
+                [
+                    "2025-07-21 16:31:26",
+                    "BTCUSDT",
+                    "0E-16",
+                    "0E-16",
+                    "",
+                    "",
+                    "",
+                    "1.33937400",
+                ]
+            ]
+        )
+    )
+
+    assert "open_interest" not in row.features
+    assert "open_interest_change_ratio_5m" not in row.features
+    assert "global_long_short_ratio" not in row.features
+    assert row.features["taker_long_short_volume_ratio"] == Decimal("1.33937400")
+
+
+def test_metrics_parser_omits_changes_without_exact_predecessor() -> None:
+    row = next(
+        parse_metrics_rows(
+            [["2026-06-01 00:05:00", "BTCUSDT", "100", "10000", "1.1", "1.2", "1.3", "1.4"]]
+        )
+    )
+
+    assert not any(name.endswith("_change_5m") for name in row.features)
 
 
 def test_funding_archive_value_at_final_close_is_included(tmp_path):

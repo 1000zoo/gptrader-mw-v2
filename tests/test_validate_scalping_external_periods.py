@@ -1,13 +1,63 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
+import zipfile
+
+import pytest
 
 from scripts.validate_scalping_external_periods import (
     BTC_RECHECK_PERIODS,
     PeriodSpec,
     candle_from_record,
+    download_archive_candles,
     end_exclusive,
     summarize_period_result,
 )
+
+
+def test_download_archive_candles_prefers_local_binance_raw_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    archive_root = tmp_path / "raw" / "klines"
+    archive_path = archive_root / "BTCUSDT" / "BTCUSDT-1m-2025-07.zip"
+    archive_path.parent.mkdir(parents=True)
+    csv_path = "BTCUSDT-1m-2025-07.csv"
+    row = [
+        "1751328000000",
+        "100",
+        "101",
+        "99",
+        "100.5",
+        "10",
+        "1751328059999",
+        "1000",
+        "20",
+        "5",
+        "500",
+        "0",
+    ]
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(csv_path, ",".join(row) + "\n")
+
+    def fail_network(*args: object, **kwargs: object) -> None:
+        raise AssertionError("network should not be used for a cached archive")
+
+    monkeypatch.setattr(
+        "scripts.validate_scalping_external_periods.urlopen",
+        fail_network,
+    )
+
+    candles = download_archive_candles(
+        "https://data.binance.vision/data/futures/um/monthly/klines/"
+        "BTCUSDT/1m/BTCUSDT-1m-2025-07.zip",
+        "BTCUSDT",
+        archive_cache_root=archive_root,
+    )
+
+    assert len(candles) == 1
+    assert candles[0].open_price == Decimal("100")
+    assert candles[0].closed_at == datetime(2025, 7, 1, 0, 1, tzinfo=timezone.utc)
 
 
 def test_end_exclusive_includes_requested_end_date() -> None:

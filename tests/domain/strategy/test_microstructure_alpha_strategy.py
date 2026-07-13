@@ -18,10 +18,16 @@ from src.domain.strategy.implementations import (
     FlowExhaustionReversalStrategy,
     MicrostructureRegimeRouterStrategy,
     MultiTimeframeTrendPullbackStrategy,
+    OpenInterestDivergenceStrategy,
+    OpenInterestImpulseStrategy,
+    PositioningCrowdingReversalStrategy,
+    GlobalRatioShockReversalStrategy,
     PremiumFundingReversionStrategy,
     SessionOpeningRangeStrategy,
 )
 from src.domain.strategy.implementations.microstructure_alpha_strategy import (
+    InvertedSignalStrategy,
+    _closed_bars,
     _countertrend_pullback_depths,
 )
 
@@ -29,6 +35,19 @@ from src.domain.strategy.implementations.microstructure_alpha_strategy import (
 SYMBOL = Symbol("BTC", "USDT")
 TIMEFRAME = Timeframe(1, "m")
 START = datetime(2026, 1, 2, tzinfo=timezone.utc)
+
+
+@dataclass(frozen=True)
+class _FixedSignalStrategy:
+    name: str
+    signal: Signal
+
+    def evaluate(self, context: StrategyContext) -> StrategyResult:
+        return StrategyResult(
+            name=self.name,
+            signal=self.signal,
+            metadata={"source": "fixture"},
+        )
 
 
 def _candle(
@@ -83,6 +102,118 @@ def _flat(count: int, price: Decimal = Decimal("100")) -> tuple[Candle, ...]:
         )
         for index in range(count)
     )
+
+
+def test_closed_bars_can_limit_aggregation_to_required_recent_bars() -> None:
+    candles = _flat(120)
+
+    bars = _closed_bars(
+        candles,
+        5,
+        candles[-1].closed_at,
+        max_bars=2,
+    )
+
+    assert len(bars) == 2
+    assert bars[0].opened_at == START + timedelta(minutes=110)
+    assert bars[-1].closed_at == START + timedelta(minutes=120)
+
+
+@pytest.mark.parametrize(
+    ("original", "expected"),
+    (
+        (SignalDirection.LONG, SignalDirection.SHORT),
+        (SignalDirection.SHORT, SignalDirection.LONG),
+        (SignalDirection.WAIT, SignalDirection.WAIT),
+    ),
+)
+def test_inverted_signal_strategy_swaps_entry_direction_only(
+    original: SignalDirection,
+    expected: SignalDirection,
+) -> None:
+    signal = (
+        Signal.wait({"signal": "fixture"})
+        if original is SignalDirection.WAIT
+        else Signal(original, Decimal("0.73"), metadata={"signal": "fixture"})
+    )
+    strategy = InvertedSignalStrategy(
+        inner=_FixedSignalStrategy("inner", signal),
+        name="counter-inner",
+    )
+
+    result = strategy.evaluate(_context(_flat(2)))
+
+    assert result.name == "counter-inner"
+    assert result.signal.direction is expected
+    assert result.signal.confidence == signal.confidence
+    assert result.signal.metadata == signal.metadata
+    assert result.metadata["source"] == "fixture"
+    assert result.metadata["inverted_from"] == original.value
+
+
+def test_open_interest_impulse_requires_price_oi_and_taker_alignment() -> None:
+    candles = _series([Decimal("0.001")] * 6)
+    result = OpenInterestImpulseStrategy().evaluate(
+        _context(
+            candles,
+            (
+                ("open_interest_change_ratio_5m", "0.003", "metrics"),
+                ("taker_long_short_volume_ratio", "1.25", "metrics"),
+            ),
+        )
+    )
+
+    assert result.signal.direction is SignalDirection.LONG
+
+
+def test_positioning_crowding_reversal_fades_crowded_shorts_on_rejection() -> None:
+    candles = _flat(5) + (
+        _candle(
+            5,
+            open_price=Decimal("99.8"),
+            high=Decimal("100.2"),
+            low=Decimal("98"),
+            close=Decimal("100.1"),
+        ),
+    )
+    result = PositioningCrowdingReversalStrategy().evaluate(
+        _context(
+            candles,
+            (
+                ("top_trader_position_long_short_ratio", "0.75", "metrics"),
+                ("global_long_short_ratio", "0.75", "metrics"),
+                ("taker_long_short_volume_ratio", "1.20", "metrics"),
+            ),
+        )
+    )
+
+    assert result.signal.direction is SignalDirection.LONG
+
+
+def test_open_interest_divergence_fades_price_drop_when_oi_contracts() -> None:
+    candles = _series([Decimal("-0.001")] * 6)
+    result = OpenInterestDivergenceStrategy().evaluate(
+        _context(
+            candles,
+            (
+                ("open_interest_change_ratio_5m", "-0.003", "metrics"),
+                ("taker_long_short_volume_ratio", "1.15", "metrics"),
+            ),
+        )
+    )
+
+    assert result.signal.direction is SignalDirection.LONG
+
+
+def test_global_ratio_shock_reversal_fades_rapid_long_build() -> None:
+    result = GlobalRatioShockReversalStrategy(shock_direction="up").evaluate(
+        _context(
+            _flat(2),
+            (("global_long_short_change_5m", "0.06", "metrics"),),
+        )
+    )
+
+    assert result.signal.direction is SignalDirection.SHORT
 
 
 def _in_timezone(

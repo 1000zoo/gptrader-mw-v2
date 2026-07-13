@@ -108,7 +108,7 @@ class RunStrategyBacktestCycleUseCase:
             take_profit_stop_loss_strategy=self._take_profit_stop_loss_strategy,
             position_sizing_strategy=self._position_sizing_strategy,
         ).execute(
-            BacktestStrategyCommand(
+            BacktestStrategyCommand( 
                 target_id=spec.strategy_id,
                 symbol=spec.symbol,
                 timeframe=spec.timeframe,

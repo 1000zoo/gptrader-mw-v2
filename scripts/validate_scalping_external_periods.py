@@ -34,6 +34,7 @@ DEFAULT_SLIPPAGE_RATE = Decimal("0.0002")
 RESULTS_PATH = Path("docs/backtests/scalping-external-period-validation.json")
 SUMMARY_PATH = Path("docs/backtests/scalping-external-period-validation.md")
 CACHE_DIR = Path("docs/backtests/cache/external-periods")
+RAW_KLINE_ARCHIVE_DIR = Path(".research-data/binance-usdm/raw/klines")
 
 
 PERIODS = (
@@ -291,15 +292,24 @@ def load_public_futures_archives(*, symbol: str, start_at: datetime, end_at: dat
     return tuple(unique.values())
 
 
-def download_archive_candles(url: str, symbol_value: str) -> tuple[Candle, ...]:
-    try:
-        with urlopen(url, timeout=60) as response:
-            payload = response.read()
-    except HTTPError as exc:
-        if exc.code == 404:
-            return ()
-        raise
-    with zipfile.ZipFile(BytesIO(payload)) as archive:
+def download_archive_candles(
+    url: str,
+    symbol_value: str,
+    *,
+    archive_cache_root: Path = RAW_KLINE_ARCHIVE_DIR,
+) -> tuple[Candle, ...]:
+    cached_path = Path(archive_cache_root) / symbol_value.upper() / Path(url).name
+    if cached_path.exists():
+        archive_source: Path | BytesIO = cached_path
+    else:
+        try:
+            with urlopen(url, timeout=60) as response:
+                archive_source = BytesIO(response.read())
+        except HTTPError as exc:
+            if exc.code == 404:
+                return ()
+            raise
+    with zipfile.ZipFile(archive_source) as archive:
         name = archive.namelist()[0]
         with archive.open(name) as raw:
             reader = csv.reader(TextIOWrapper(raw, encoding="utf-8"))

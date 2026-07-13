@@ -233,3 +233,5 @@ docs/backtests/cache/
 
 .idea/
 python_test/
+
+docs/backtests

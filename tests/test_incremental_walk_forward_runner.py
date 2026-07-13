@@ -382,6 +382,7 @@ def test_incremental_runner_can_select_alpha_candidate_group() -> None:
     candidates = _select_candidates(
         "alpha",
         ("alpha-sweep-tp0045-sl0040-e0060-l5-alpha-open",),
+        include_deferred=True,
     )
 
     assert [candidate.candidate_id for candidate in candidates] == [
@@ -389,12 +390,108 @@ def test_incremental_runner_can_select_alpha_candidate_group() -> None:
     ]
 
 
+def test_incremental_runner_rejects_deferred_candidate_group_without_opt_in() -> None:
+    from scripts.incremental_walk_forward_runner import _select_candidates
+
+    with pytest.raises(ValueError, match="deferred-strategy-registry.json"):
+        _select_candidates("alpha", ())
+
+
+@pytest.mark.parametrize(
+    "candidate_group",
+    ("exact", "multi", "alpha", "microstructure", "counter", "metrics", "discovered"),
+)
+def test_incremental_runner_blocks_every_registered_candidate_group(
+    candidate_group: str,
+) -> None:
+    from scripts.incremental_walk_forward_runner import _select_candidates
+
+    with pytest.raises(ValueError, match=f"candidate group '{candidate_group}' is deferred"):
+        _select_candidates(candidate_group, ())
+
+
+def test_incremental_run_rejects_deferred_group_before_loading_market(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import scripts.incremental_walk_forward_runner as module
+
+    monkeypatch.setattr(
+        module,
+        "load_period_market",
+        lambda period: pytest.fail("market data must not load for a deferred group"),
+    )
+    spec = IncrementalRunSpec(
+        symbol="BTCUSDT",
+        start_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        end_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        data_start_at=datetime(2025, 7, 1, tzinfo=timezone.utc),
+        data_end_at=datetime(2026, 2, 1, tzinfo=timezone.utc),
+        candidate_group="alpha",
+        candidate_ids=(),
+    )
+
+    with pytest.raises(ValueError, match="candidate group 'alpha' is deferred"):
+        run_incremental_walk_forward(
+            spec=spec,
+            rows_path=tmp_path / "rows.jsonl",
+            payload_path=tmp_path / "payload.json",
+            summary_path=tmp_path / "summary.md",
+        )
+
+
 def test_incremental_runner_can_select_microstructure_candidate_group() -> None:
     from scripts.incremental_walk_forward_runner import _select_candidates
 
-    candidates = _select_candidates("microstructure", ("micro-mtf-balanced-tight",))
+    candidates = _select_candidates(
+        "microstructure",
+        ("micro-mtf-balanced-tight",),
+        include_deferred=True,
+    )
 
     assert [candidate.candidate_id for candidate in candidates] == ["micro-mtf-balanced-tight"]
+
+
+def test_incremental_runner_can_select_counter_candidate_group() -> None:
+    from scripts.incremental_walk_forward_runner import _select_candidates
+
+    candidates = _select_candidates(
+        "counter",
+        ("counter-mtf-strict-tight",),
+        include_deferred=True,
+    )
+
+    assert [candidate.candidate_id for candidate in candidates] == [
+        "counter-mtf-strict-tight"
+    ]
+
+
+def test_incremental_runner_can_select_metrics_candidate_group() -> None:
+    from scripts.incremental_walk_forward_runner import _select_candidates
+
+    candidates = _select_candidates(
+        "metrics",
+        ("metrics-oi-impulse-strict-tight",),
+        include_deferred=True,
+    )
+
+    assert [candidate.candidate_id for candidate in candidates] == [
+        "metrics-oi-impulse-strict-tight"
+    ]
+
+
+def test_incremental_runner_can_select_discovered_candidate_group() -> None:
+    from scripts.incremental_walk_forward_runner import _select_candidates
+
+    candidates = _select_candidates(
+        "discovered",
+        ("discovered-global-up-reversal-hold60",),
+        include_deferred=True,
+    )
+
+    assert [candidate.candidate_id for candidate in candidates] == [
+        "discovered-global-up-reversal-hold60"
+    ]
 
 
 def test_resume_and_aggregate_isolate_rows_by_current_run_identity() -> None:
@@ -483,8 +580,12 @@ def test_candidate_selection_is_canonical_and_rejects_unknown_ids() -> None:
     from scripts.incremental_walk_forward_runner import _select_candidates
 
     requested = ("micro-mtf-strict-wide", "micro-mtf-balanced-tight")
-    forward = _select_candidates("microstructure", requested)
-    reverse = _select_candidates("microstructure", tuple(reversed(requested)))
+    forward = _select_candidates("microstructure", requested, include_deferred=True)
+    reverse = _select_candidates(
+        "microstructure",
+        tuple(reversed(requested)),
+        include_deferred=True,
+    )
 
     assert [candidate.candidate_id for candidate in forward] == sorted(requested)
     assert [candidate.candidate_id for candidate in forward] == [candidate.candidate_id for candidate in reverse]
@@ -492,7 +593,7 @@ def test_candidate_selection_is_canonical_and_rejects_unknown_ids() -> None:
         [candidate_payload(candidate) for candidate in reverse]
     )
     with pytest.raises(ValueError, match="unknown candidate_id"):
-        _select_candidates("microstructure", ("does-not-exist",))
+        _select_candidates("microstructure", ("does-not-exist",), include_deferred=True)
 
 
 def test_candidate_selection_rejects_duplicate_definitions(monkeypatch) -> None:
@@ -502,7 +603,7 @@ def test_candidate_selection_rejects_duplicate_definitions(monkeypatch) -> None:
     monkeypatch.setattr(module, "microstructure_alpha_candidates", lambda: (candidate, candidate))
 
     with pytest.raises(ValueError, match="duplicate candidate_id"):
-        module._select_candidates("microstructure", ())
+        module._select_candidates("microstructure", (), include_deferred=True)
 
 
 def test_aggregate_retains_identical_feature_provenance() -> None:
@@ -695,7 +796,11 @@ def test_incremental_runner_loads_feature_cache_once_and_reuses_provider(monkeyp
     hash_calls = []
     original_market_data_hash = module.market_data_hash
     monkeypatch.setattr(module, "load_period_market", lambda period: _market_for_hash())
-    monkeypatch.setattr(module, "_select_candidates", lambda group, ids: candidates)
+    monkeypatch.setattr(
+        module,
+        "_select_candidates",
+        lambda group, ids, **kwargs: candidates,
+    )
     monkeypatch.setattr(
         module,
         "build_walk_forward_folds",
@@ -748,6 +853,7 @@ def test_incremental_runner_loads_feature_cache_once_and_reuses_provider(monkeyp
         summary_path=tmp_path / "summary.md",
         feature_cache_path=tmp_path / "features.jsonl",
         feature_manifest_path=tmp_path / "explicit.manifest.json",
+        include_deferred=True,
     )
 
     assert loads == [(tmp_path / "features.jsonl", tmp_path / "explicit.manifest.json")]

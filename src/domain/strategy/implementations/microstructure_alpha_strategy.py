@@ -93,6 +93,42 @@ def _signal(
     )
 
 
+@dataclass(frozen=True)
+class InvertedSignalStrategy:
+    inner: Strategy
+    name: str = "inverted-signal"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _validated_name(self.name))
+        if not isinstance(self.inner, Strategy):
+            raise TypeError("inner must be Strategy-compatible")
+
+    def evaluate(self, context: StrategyContext) -> StrategyResult:
+        result = self.inner.evaluate(context)
+        if not isinstance(result, StrategyResult):
+            raise TypeError("inner evaluate() must return StrategyResult")
+        directions = {
+            SignalDirection.LONG: SignalDirection.SHORT,
+            SignalDirection.SHORT: SignalDirection.LONG,
+            SignalDirection.WAIT: SignalDirection.WAIT,
+        }
+        signal = Signal(
+            direction=directions[result.signal.direction],
+            confidence=result.signal.confidence,
+            reasons=result.signal.reasons,
+            metadata=result.signal.metadata,
+        )
+        return StrategyResult(
+            name=self.name,
+            signal=signal,
+            metadata={
+                **result.metadata,
+                "inner_strategy": result.name,
+                "inverted_from": result.signal.direction.value,
+            },
+        )
+
+
 def _feature_metadata(
     features: MarketFeatureSet | None,
     requirements: Mapping[str, tuple[str, ...]],
@@ -152,7 +188,23 @@ def _bucket_start(value: datetime, minutes: int) -> datetime:
     return utc.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(minutes=aligned)
 
 
-def _closed_bars(candles: tuple[Candle, ...], minutes: int, as_of: datetime) -> tuple[_Bar, ...]:
+def _closed_bars(
+    candles: tuple[Candle, ...],
+    minutes: int,
+    as_of: datetime,
+    *,
+    max_bars: int | None = None,
+) -> tuple[_Bar, ...]:
+    if max_bars is not None:
+        _positive_int(max_bars, "max_bars")
+        earliest_open = _bucket_start(as_of, minutes) - timedelta(
+            minutes=minutes * (max_bars + 1)
+        )
+        candles = tuple(
+            candle
+            for candle in candles
+            if candle.opened_at.astimezone(timezone.utc) >= earliest_open
+        )
     buckets: dict[datetime, list[Candle]] = {}
     for candle in candles:
         start = _bucket_start(candle.opened_at, minutes)
@@ -179,6 +231,8 @@ def _closed_bars(candles: tuple[Candle, ...], minutes: int, as_of: datetime) -> 
                 volume=sum((candle.volume for candle in bucket), ZERO),
             )
         )
+    if max_bars is not None:
+        bars = bars[-max_bars:]
     return tuple(bars)
 
 
@@ -275,8 +329,18 @@ class MultiTimeframeTrendPullbackStrategy:
         candles = context.market.candles
         if context.market.timeframe.duration_seconds != 60:
             return _wait(self.name, "requires_1m_candles")
-        bars_5m = _closed_bars(candles, 5, candles[-1].closed_at)
-        bars_15m = _closed_bars(candles, 15, candles[-1].closed_at)
+        bars_5m = _closed_bars(
+            candles,
+            5,
+            candles[-1].closed_at,
+            max_bars=self.momentum_bars_5m,
+        )
+        bars_15m = _closed_bars(
+            candles,
+            15,
+            candles[-1].closed_at,
+            max_bars=self.trend_bars_15m,
+        )
         metadata: dict[str, object] = {
             "closed_5m_at": bars_5m[-1].closed_at.isoformat() if bars_5m else None,
             "closed_15m_at": bars_15m[-1].closed_at.isoformat() if bars_15m else None,
@@ -473,6 +537,250 @@ class FlowExhaustionReversalStrategy:
             and values["cvd_delta"] <= -self.min_cvd_delta
         ):
             return _signal(self.name, SignalDirection.SHORT, self.confidence, metadata)
+        return _wait(self.name, "conditions_not_met", **metadata)
+
+
+@dataclass(frozen=True)
+class OpenInterestImpulseStrategy:
+    name: str = "open-interest-impulse"
+    price_lookback: int = 5
+    min_price_return: Decimal = Decimal("0.002")
+    min_open_interest_change: Decimal = Decimal("0.002")
+    taker_ratio_edge: Decimal = Decimal("0.10")
+    confidence: Decimal = Decimal("0.72")
+    route: ClassVar[str] = "trend"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _validated_name(self.name))
+        _positive_int(self.price_lookback, "price_lookback", minimum=2)
+        _percentage(self.min_price_return, "min_price_return")
+        _percentage(self.min_open_interest_change, "min_open_interest_change")
+        _ratio(self.taker_ratio_edge, "taker_ratio_edge")
+        _ratio(self.confidence, "confidence")
+
+    def evaluate(self, context: StrategyContext) -> StrategyResult:
+        requirements = {
+            "open_interest_change_ratio_5m": ("metrics",),
+            "taker_long_short_volume_ratio": ("metrics",),
+        }
+        values, wait = _require_features(context, self.name, requirements)
+        if wait is not None:
+            return wait
+        candles = context.market.candles
+        if len(candles) < self.price_lookback + 1:
+            return _wait(self.name, "insufficient_candles")
+        price_return = _return_ratio(
+            candles[-1].close_price,
+            candles[-self.price_lookback - 1].close_price,
+        )
+        assert values is not None
+        oi_change = values["open_interest_change_ratio_5m"]
+        taker_ratio = values["taker_long_short_volume_ratio"]
+        metadata = {
+            "price_return": str(price_return),
+            "open_interest_change": str(oi_change),
+            "taker_ratio": str(taker_ratio),
+        }
+        if (
+            price_return >= self.min_price_return
+            and oi_change >= self.min_open_interest_change
+            and taker_ratio >= ONE + self.taker_ratio_edge
+        ):
+            return _signal(
+                self.name, SignalDirection.LONG, self.confidence, metadata
+            )
+        if (
+            price_return <= -self.min_price_return
+            and oi_change >= self.min_open_interest_change
+            and taker_ratio <= ONE - self.taker_ratio_edge
+        ):
+            return _signal(
+                self.name, SignalDirection.SHORT, self.confidence, metadata
+            )
+        return _wait(self.name, "conditions_not_met", **metadata)
+
+
+@dataclass(frozen=True)
+class PositioningCrowdingReversalStrategy:
+    name: str = "positioning-crowding-reversal"
+    crowded_short_ratio: Decimal = Decimal("0.85")
+    crowded_long_ratio: Decimal = Decimal("1.25")
+    taker_ratio_edge: Decimal = Decimal("0.10")
+    min_rejection_wick_ratio: Decimal = Decimal("0.35")
+    confidence: Decimal = Decimal("0.72")
+    route: ClassVar[str] = "reversion"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _validated_name(self.name))
+        _decimal_at_least(
+            self.crowded_short_ratio,
+            "crowded_short_ratio",
+            Decimal("0.000000000000000001"),
+        )
+        _decimal_at_least(
+            self.crowded_long_ratio,
+            "crowded_long_ratio",
+            Decimal("0.000000000000000001"),
+        )
+        if self.crowded_short_ratio >= ONE or self.crowded_long_ratio <= ONE:
+            raise ValueError("crowding ratios must straddle one")
+        _ratio(self.taker_ratio_edge, "taker_ratio_edge")
+        _percentage(self.min_rejection_wick_ratio, "min_rejection_wick_ratio")
+        _ratio(self.confidence, "confidence")
+
+    def evaluate(self, context: StrategyContext) -> StrategyResult:
+        requirements = {
+            "top_trader_position_long_short_ratio": ("metrics",),
+            "global_long_short_ratio": ("metrics",),
+            "taker_long_short_volume_ratio": ("metrics",),
+        }
+        values, wait = _require_features(context, self.name, requirements)
+        if wait is not None:
+            return wait
+        assert values is not None
+        latest = context.market.latest_candle
+        lower_wick, upper_wick = _rejection_ratios(latest)
+        top_ratio = values["top_trader_position_long_short_ratio"]
+        global_ratio = values["global_long_short_ratio"]
+        taker_ratio = values["taker_long_short_volume_ratio"]
+        metadata = {
+            "top_trader_position_ratio": str(top_ratio),
+            "global_ratio": str(global_ratio),
+            "taker_ratio": str(taker_ratio),
+        }
+        if (
+            top_ratio <= self.crowded_short_ratio
+            and global_ratio <= self.crowded_short_ratio
+            and taker_ratio >= ONE + self.taker_ratio_edge
+            and latest.close_price > latest.open_price
+            and lower_wick >= self.min_rejection_wick_ratio
+        ):
+            return _signal(
+                self.name, SignalDirection.LONG, self.confidence, metadata
+            )
+        if (
+            top_ratio >= self.crowded_long_ratio
+            and global_ratio >= self.crowded_long_ratio
+            and taker_ratio <= ONE - self.taker_ratio_edge
+            and latest.close_price < latest.open_price
+            and upper_wick >= self.min_rejection_wick_ratio
+        ):
+            return _signal(
+                self.name, SignalDirection.SHORT, self.confidence, metadata
+            )
+        return _wait(self.name, "conditions_not_met", **metadata)
+
+
+@dataclass(frozen=True)
+class OpenInterestDivergenceStrategy:
+    name: str = "open-interest-divergence"
+    price_lookback: int = 5
+    min_price_return: Decimal = Decimal("0.002")
+    min_open_interest_contraction: Decimal = Decimal("0.002")
+    taker_ratio_edge: Decimal = Decimal("0.10")
+    confidence: Decimal = Decimal("0.70")
+    route: ClassVar[str] = "reversion"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _validated_name(self.name))
+        _positive_int(self.price_lookback, "price_lookback", minimum=2)
+        _percentage(self.min_price_return, "min_price_return")
+        _percentage(
+            self.min_open_interest_contraction,
+            "min_open_interest_contraction",
+        )
+        _ratio(self.taker_ratio_edge, "taker_ratio_edge")
+        _ratio(self.confidence, "confidence")
+
+    def evaluate(self, context: StrategyContext) -> StrategyResult:
+        requirements = {
+            "open_interest_change_ratio_5m": ("metrics",),
+            "taker_long_short_volume_ratio": ("metrics",),
+        }
+        values, wait = _require_features(context, self.name, requirements)
+        if wait is not None:
+            return wait
+        candles = context.market.candles
+        if len(candles) < self.price_lookback + 1:
+            return _wait(self.name, "insufficient_candles")
+        price_return = _return_ratio(
+            candles[-1].close_price,
+            candles[-self.price_lookback - 1].close_price,
+        )
+        assert values is not None
+        oi_change = values["open_interest_change_ratio_5m"]
+        taker_ratio = values["taker_long_short_volume_ratio"]
+        metadata = {
+            "price_return": str(price_return),
+            "open_interest_change": str(oi_change),
+            "taker_ratio": str(taker_ratio),
+        }
+        if (
+            price_return <= -self.min_price_return
+            and oi_change <= -self.min_open_interest_contraction
+            and taker_ratio >= ONE + self.taker_ratio_edge
+        ):
+            return _signal(
+                self.name, SignalDirection.LONG, self.confidence, metadata
+            )
+        if (
+            price_return >= self.min_price_return
+            and oi_change <= -self.min_open_interest_contraction
+            and taker_ratio <= ONE - self.taker_ratio_edge
+        ):
+            return _signal(
+                self.name, SignalDirection.SHORT, self.confidence, metadata
+            )
+        return _wait(self.name, "conditions_not_met", **metadata)
+
+
+@dataclass(frozen=True)
+class GlobalRatioShockReversalStrategy:
+    name: str = "global-ratio-shock-reversal"
+    min_ratio_change: Decimal = Decimal("0.05")
+    shock_direction: str = "both"
+    confidence: Decimal = Decimal("0.74")
+    route: ClassVar[str] = "reversion"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "name", _validated_name(self.name))
+        _decimal_at_least(
+            self.min_ratio_change,
+            "min_ratio_change",
+            Decimal("0.000000000000000001"),
+        )
+        if self.shock_direction not in {"up", "down", "both"}:
+            raise ValueError("shock_direction must be up, down, or both")
+        _ratio(self.confidence, "confidence")
+
+    def evaluate(self, context: StrategyContext) -> StrategyResult:
+        values, wait = _require_features(
+            context,
+            self.name,
+            {"global_long_short_change_5m": ("metrics",)},
+        )
+        if wait is not None:
+            return wait
+        assert values is not None
+        change = values["global_long_short_change_5m"]
+        metadata = {
+            "global_long_short_change_5m": str(change),
+            "shock_direction": self.shock_direction,
+        }
+        if (
+            self.shock_direction in {"up", "both"}
+            and change >= self.min_ratio_change
+        ):
+            return _signal(
+                self.name, SignalDirection.SHORT, self.confidence, metadata
+            )
+        if (
+            self.shock_direction in {"down", "both"}
+            and change <= -self.min_ratio_change
+        ):
+            return _signal(
+                self.name, SignalDirection.LONG, self.confidence, metadata
+            )
         return _wait(self.name, "conditions_not_met", **metadata)
 
 
@@ -690,7 +998,12 @@ class SessionOpeningRangeStrategy:
             or actual_opens != expected_opens
         ):
             return _wait(self.name, "opening_range_incomplete", **session_metadata)
-        bars_5m = _closed_bars(context.market.candles, 5, latest.closed_at)
+        bars_5m = _closed_bars(
+            context.market.candles,
+            5,
+            latest.closed_at,
+            max_bars=1,
+        )
         eligible_5m = tuple(bar for bar in bars_5m if bar.closed_at <= latest.opened_at.astimezone(timezone.utc))
         if not eligible_5m:
             return _wait(self.name, "missing_closed_5m_confirmation", **session_metadata)
