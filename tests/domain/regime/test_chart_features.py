@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 
 import pytest
@@ -116,5 +116,52 @@ def test_feature_vector_rejects_nonfinite_values():
             anchor_at=datetime(2026, 4, 6, tzinfo=timezone.utc),
             window_start_at=datetime(2026, 3, 30, tzinfo=timezone.utc),
             schema_version=CHART_FEATURE_SCHEMA_VERSION,
+            values=values,
+        )
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "anchor_at", "window_start_at", "message"),
+    [
+        (
+            "other-version",
+            datetime(2026, 4, 6, tzinfo=timezone.utc),
+            datetime(2026, 3, 30, tzinfo=timezone.utc),
+            "schema version",
+        ),
+        (
+            CHART_FEATURE_SCHEMA_VERSION,
+            datetime(2026, 4, 6, 1, tzinfo=timezone.utc),
+            datetime(2026, 3, 30, 1, tzinfo=timezone.utc),
+            "four-hour UTC boundary",
+        ),
+        (
+            CHART_FEATURE_SCHEMA_VERSION,
+            datetime(2026, 4, 6, tzinfo=timezone(timedelta(hours=9))),
+            datetime(2026, 3, 30, tzinfo=timezone(timedelta(hours=9))),
+            "four-hour UTC boundary",
+        ),
+        (
+            CHART_FEATURE_SCHEMA_VERSION,
+            datetime(2026, 4, 6, tzinfo=timezone.utc),
+            datetime(2026, 3, 29, tzinfo=timezone.utc),
+            "seven days before anchor",
+        ),
+    ],
+)
+def test_feature_vector_rejects_incompatible_temporal_contract(
+    schema_version,
+    anchor_at,
+    window_start_at,
+    message,
+):
+    values = {name: 0.0 for name in EXPECTED_NAMES}
+
+    with pytest.raises(ValueError, match=message):
+        ChartFeatureVector(
+            symbol="BTCUSDT",
+            anchor_at=anchor_at,
+            window_start_at=window_start_at,
+            schema_version=schema_version,
             values=values,
         )

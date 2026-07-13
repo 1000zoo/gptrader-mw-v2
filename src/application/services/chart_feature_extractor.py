@@ -35,25 +35,23 @@ def aggregate_closed_candles(
     if minutes <= 0:
         raise ValueError("aggregation minutes must be positive")
     source = tuple(candles)
-    if not source or len(source) % minutes:
+    if not source:
+        raise ValueError("incomplete aggregation bucket")
+    _validate_one_minute_source(source, aggregation_minutes=minutes)
+    if len(source) % minutes:
         raise ValueError("incomplete aggregation bucket")
 
     bars = []
-    interval = timedelta(minutes=1)
     for offset in range(0, len(source), minutes):
         bucket = source[offset : offset + minutes]
-        expected_closes = tuple(bucket[0].closed_at + interval * index for index in range(minutes))
-        if tuple(item.closed_at for item in bucket) != expected_closes:
+        if bucket[-1].closed_at - bucket[0].opened_at != timedelta(minutes=minutes):
             raise ValueError("incomplete aggregation bucket")
-        symbol = bucket[0].symbol
-        if any(item.symbol != symbol for item in bucket):
-            raise ValueError("aggregation candles must use the same symbol")
         bars.append(
             Candle(
-                symbol=symbol,
+                symbol=bucket[0].symbol,
                 timeframe=Timeframe(minutes, "m"),
-                opened_at=bucket[0].closed_at,
-                closed_at=bucket[0].closed_at + timedelta(minutes=minutes),
+                opened_at=bucket[0].opened_at,
+                closed_at=bucket[-1].closed_at,
                 open_price=bucket[0].open_price,
                 high_price=max(item.high_price for item in bucket),
                 low_price=min(item.low_price for item in bucket),
@@ -64,6 +62,33 @@ def aggregate_closed_candles(
     return tuple(bars)
 
 
+def _validate_one_minute_source(
+    source: tuple[Candle, ...],
+    *,
+    aggregation_minutes: int,
+) -> None:
+    one_minute = timedelta(minutes=1)
+    first = source[0]
+    minute_of_day = first.opened_at.hour * 60 + first.opened_at.minute
+    valid = (
+        first.opened_at.tzinfo is timezone.utc
+        and first.opened_at.second == 0
+        and first.opened_at.microsecond == 0
+        and minute_of_day % aggregation_minutes == 0
+        and all(candle.symbol == first.symbol for candle in source)
+        and all(candle.timeframe == Timeframe(1, "m") for candle in source)
+        and all(candle.opened_at.tzinfo is timezone.utc for candle in source)
+        and all(candle.closed_at.tzinfo is timezone.utc for candle in source)
+        and all(candle.closed_at - candle.opened_at == one_minute for candle in source)
+        and all(
+            current.opened_at == previous.closed_at
+            for previous, current in zip(source, source[1:])
+        )
+    )
+    if not valid:
+        raise ValueError("aggregation requires aligned contiguous one-minute UTC candles")
+
+
 def extract_chart_feature_vector(
     candles: Sequence[Candle] | Iterable[Candle],
     anchor_at: datetime,
@@ -72,7 +97,7 @@ def extract_chart_feature_vector(
     window = tuple(
         candle
         for candle in candles
-        if window_start_at <= candle.closed_at < window_end_at
+        if window_start_at <= candle.opened_at < window_end_at
     )
     _validate_window(window, window_start_at, window_end_at)
     bars_15m = aggregate_closed_candles(window, minutes=15)
@@ -94,20 +119,25 @@ def _validate_window(
 ) -> None:
     if len(window) != MINUTES_PER_WEEK:
         raise ValueError("complete seven-day one-minute history is required")
-    expected_closes = tuple(start_at + timedelta(minutes=index) for index in range(MINUTES_PER_WEEK))
-    if tuple(candle.closed_at for candle in window) != expected_closes:
-        raise ValueError("complete seven-day one-minute history is required")
-    expected_opens = tuple(value - timedelta(minutes=1) for value in expected_closes)
+    if any(candle.symbol != window[0].symbol for candle in window):
+        raise ValueError("history candles must use the same symbol")
+    expected_opens = tuple(start_at + timedelta(minutes=index) for index in range(MINUTES_PER_WEEK))
     if tuple(candle.opened_at for candle in window) != expected_opens:
+        raise ValueError("complete seven-day one-minute history is required")
+    expected_closes = tuple(value + timedelta(minutes=1) for value in expected_opens)
+    if tuple(candle.closed_at for candle in window) != expected_closes:
         raise ValueError("complete seven-day one-minute history is required")
     if any(candle.timeframe != Timeframe(1, "m") for candle in window):
         raise ValueError("complete seven-day one-minute history is required")
     if any(candle.opened_at.tzinfo is not timezone.utc or candle.closed_at.tzinfo is not timezone.utc for candle in window):
         raise ValueError("complete seven-day one-minute history is required")
-    if any(candle.symbol != window[0].symbol for candle in window):
-        raise ValueError("history candles must use the same symbol")
-    if expected_closes[-1] >= end_at:
-        raise ValueError("selected history must not reach the anchor")
+    if window[0].opened_at != start_at or window[-1].closed_at != end_at:
+        raise ValueError("complete seven-day one-minute history is required")
+    if any(
+        current.opened_at != previous.closed_at
+        for previous, current in zip(window, window[1:])
+    ):
+        raise ValueError("complete seven-day one-minute history is required")
     for candle in window:
         numeric_values = (
             candle.open_price,
@@ -124,6 +154,7 @@ def calculate_registry_values(
     bars_15m: tuple[Candle, ...],
     bars_1h: tuple[Candle, ...],
 ) -> dict[str, float]:
+    _validate_aggregated_history(bars_15m, bars_1h)
     path_4h = _price_path(bars_15m[-16:])
     path_12h = _price_path(bars_15m[-48:])
     path_1d = _price_path(bars_15m[-96:])
@@ -180,6 +211,51 @@ def calculate_registry_values(
     if any(not math.isfinite(value) for value in values.values()):
         raise ValueError("calculated features must be finite")
     return values
+
+
+def _validate_aggregated_history(
+    bars_15m: tuple[Candle, ...],
+    bars_1h: tuple[Candle, ...],
+) -> None:
+    if len(bars_15m) != 672 or len(bars_1h) != 168:
+        raise ValueError("complete aligned seven-day aggregated history is required")
+    symbols_15m = {bar.symbol for bar in bars_15m}
+    symbols_1h = {bar.symbol for bar in bars_1h}
+    if len(symbols_15m) != 1 or len(symbols_1h) != 1 or symbols_15m != symbols_1h:
+        raise ValueError("aggregated histories must use the same symbol")
+    _validate_aggregated_series(bars_15m, minutes=15)
+    _validate_aggregated_series(bars_1h, minutes=60)
+    if (
+        bars_15m[0].opened_at != bars_1h[0].opened_at
+        or bars_15m[-1].closed_at != bars_1h[-1].closed_at
+    ):
+        raise ValueError("complete aligned seven-day aggregated history is required")
+
+
+def _validate_aggregated_series(
+    bars: tuple[Candle, ...],
+    *,
+    minutes: int,
+) -> None:
+    duration = timedelta(minutes=minutes)
+    first = bars[0]
+    minute_of_day = first.opened_at.hour * 60 + first.opened_at.minute
+    valid = (
+        first.opened_at.tzinfo is timezone.utc
+        and first.opened_at.second == 0
+        and first.opened_at.microsecond == 0
+        and minute_of_day % minutes == 0
+        and all(bar.timeframe == Timeframe(minutes, "m") for bar in bars)
+        and all(bar.opened_at.tzinfo is timezone.utc for bar in bars)
+        and all(bar.closed_at.tzinfo is timezone.utc for bar in bars)
+        and all(bar.closed_at - bar.opened_at == duration for bar in bars)
+        and all(
+            current.opened_at == previous.closed_at
+            for previous, current in zip(bars, bars[1:])
+        )
+    )
+    if not valid:
+        raise ValueError("complete aligned seven-day aggregated history is required")
 
 
 def _price_path(bars: tuple[Candle, ...]) -> list[float]:

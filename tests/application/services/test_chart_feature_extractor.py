@@ -10,6 +10,7 @@ from src.application.services.chart_feature_extractor import (
     ChartFeatureExtractor,
     _sign_change_rate,
     aggregate_closed_candles,
+    calculate_registry_values,
     extract_chart_feature_vector,
 )
 from src.domain.market.candle import Candle
@@ -23,12 +24,18 @@ BTCUSDT = Symbol("BTC", "USDT")
 ONE_MINUTE = Timeframe(1, "m")
 
 
-def _candles(*, scale=Decimal("1"), flat=False):
+def _candles(
+    *,
+    scale=Decimal("1"),
+    flat=False,
+    count=7 * 24 * 60,
+    start_at=START,
+):
     candles = []
     previous_close = Decimal("100")
-    for index in range(7 * 24 * 60):
-        closed_at = START + timedelta(minutes=index)
-        opened_at = closed_at - timedelta(minutes=1)
+    for index in range(count):
+        opened_at = start_at + timedelta(minutes=index)
+        closed_at = opened_at + timedelta(minutes=1)
         if flat:
             open_price = close_price = Decimal("100") * scale
         else:
@@ -61,12 +68,12 @@ def complete_candles():
 
 
 def test_aggregate_closed_candles_uses_complete_ohlcv_buckets():
-    source = _candles()[:15]
+    source = _candles(count=15)
     bars = aggregate_closed_candles(source, minutes=15)
 
     assert len(bars) == 1
-    assert bars[0].opened_at == START
-    assert bars[0].closed_at == START + timedelta(minutes=15)
+    assert bars[0].opened_at == source[0].opened_at
+    assert bars[0].closed_at == source[-1].closed_at
     assert bars[0].open_price == source[0].open_price
     assert bars[0].close_price == source[-1].close_price
     assert bars[0].high_price == max(candle.high_price for candle in source)
@@ -76,7 +83,47 @@ def test_aggregate_closed_candles_uses_complete_ohlcv_buckets():
 
 def test_aggregate_closed_candles_rejects_incomplete_bucket():
     with pytest.raises(ValueError, match="incomplete aggregation bucket"):
-        aggregate_closed_candles(_candles()[:14], minutes=15)
+        aggregate_closed_candles(_candles(count=14), minutes=15)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        lambda: _candles(count=15)[:1]
+        + (replace(
+            _candles(count=15)[1],
+            opened_at=_candles(count=15)[0].opened_at,
+            closed_at=_candles(count=15)[0].closed_at,
+        ),)
+        + _candles(count=15)[2:],
+        lambda: tuple(
+            Candle(
+                symbol=BTCUSDT,
+                timeframe=Timeframe(5, "m"),
+                opened_at=START + timedelta(minutes=5 * index),
+                closed_at=START + timedelta(minutes=5 * (index + 1)),
+                open_price=Decimal("100"),
+                high_price=Decimal("101"),
+                low_price=Decimal("99"),
+                close_price=Decimal("100"),
+                volume=Decimal("10"),
+            )
+            for index in range(15)
+        ),
+        lambda: tuple(
+            replace(
+                candle,
+                opened_at=candle.opened_at.astimezone(timezone(timedelta(hours=9))),
+                closed_at=candle.closed_at.astimezone(timezone(timedelta(hours=9))),
+            )
+            for candle in _candles(count=15)
+        ),
+        lambda: _candles(count=15, start_at=START + timedelta(minutes=1)),
+    ],
+)
+def test_aggregate_closed_candles_rejects_noncanonical_sources(source):
+    with pytest.raises(ValueError, match="aligned contiguous one-minute UTC candles"):
+        aggregate_closed_candles(source(), minutes=15)
 
 
 def test_extractor_excludes_anchor_and_future_candles(complete_candles):
@@ -84,8 +131,8 @@ def test_extractor_excludes_anchor_and_future_candles(complete_candles):
     dramatic = Candle(
         symbol=BTCUSDT,
         timeframe=ONE_MINUTE,
-        opened_at=ANCHOR - timedelta(minutes=1),
-        closed_at=ANCHOR,
+        opened_at=ANCHOR,
+        closed_at=ANCHOR + timedelta(minutes=1),
         open_price=Decimal("100"),
         high_price=Decimal("1000000"),
         low_price=Decimal("1"),
@@ -219,6 +266,26 @@ def test_zero_returns_break_sign_change_adjacency():
         _sign_change_rate([0.1, 0.0, -0.2])
 
     assert _sign_change_rate([0.1, 0.0, -0.2, -0.3]) == 0.0
+
+
+def test_registry_calculation_requires_complete_matching_aggregations(complete_candles):
+    bars_15m = aggregate_closed_candles(complete_candles, minutes=15)
+    bars_1h = aggregate_closed_candles(complete_candles, minutes=60)
+
+    with pytest.raises(ValueError, match="complete aligned seven-day aggregated history"):
+        calculate_registry_values(bars_15m[:-1], bars_1h)
+
+    shifted_first = replace(
+        bars_15m[0],
+        opened_at=bars_15m[0].opened_at + timedelta(minutes=1),
+        closed_at=bars_15m[0].closed_at + timedelta(minutes=1),
+    )
+    with pytest.raises(ValueError, match="complete aligned seven-day aggregated history"):
+        calculate_registry_values((shifted_first,) + bars_15m[1:], bars_1h)
+
+    mixed_symbol = replace(bars_1h[0], symbol=Symbol("ETH", "USDT"))
+    with pytest.raises(ValueError, match="same symbol"):
+        calculate_registry_values(bars_15m, (mixed_symbol,) + bars_1h[1:])
 
 
 @pytest.mark.parametrize(

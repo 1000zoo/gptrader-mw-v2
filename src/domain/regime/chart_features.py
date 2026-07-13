@@ -1,8 +1,10 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 import math
 from types import MappingProxyType
 from typing import Mapping
+
+from src.domain.regime.temporal import is_regime_boundary
 
 
 CHART_FEATURE_SCHEMA_VERSION = "btc-chart-regime-ohclv-v1"
@@ -71,6 +73,12 @@ class ChartFeatureVector:
     values: Mapping[str, float]
 
     def __post_init__(self) -> None:
+        if self.schema_version != CHART_FEATURE_SCHEMA_VERSION:
+            raise ValueError("feature vector schema version is incompatible")
+        if not is_regime_boundary(self.anchor_at):
+            raise ValueError("anchor must be a four-hour UTC boundary")
+        if self.window_start_at != self.anchor_at - timedelta(days=7):
+            raise ValueError("window start must be seven days before anchor")
         expected_names = tuple(spec.name for spec in CHART_FEATURE_REGISTRY_V1)
         if tuple(self.values) != expected_names:
             raise ValueError("feature vector does not match registry order")
