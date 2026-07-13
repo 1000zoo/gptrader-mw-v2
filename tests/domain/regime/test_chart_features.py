@@ -144,6 +144,12 @@ def test_feature_vector_rejects_nonfinite_values():
         (
             CHART_FEATURE_SCHEMA_VERSION,
             datetime(2026, 4, 6, tzinfo=timezone.utc),
+            datetime(2026, 3, 30, 9, tzinfo=timezone(timedelta(hours=9))),
+            "window start must be UTC",
+        ),
+        (
+            CHART_FEATURE_SCHEMA_VERSION,
+            datetime(2026, 4, 6, tzinfo=timezone.utc),
             datetime(2026, 3, 29, tzinfo=timezone.utc),
             "seven days before anchor",
         ),
