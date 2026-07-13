@@ -1,0 +1,1 @@
+-- Constraints are defined inline in sql/ddl/execution/tables/order_requests.sql.

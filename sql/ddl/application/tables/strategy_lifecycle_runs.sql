@@ -1,0 +1,23 @@
+CREATE TABLE IF NOT EXISTS strategy_lifecycle_runs (
+    lifecycle_run_id TEXT NOT NULL PRIMARY KEY,
+    run_type TEXT NOT NULL CHECK (run_type IN ('register', 'promote', 'run_lifecycle')),
+    target_id TEXT,
+    strategy_id TEXT,
+    generator_id TEXT,
+    source_evaluation_id TEXT,
+    promoted_evaluation_id TEXT,
+    policy_id TEXT,
+    promoted INTEGER CHECK (promoted IN (0, 1)),
+    reason TEXT,
+    metadata TEXT,
+    reg_ymd TEXT NOT NULL,
+    reg_dt TEXT NOT NULL,
+    upd_dt TEXT NOT NULL,
+    use_yn TEXT NOT NULL DEFAULT 'Y' CHECK (use_yn IN ('Y', 'N')),
+    FOREIGN KEY (strategy_id) REFERENCES strategy_definitions (strategy_id),
+    FOREIGN KEY (generator_id) REFERENCES signal_generator_definitions (generator_id),
+    FOREIGN KEY (source_evaluation_id) REFERENCES strategy_evaluations (evaluation_id),
+    FOREIGN KEY (promoted_evaluation_id) REFERENCES strategy_evaluations (evaluation_id),
+    FOREIGN KEY (policy_id) REFERENCES promotion_policies (policy_id),
+    CHECK (lifecycle_run_id <> '')
+);

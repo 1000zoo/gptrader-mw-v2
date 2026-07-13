@@ -1,0 +1,1 @@
+-- Constraints are defined inline in sql/ddl/indicator/tables/indicator_values.sql.

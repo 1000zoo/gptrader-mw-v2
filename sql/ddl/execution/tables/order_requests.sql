@@ -1,0 +1,23 @@
+CREATE TABLE IF NOT EXISTS order_requests (
+    request_id TEXT NOT NULL PRIMARY KEY,
+    client_order_id TEXT NOT NULL UNIQUE,
+    decision_id TEXT,
+    position_id TEXT,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL CHECK (side IN ('long', 'short')),
+    order_type TEXT NOT NULL CHECK (order_type IN ('market', 'limit')),
+    quantity NUMERIC NOT NULL CHECK (quantity > 0),
+    limit_price NUMERIC,
+    reduce_only INTEGER NOT NULL DEFAULT 0 CHECK (reduce_only IN (0, 1)),
+    payload TEXT,
+    reg_ymd TEXT NOT NULL,
+    reg_dt TEXT NOT NULL,
+    upd_dt TEXT NOT NULL,
+    use_yn TEXT NOT NULL DEFAULT 'Y' CHECK (use_yn IN ('Y', 'N')),
+    FOREIGN KEY (decision_id) REFERENCES trade_decisions (decision_id),
+    FOREIGN KEY (position_id) REFERENCES positions (position_id),
+    CHECK (request_id <> ''),
+    CHECK (client_order_id <> ''),
+    CHECK (symbol <> ''),
+    CHECK ((order_type = 'market' AND limit_price IS NULL) OR (order_type = 'limit' AND limit_price > 0))
+);

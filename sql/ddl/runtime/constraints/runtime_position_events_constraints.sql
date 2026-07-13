@@ -1,0 +1,1 @@
+-- Constraints are defined inline in sql/ddl/runtime/tables/runtime_position_events.sql.

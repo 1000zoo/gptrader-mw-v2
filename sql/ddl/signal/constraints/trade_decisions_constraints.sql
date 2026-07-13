@@ -1,0 +1,1 @@
+-- Constraints are defined inline in sql/ddl/signal/tables/trade_decisions.sql.

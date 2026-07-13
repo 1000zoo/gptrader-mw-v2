@@ -1,0 +1,7 @@
+-- Table DDL owns the first signal_generator_definitions constraints so SQLite
+-- can apply them during table creation.
+--
+-- Required constraints:
+-- - signal_generator_definitions.generator_id is the primary key.
+-- - signal_generator_definitions.use_yn is restricted to 'Y' or 'N'.
+-- - signal_generator_definitions requires reg_ymd, reg_dt, upd_dt, and use_yn.

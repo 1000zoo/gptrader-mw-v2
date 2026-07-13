@@ -1,0 +1,7 @@
+-- Table DDL owns the first strategy_evaluations constraints so SQLite can
+-- apply them during table creation.
+--
+-- Required constraints:
+-- - strategy_evaluations.evaluation_id is the primary key.
+-- - strategy_evaluations.use_yn is restricted to 'Y' or 'N'.
+-- - strategy_evaluations requires reg_ymd, reg_dt, upd_dt, and use_yn.

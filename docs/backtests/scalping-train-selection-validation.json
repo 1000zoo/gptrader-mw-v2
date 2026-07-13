@@ -1,0 +1,1142 @@
+{
+  "candidate_count": 135,
+  "method": "train-only candidate selection; test metrics reported after selection",
+  "selected_by_train": [
+    {
+      "combo_id": "scalp-multi-t1-r1-b4-router-tbr-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.008",
+        "range_params": "{'range_period': 45, 'edge_ratio': Decimal('0.18'), 'min_reversal_body_ratio': Decimal('0.15'), 'min_range_ratio': Decimal('0.0015')}",
+        "range_regime_period": "240",
+        "router_order": "('trend', 'burst', 'range')",
+        "trend_params": "{'trend_period': 60, 'pullback_period': 5, 'trigger_period': 1, 'min_trend_return': Decimal('0.002'), 'min_pullback': Decimal('0.0006'), 'min_trigger_return': Decimal('0.0002'), 'min_range_ratio': Decimal('0.0008')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.0010798719958202484",
+      "test_average_gross_trade_roe": "0.00656562173458711",
+      "test_average_net_trade_return": "0.0002798719958202482",
+      "test_fee_paid": "22371.50110860588",
+      "test_gross_pnl": "30100.300685111342",
+      "test_gross_win_rate": "0.9725705329153606",
+      "test_max_drawdown_ratio": "0.02769684651660391",
+      "test_net_pnl": "7728.7995765054",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.7728799576505401",
+      "test_trade_count": 3828,
+      "test_trades_per_day": "56.29411764705882352941176471",
+      "test_win_rate": "0.9725705329153606",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.0010465156553061544",
+      "train_average_gross_trade_roe": "0.0063628151842614195",
+      "train_average_net_trade_return": "0.00024651565530615455",
+      "train_fee_paid": "184466.9071695976",
+      "train_gross_pnl": "241417.80299442532",
+      "train_gross_win_rate": "0.9674425048489886",
+      "train_max_drawdown_ratio": "0.05912685160929714",
+      "train_net_pnl": "56950.895824827705",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "5.695089582482771",
+      "train_trade_count": 14436,
+      "train_trades_per_day": "68.41706161137440758293838863",
+      "train_win_rate": "0.9674425048489886"
+    },
+    {
+      "combo_id": "scalp-multi-t1-r1-b4-router-btr-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.006",
+        "range_params": "{'range_period': 45, 'edge_ratio': Decimal('0.18'), 'min_reversal_body_ratio': Decimal('0.15'), 'min_range_ratio': Decimal('0.0015')}",
+        "range_regime_period": "240",
+        "router_order": "('burst', 'trend', 'range')",
+        "trend_params": "{'trend_period': 60, 'pullback_period': 5, 'trigger_period': 1, 'min_trend_return': Decimal('0.002'), 'min_pullback': Decimal('0.0006'), 'min_trigger_return': Decimal('0.0002'), 'min_range_ratio': Decimal('0.0008')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.0010799791226705486",
+      "test_average_gross_trade_roe": "0.006566273065836936",
+      "test_average_net_trade_return": "0.0002799791226705486",
+      "test_fee_paid": "21948.17742486052",
+      "test_gross_pnl": "29540.79720897923",
+      "test_gross_win_rate": "0.9727152317880795",
+      "test_max_drawdown_ratio": "0.024452770899082543",
+      "test_net_pnl": "7592.619784118666",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.7592619784118666",
+      "test_trade_count": 3775,
+      "test_trades_per_day": "55.51470588235294117647058824",
+      "test_win_rate": "0.9727152317880795",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.0010406740470851774",
+      "train_average_gross_trade_roe": "0.006327298206277879",
+      "train_average_net_trade_return": "0.00024067404708517738",
+      "train_fee_paid": "174897.46084486003",
+      "train_gross_pnl": "227555.2426894114",
+      "train_gross_win_rate": "0.9665078475336323",
+      "train_max_drawdown_ratio": "0.06249809453513732",
+      "train_net_pnl": "52657.78184455062",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "5.265778184455062",
+      "train_trade_count": 14272,
+      "train_trades_per_day": "67.63981042654028436018957346",
+      "train_win_rate": "0.9665078475336323"
+    },
+    {
+      "combo_id": "scalp-multi-t1-r1-b4-router-rbt-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.004",
+        "range_params": "{'range_period': 45, 'edge_ratio': Decimal('0.18'), 'min_reversal_body_ratio': Decimal('0.15'), 'min_range_ratio': Decimal('0.0015')}",
+        "range_regime_period": "240",
+        "router_order": "('range', 'burst', 'trend')",
+        "trend_params": "{'trend_period': 60, 'pullback_period': 5, 'trigger_period': 1, 'min_trend_return': Decimal('0.002'), 'min_pullback': Decimal('0.0006'), 'min_trigger_return': Decimal('0.0002'), 'min_range_ratio': Decimal('0.0008')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.0010748435643463034",
+      "test_average_gross_trade_roe": "0.006535048871225524",
+      "test_average_net_trade_return": "0.00027484356434630323",
+      "test_fee_paid": "21223.92112365225",
+      "test_gross_pnl": "28443.98590750193",
+      "test_gross_win_rate": "0.9718918918918918",
+      "test_max_drawdown_ratio": "0.02445277089908268",
+      "test_net_pnl": "7220.06478384967",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.722006478384967",
+      "test_trade_count": 3700,
+      "test_trades_per_day": "54.41176470588235294117647059",
+      "test_win_rate": "0.9718918918918918",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.0010328994293865663",
+      "train_average_gross_trade_roe": "0.006280028530670324",
+      "train_average_net_trade_return": "0.00023289942938656632",
+      "train_fee_paid": "163127.9313957478",
+      "train_gross_pnl": "210346.72979411876",
+      "train_gross_win_rate": "0.9652639087018545",
+      "train_max_drawdown_ratio": "0.062723760660732",
+      "train_net_pnl": "47218.798398371844",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "4.721879839837184",
+      "train_trade_count": 14020,
+      "train_trades_per_day": "66.44549763033175355450236967",
+      "train_win_rate": "0.9652639087018545"
+    },
+    {
+      "combo_id": "scalp-multi-t1-r2-b4-router-tbr-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.008",
+        "range_params": "{'range_period': 90, 'edge_ratio': Decimal('0.15'), 'min_reversal_body_ratio': Decimal('0.20'), 'min_range_ratio': Decimal('0.0020')}",
+        "range_regime_period": "240",
+        "router_order": "('trend', 'burst', 'range')",
+        "trend_params": "{'trend_period': 60, 'pullback_period': 5, 'trigger_period': 1, 'min_trend_return': Decimal('0.002'), 'min_pullback': Decimal('0.0006'), 'min_trigger_return': Decimal('0.0002'), 'min_range_ratio': Decimal('0.0008')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.0010565354115394901",
+      "test_average_gross_trade_roe": "0.006423735302160101",
+      "test_average_net_trade_return": "0.00025653541153949016",
+      "test_fee_paid": "20464.735168350988",
+      "test_gross_pnl": "26973.39159617657",
+      "test_gross_win_rate": "0.9688269073010665",
+      "test_max_drawdown_ratio": "0.02697341021339178",
+      "test_net_pnl": "6508.656427825594",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.6508656427825593",
+      "test_trade_count": 3657,
+      "test_trades_per_day": "53.77941176470588235294117647",
+      "test_win_rate": "0.9688269073010665",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.0010302454075774728",
+      "train_average_gross_trade_roe": "0.006263892078071035",
+      "train_average_net_trade_return": "0.00023024540757747274",
+      "train_fee_paid": "158633.76817845454",
+      "train_gross_pnl": "204146.59022593574",
+      "train_gross_win_rate": "0.9648392652123995",
+      "train_max_drawdown_ratio": "0.055970777771753764",
+      "train_net_pnl": "45512.82204748055",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "4.551282204748055",
+      "train_trade_count": 13936,
+      "train_trades_per_day": "66.04739336492890995260663507",
+      "train_win_rate": "0.9648392652123995"
+    },
+    {
+      "combo_id": "scalp-multi-t1-r2-b4-router-btr-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.006",
+        "range_params": "{'range_period': 90, 'edge_ratio': Decimal('0.15'), 'min_reversal_body_ratio': Decimal('0.20'), 'min_range_ratio': Decimal('0.0020')}",
+        "range_regime_period": "240",
+        "router_order": "('burst', 'trend', 'range')",
+        "trend_params": "{'trend_period': 60, 'pullback_period': 5, 'trigger_period': 1, 'min_trend_return': Decimal('0.002'), 'min_pullback': Decimal('0.0006'), 'min_trigger_return': Decimal('0.0002'), 'min_range_ratio': Decimal('0.0008')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.0010593610328138126",
+      "test_average_gross_trade_roe": "0.006440915079507981",
+      "test_average_net_trade_return": "0.0002593610328138126",
+      "test_fee_paid": "20344.607230501733",
+      "test_gross_pnl": "26880.63031667342",
+      "test_gross_win_rate": "0.9694130614494351",
+      "test_max_drawdown_ratio": "0.024645557555302698",
+      "test_net_pnl": "6536.023086171648",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.6536023086171648",
+      "test_trade_count": 3629,
+      "test_trades_per_day": "53.36764705882352941176470588",
+      "test_win_rate": "0.9694130614494351",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.001026285342396389",
+      "train_average_gross_trade_roe": "0.006239814881770046",
+      "train_average_net_trade_return": "0.00022628534239638908",
+      "train_fee_paid": "153289.64742231232",
+      "train_gross_pnl": "196492.44423658052",
+      "train_gross_win_rate": "0.9642056547834261",
+      "train_max_drawdown_ratio": "0.059353329226927425",
+      "train_net_pnl": "43202.79681426853",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "4.320279681426853",
+      "train_trade_count": 13829,
+      "train_trades_per_day": "65.54028436018957345971563981",
+      "train_win_rate": "0.9642056547834261"
+    },
+    {
+      "combo_id": "scalp-multi-t1-r2-b4-router-rbt-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.004",
+        "range_params": "{'range_period': 90, 'edge_ratio': Decimal('0.15'), 'min_reversal_body_ratio': Decimal('0.20'), 'min_range_ratio': Decimal('0.0020')}",
+        "range_regime_period": "240",
+        "router_order": "('range', 'burst', 'trend')",
+        "trend_params": "{'trend_period': 60, 'pullback_period': 5, 'trigger_period': 1, 'min_trend_return': Decimal('0.002'), 'min_pullback': Decimal('0.0006'), 'min_trigger_return': Decimal('0.0002'), 'min_range_ratio': Decimal('0.0008')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.0010561968873074197",
+      "test_average_gross_trade_roe": "0.006421677074829112",
+      "test_average_net_trade_return": "0.00025619688730741974",
+      "test_fee_paid": "20062.1664684871",
+      "test_gross_pnl": "26436.129757528604",
+      "test_gross_win_rate": "0.968906163242643",
+      "test_max_drawdown_ratio": "0.024452770899082148",
+      "test_net_pnl": "6373.963289041447",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.6373963289041447",
+      "test_trade_count": 3602,
+      "test_trades_per_day": "52.97058823529411764705882353",
+      "test_win_rate": "0.968906163242643",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.0010219211642533033",
+      "train_average_gross_trade_roe": "0.006213280678660084",
+      "train_average_net_trade_return": "0.00022192116425330327",
+      "train_fee_paid": "146729.65313513094",
+      "train_gross_pnl": "187301.81349872635",
+      "train_gross_win_rate": "0.9635073862805325",
+      "train_max_drawdown_ratio": "0.06272376066073299",
+      "train_net_pnl": "40572.1603635958",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "4.057216036359581",
+      "train_trade_count": 13674,
+      "train_trades_per_day": "64.80568720379146919431279621",
+      "train_win_rate": "0.9635073862805325"
+    },
+    {
+      "combo_id": "scalp-multi-t1-r3-b4-router-tbr-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.008",
+        "range_params": "{'range_period': 180, 'edge_ratio': Decimal('0.12'), 'min_reversal_body_ratio': Decimal('0.25'), 'min_range_ratio': Decimal('0.0030')}",
+        "range_regime_period": "240",
+        "router_order": "('trend', 'burst', 'range')",
+        "trend_params": "{'trend_period': 60, 'pullback_period': 5, 'trigger_period': 1, 'min_trend_return': Decimal('0.002'), 'min_pullback': Decimal('0.0006'), 'min_trigger_return': Decimal('0.0002'), 'min_range_ratio': Decimal('0.0008')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.0010455672004753534",
+      "test_average_gross_trade_roe": "0.006357048578890149",
+      "test_average_net_trade_return": "0.00024556720047535336",
+      "test_fee_paid": "19400.378225090382",
+      "test_gross_pnl": "25305.628306210292",
+      "test_gross_win_rate": "0.9672038450664405",
+      "test_max_drawdown_ratio": "0.024922362408877432",
+      "test_net_pnl": "5905.250081119853",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.5905250081119854",
+      "test_trade_count": 3537,
+      "test_trades_per_day": "52.01470588235294117647058824",
+      "test_win_rate": "0.9672038450664405",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.0010184330946933111",
+      "train_average_gross_trade_roe": "0.006192073215735332",
+      "train_average_net_trade_return": "0.00021843309469331103",
+      "train_fee_paid": "141666.99757788552",
+      "train_gross_pnl": "180249.45312937224",
+      "train_gross_win_rate": "0.9629492951509336",
+      "train_max_drawdown_ratio": "0.06608211550041986",
+      "train_net_pnl": "38582.455551486535",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "3.8582455551486534",
+      "train_trade_count": 13549,
+      "train_trades_per_day": "64.21327014218009478672985782",
+      "train_win_rate": "0.9629492951509336"
+    },
+    {
+      "combo_id": "scalp-multi-t2-r1-b4-router-tbr-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.008",
+        "range_params": "{'range_period': 45, 'edge_ratio': Decimal('0.18'), 'min_reversal_body_ratio': Decimal('0.15'), 'min_range_ratio': Decimal('0.0015')}",
+        "range_regime_period": "240",
+        "router_order": "('trend', 'burst', 'range')",
+        "trend_params": "{'trend_period': 120, 'pullback_period': 8, 'trigger_period': 2, 'min_trend_return': Decimal('0.004'), 'min_pullback': Decimal('0.0010'), 'min_trigger_return': Decimal('0.0003'), 'min_range_ratio': Decimal('0.0012')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.0010484322508398434",
+      "test_average_gross_trade_roe": "0.006374468085106248",
+      "test_average_net_trade_return": "0.0002484322508398434",
+      "test_fee_paid": "19973.634858558496",
+      "test_gross_pnl": "26039.943791618003",
+      "test_gross_win_rate": "0.9675251959686451",
+      "test_max_drawdown_ratio": "0.018778856369988283",
+      "test_net_pnl": "6066.308933059545",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.6066308933059544",
+      "test_trade_count": 3572,
+      "test_trades_per_day": "52.52941176470588235294117647",
+      "test_win_rate": "0.9675251959686451",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.0010202518720217589",
+      "train_average_gross_trade_roe": "0.006203131381892294",
+      "train_average_net_trade_return": "0.00022025187202175873",
+      "train_fee_paid": "139611.30910918108",
+      "train_gross_pnl": "176976.17873316832",
+      "train_gross_win_rate": "0.9632402995234853",
+      "train_max_drawdown_ratio": "0.07040081405831192",
+      "train_net_pnl": "37364.869623987055",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "3.7364869623987054",
+      "train_trade_count": 13221,
+      "train_trades_per_day": "62.65876777251184834123222749",
+      "train_win_rate": "0.9632402995234853"
+    },
+    {
+      "combo_id": "scalp-multi-t1-r3-b4-router-btr-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.006",
+        "range_params": "{'range_period': 180, 'edge_ratio': Decimal('0.12'), 'min_reversal_body_ratio': Decimal('0.25'), 'min_range_ratio': Decimal('0.0030')}",
+        "range_regime_period": "240",
+        "router_order": "('burst', 'trend', 'range')",
+        "trend_params": "{'trend_period': 60, 'pullback_period': 5, 'trigger_period': 1, 'min_trend_return': Decimal('0.002'), 'min_pullback': Decimal('0.0006'), 'min_trigger_return': Decimal('0.0002'), 'min_range_ratio': Decimal('0.0008')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.001044638224391175",
+      "test_average_gross_trade_roe": "0.006351400404298343",
+      "test_average_net_trade_return": "0.0002446382243911749",
+      "test_fee_paid": "19265.850904395036",
+      "test_gross_pnl": "25109.954594605417",
+      "test_gross_win_rate": "0.9670548139733031",
+      "test_max_drawdown_ratio": "0.024922362408877363",
+      "test_net_pnl": "5844.103690210279",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.5844103690210278",
+      "test_trade_count": 3521,
+      "test_trades_per_day": "51.77941176470588235294117647",
+      "test_win_rate": "0.9670548139733031",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.00101455320726731",
+      "train_average_gross_trade_roe": "0.006168483500185244",
+      "train_average_net_trade_return": "0.00021455320726730985",
+      "train_fee_paid": "138005.22221619746",
+      "train_gross_pnl": "174893.25110939774",
+      "train_gross_win_rate": "0.9623285131627735",
+      "train_max_drawdown_ratio": "0.0660821155004205",
+      "train_net_pnl": "36888.028893199255",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "3.6888028893199256",
+      "train_trade_count": 13485,
+      "train_trades_per_day": "63.90995260663507109004739336",
+      "train_win_rate": "0.9623285131627735"
+    },
+    {
+      "combo_id": "scalp-multi-t1-r3-b4-router-rbt-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.004",
+        "range_params": "{'range_period': 180, 'edge_ratio': Decimal('0.12'), 'min_reversal_body_ratio': Decimal('0.25'), 'min_range_ratio': Decimal('0.0030')}",
+        "range_regime_period": "240",
+        "router_order": "('range', 'burst', 'trend')",
+        "trend_params": "{'trend_period': 60, 'pullback_period': 5, 'trigger_period': 1, 'min_trend_return': Decimal('0.002'), 'min_pullback': Decimal('0.0006'), 'min_trigger_return': Decimal('0.0002'), 'min_range_ratio': Decimal('0.0008')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.001042036266917972",
+      "test_average_gross_trade_roe": "0.0063355805028612695",
+      "test_average_net_trade_return": "0.00024203626691797185",
+      "test_fee_paid": "19100.002919534392",
+      "test_gross_pnl": "24838.004678449888",
+      "test_gross_win_rate": "0.9666381522668948",
+      "test_max_drawdown_ratio": "0.024922362408877786",
+      "test_net_pnl": "5738.001758915514",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.5738001758915514",
+      "test_trade_count": 3507,
+      "test_trades_per_day": "51.57352941176470588235294118",
+      "test_win_rate": "0.9666381522668948",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.0010122028703841888",
+      "train_average_gross_trade_roe": "0.006154193451935868",
+      "train_average_net_trade_return": "0.00021220287038418878",
+      "train_fee_paid": "133961.1956416569",
+      "train_gross_pnl": "169504.08586492235",
+      "train_gross_win_rate": "0.9619524592614741",
+      "train_max_drawdown_ratio": "0.06608211550041904",
+      "train_net_pnl": "35542.89022326474",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "3.554289022326474",
+      "train_trade_count": 13378,
+      "train_trades_per_day": "63.40284360189573459715639810",
+      "train_win_rate": "0.9619524592614741"
+    },
+    {
+      "combo_id": "scalp-multi-t2-r1-b4-router-btr-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.006",
+        "range_params": "{'range_period': 45, 'edge_ratio': Decimal('0.18'), 'min_reversal_body_ratio': Decimal('0.15'), 'min_range_ratio': Decimal('0.0015')}",
+        "range_regime_period": "240",
+        "router_order": "('burst', 'trend', 'range')",
+        "trend_params": "{'trend_period': 120, 'pullback_period': 8, 'trigger_period': 2, 'min_trend_return': Decimal('0.004'), 'min_pullback': Decimal('0.0010'), 'min_trigger_return': Decimal('0.0003'), 'min_range_ratio': Decimal('0.0012')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.0010489610019925768",
+      "test_average_gross_trade_roe": "0.006377682892114867",
+      "test_average_net_trade_return": "0.00024896100199257686",
+      "test_fee_paid": "19486.600401027517",
+      "test_gross_pnl": "25443.43627874961",
+      "test_gross_win_rate": "0.9678337603188158",
+      "test_max_drawdown_ratio": "0.019015046155355597",
+      "test_net_pnl": "5956.8358777221165",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.5956835877722116",
+      "test_trade_count": 3513,
+      "test_trades_per_day": "51.66176470588235294117647059",
+      "test_win_rate": "0.9678337603188158",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.0010133812010443618",
+      "train_average_gross_trade_roe": "0.006161357702349719",
+      "train_average_net_trade_return": "0.00021338120104436175",
+      "train_fee_paid": "131543.6342120424",
+      "train_gross_pnl": "165646.82659862572",
+      "train_gross_win_rate": "0.9621409921671018",
+      "train_max_drawdown_ratio": "0.07040081405831257",
+      "train_net_pnl": "34103.19238658336",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "3.410319238658336",
+      "train_trade_count": 13022,
+      "train_trades_per_day": "61.71563981042654028436018957",
+      "train_win_rate": "0.9621409921671018"
+    },
+    {
+      "combo_id": "scalp-multi-t3-r1-b4-router-tbr-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.008",
+        "range_params": "{'range_period': 45, 'edge_ratio': Decimal('0.18'), 'min_reversal_body_ratio': Decimal('0.15'), 'min_range_ratio': Decimal('0.0015')}",
+        "range_regime_period": "240",
+        "router_order": "('trend', 'burst', 'range')",
+        "trend_params": "{'trend_period': 240, 'pullback_period': 12, 'trigger_period': 3, 'min_trend_return': Decimal('0.006'), 'min_pullback': Decimal('0.0015'), 'min_trigger_return': Decimal('0.0004'), 'min_range_ratio': Decimal('0.0015')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.0010394736842105042",
+      "test_average_gross_trade_roe": "0.006319999999999866",
+      "test_average_net_trade_return": "0.00023947368421050426",
+      "test_fee_paid": "18688.76657266963",
+      "test_gross_pnl": "24177.798185010026",
+      "test_gross_win_rate": "0.9660818713450292",
+      "test_max_drawdown_ratio": "0.02998936176389269",
+      "test_net_pnl": "5489.031612340352",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.5489031612340352",
+      "test_trade_count": 3420,
+      "test_trades_per_day": "50.29411764705882352941176471",
+      "test_win_rate": "0.9660818713450292",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.0010164520461368061",
+      "train_average_gross_trade_roe": "0.0061800284405117804",
+      "train_average_net_trade_return": "0.00021645204613680603",
+      "train_fee_paid": "124179.67152421294",
+      "train_gross_pnl": "157381.33871308822",
+      "train_gross_win_rate": "0.9626323273818929",
+      "train_max_drawdown_ratio": "0.05786141578159201",
+      "train_net_pnl": "33201.66718887395",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "3.320166718887395",
+      "train_trade_count": 12658,
+      "train_trades_per_day": "59.99052132701421800947867299",
+      "train_win_rate": "0.9626323273818929"
+    },
+    {
+      "combo_id": "scalp-multi-t1-r1-b1-router-tbr-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'follow'}",
+        "max_abs_trend_for_range": "0.008",
+        "range_params": "{'range_period': 45, 'edge_ratio': Decimal('0.18'), 'min_reversal_body_ratio': Decimal('0.15'), 'min_range_ratio': Decimal('0.0015')}",
+        "range_regime_period": "240",
+        "router_order": "('trend', 'burst', 'range')",
+        "trend_params": "{'trend_period': 60, 'pullback_period': 5, 'trigger_period': 1, 'min_trend_return': Decimal('0.002'), 'min_pullback': Decimal('0.0006'), 'min_trigger_return': Decimal('0.0002'), 'min_range_ratio': Decimal('0.0008')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.0010408036454017991",
+      "test_average_gross_trade_roe": "0.006328086164042939",
+      "test_average_net_trade_return": "0.00024080364540179913",
+      "test_fee_paid": "20074.958812348817",
+      "test_gross_pnl": "26008.524001923743",
+      "test_gross_win_rate": "0.9663076498204916",
+      "test_max_drawdown_ratio": "0.04901868388629495",
+      "test_net_pnl": "5933.565189574827",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.5933565189574826",
+      "test_trade_count": 3621,
+      "test_trades_per_day": "53.25",
+      "test_win_rate": "0.9663076498204916",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.000991005958468746",
+      "train_average_gross_trade_roe": "0.0060253162274899776",
+      "train_average_net_trade_return": "0.00019100595846874616",
+      "train_fee_paid": "131775.6430483439",
+      "train_gross_pnl": "163896.39854493274",
+      "train_gross_win_rate": "0.958516522479081",
+      "train_max_drawdown_ratio": "0.1479534633220943",
+      "train_net_pnl": "32120.755496589198",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "3.2120755496589197",
+      "train_trade_count": 14102,
+      "train_trades_per_day": "66.83412322274881516587677725",
+      "train_win_rate": "0.958516522479081"
+    },
+    {
+      "combo_id": "scalp-multi-t2-r1-b4-router-rbt-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.004",
+        "range_params": "{'range_period': 45, 'edge_ratio': Decimal('0.18'), 'min_reversal_body_ratio': Decimal('0.15'), 'min_range_ratio': Decimal('0.0015')}",
+        "range_regime_period": "240",
+        "router_order": "('range', 'burst', 'trend')",
+        "trend_params": "{'trend_period': 120, 'pullback_period': 8, 'trigger_period': 2, 'min_trend_return': Decimal('0.004'), 'min_pullback': Decimal('0.0010'), 'min_trigger_return': Decimal('0.0003'), 'min_range_ratio': Decimal('0.0012')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.0010351160740522847",
+      "test_average_gross_trade_roe": "0.0062935057302378914",
+      "test_average_net_trade_return": "0.00023511607405228463",
+      "test_fee_paid": "18416.48134387069",
+      "test_gross_pnl": "23749.534615658755",
+      "test_gross_win_rate": "0.9656185718483691",
+      "test_max_drawdown_ratio": "0.02276530055026425",
+      "test_net_pnl": "5333.053271788007",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.5333053271788006",
+      "test_trade_count": 3403,
+      "test_trades_per_day": "50.04411764705882352941176471",
+      "test_win_rate": "0.9656185718483691",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.001006365922665804",
+      "train_average_gross_trade_roe": "0.006118704809808088",
+      "train_average_net_trade_return": "0.00020636592266580386",
+      "train_fee_paid": "122708.3502282028",
+      "train_gross_pnl": "153348.0555983221",
+      "train_gross_win_rate": "0.9610185476265325",
+      "train_max_drawdown_ratio": "0.07328215988751643",
+      "train_net_pnl": "30639.705370119707",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "3.0639705370119708",
+      "train_trade_count": 12724,
+      "train_trades_per_day": "60.30331753554502369668246445",
+      "train_win_rate": "0.9610185476265325"
+    },
+    {
+      "combo_id": "scalp-multi-t3-r1-b4-router-btr-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.006",
+        "range_params": "{'range_period': 45, 'edge_ratio': Decimal('0.18'), 'min_reversal_body_ratio': Decimal('0.15'), 'min_range_ratio': Decimal('0.0015')}",
+        "range_regime_period": "240",
+        "router_order": "('burst', 'trend', 'range')",
+        "trend_params": "{'trend_period': 240, 'pullback_period': 12, 'trigger_period': 3, 'min_trend_return': Decimal('0.006'), 'min_pullback': Decimal('0.0015'), 'min_trigger_return': Decimal('0.0004'), 'min_range_ratio': Decimal('0.0015')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.0010333881087540866",
+      "test_average_gross_trade_roe": "0.006282999701224846",
+      "test_average_net_trade_return": "0.0002333881087540864",
+      "test_fee_paid": "18025.095266069646",
+      "test_gross_pnl": "23203.56947511953",
+      "test_gross_win_rate": "0.9653420974006574",
+      "test_max_drawdown_ratio": "0.03022285306800466",
+      "test_net_pnl": "5178.474209049929",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.5178474209049929",
+      "test_trade_count": 3347,
+      "test_trades_per_day": "49.22058823529411764705882353",
+      "test_win_rate": "0.9653420974006574",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.001008016032064104",
+      "train_average_gross_trade_roe": "0.006128737474949753",
+      "train_average_net_trade_return": "0.000208016032064104",
+      "train_fee_paid": "116454.32008263186",
+      "train_gross_pnl": "146432.5832616318",
+      "train_gross_win_rate": "0.9612825651302606",
+      "train_max_drawdown_ratio": "0.05763457895894727",
+      "train_net_pnl": "29978.26317899987",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "2.997826317899987",
+      "train_trade_count": 12475,
+      "train_trades_per_day": "59.12322274881516587677725118",
+      "train_win_rate": "0.9612825651302606"
+    },
+    {
+      "combo_id": "scalp-multi-t1-r1-b5-router-tbr-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 30, 'impulse_period': 3, 'volume_period': 45, 'min_impulse_return': Decimal('0.0012'), 'min_volume_ratio': Decimal('1.2'), 'breakout_buffer': Decimal('0.0001'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.008",
+        "range_params": "{'range_period': 45, 'edge_ratio': Decimal('0.18'), 'min_reversal_body_ratio': Decimal('0.15'), 'min_range_ratio': Decimal('0.0015')}",
+        "range_regime_period": "240",
+        "router_order": "('trend', 'burst', 'range')",
+        "trend_params": "{'trend_period': 60, 'pullback_period': 5, 'trigger_period': 1, 'min_trend_return': Decimal('0.002'), 'min_pullback': Decimal('0.0006'), 'min_trigger_return': Decimal('0.0002'), 'min_range_ratio': Decimal('0.0008')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.0010346122337520252",
+      "test_average_gross_trade_roe": "0.006290442381212314",
+      "test_average_net_trade_return": "0.00023461223375202523",
+      "test_fee_paid": "20270.0183721647",
+      "test_gross_pnl": "26094.4368776519",
+      "test_gross_win_rate": "0.9653194975423266",
+      "test_max_drawdown_ratio": "0.04124416188381045",
+      "test_net_pnl": "5824.4185054872",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.58244185054872",
+      "test_trade_count": 3662,
+      "test_trades_per_day": "53.85294117647058823529411765",
+      "test_win_rate": "0.9653194975423266",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.0009852380609896194",
+      "train_average_gross_trade_roe": "0.005990247410816886",
+      "train_average_net_trade_return": "0.00018523806098961945",
+      "train_fee_paid": "126231.28358871337",
+      "train_gross_pnl": "155773.92291979856",
+      "train_gross_win_rate": "0.957638089758343",
+      "train_max_drawdown_ratio": "0.08924987225041547",
+      "train_net_pnl": "29542.639331084938",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "2.9542639331084937",
+      "train_trade_count": 13904,
+      "train_trades_per_day": "65.89573459715639810426540284",
+      "train_win_rate": "0.957638089758343"
+    },
+    {
+      "combo_id": "scalp-multi-t2-r2-b4-router-tbr-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.008",
+        "range_params": "{'range_period': 90, 'edge_ratio': Decimal('0.15'), 'min_reversal_body_ratio': Decimal('0.20'), 'min_range_ratio': Decimal('0.0020')}",
+        "range_regime_period": "240",
+        "router_order": "('trend', 'burst', 'range')",
+        "trend_params": "{'trend_period': 120, 'pullback_period': 8, 'trigger_period': 2, 'min_trend_return': Decimal('0.004'), 'min_pullback': Decimal('0.0010'), 'min_trigger_return': Decimal('0.0003'), 'min_range_ratio': Decimal('0.0012')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.001035969084423284",
+      "test_average_gross_trade_roe": "0.0062986920332935665",
+      "test_average_net_trade_return": "0.00023596908442328392",
+      "test_fee_paid": "18177.49304560054",
+      "test_gross_pnl": "23459.112301917125",
+      "test_gross_win_rate": "0.9655172413793104",
+      "test_max_drawdown_ratio": "0.015250399713138444",
+      "test_net_pnl": "5281.61925631653",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.528161925631653",
+      "test_trade_count": 3364,
+      "test_trades_per_day": "49.47058823529411764705882353",
+      "test_win_rate": "0.9655172413793104",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.001002450786623424",
+      "train_average_gross_trade_roe": "0.006094900782670418",
+      "train_average_net_trade_return": "0.00020245078662342394",
+      "train_fee_paid": "118610.4546019997",
+      "train_gross_pnl": "147860.2466802353",
+      "train_gross_win_rate": "0.9603921258597518",
+      "train_max_drawdown_ratio": "0.06818029133134923",
+      "train_net_pnl": "29249.792078234655",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "2.9249792078234655",
+      "train_trade_count": 12649,
+      "train_trades_per_day": "59.94786729857819905213270142",
+      "train_win_rate": "0.9603921258597518"
+    },
+    {
+      "combo_id": "scalp-multi-t2-r2-b4-router-btr-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.006",
+        "range_params": "{'range_period': 90, 'edge_ratio': Decimal('0.15'), 'min_reversal_body_ratio': Decimal('0.20'), 'min_range_ratio': Decimal('0.0020')}",
+        "range_regime_period": "240",
+        "router_order": "('burst', 'trend', 'range')",
+        "trend_params": "{'trend_period': 120, 'pullback_period': 8, 'trigger_period': 2, 'min_trend_return': Decimal('0.004'), 'min_pullback': Decimal('0.0010'), 'min_trigger_return': Decimal('0.0003'), 'min_range_ratio': Decimal('0.0012')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.0010351232578181466",
+      "test_average_gross_trade_roe": "0.0062935494075343325",
+      "test_average_net_trade_return": "0.0002351232578181466",
+      "test_fee_paid": "17981.026011588547",
+      "test_gross_pnl": "23185.80068090238",
+      "test_gross_win_rate": "0.9655275779376499",
+      "test_max_drawdown_ratio": "0.015487438833465721",
+      "test_net_pnl": "5204.774669313832",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.5204774669313832",
+      "test_trade_count": 3336,
+      "test_trades_per_day": "49.05882352941176470588235294",
+      "test_win_rate": "0.9655275779376499",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.0009981611768467937",
+      "train_average_gross_trade_roe": "0.006068819955228506",
+      "train_average_net_trade_return": "0.00019816117684679367",
+      "train_fee_paid": "114084.14520674547",
+      "train_gross_pnl": "141644.7425128494",
+      "train_gross_win_rate": "0.9597057882954909",
+      "train_max_drawdown_ratio": "0.06818029133135042",
+      "train_net_pnl": "27560.59730610367",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "2.756059730610367",
+      "train_trade_count": 12508,
+      "train_trades_per_day": "59.27962085308056872037914692",
+      "train_win_rate": "0.9597057882954909"
+    },
+    {
+      "combo_id": "scalp-multi-t1-r1-b5-router-btr-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 30, 'impulse_period': 3, 'volume_period': 45, 'min_impulse_return': Decimal('0.0012'), 'min_volume_ratio': Decimal('1.2'), 'breakout_buffer': Decimal('0.0001'), 'mode': 'fade'}",
+        "max_abs_trend_for_range": "0.006",
+        "range_params": "{'range_period': 45, 'edge_ratio': Decimal('0.18'), 'min_reversal_body_ratio': Decimal('0.15'), 'min_range_ratio': Decimal('0.0015')}",
+        "range_regime_period": "240",
+        "router_order": "('burst', 'trend', 'range')",
+        "trend_params": "{'trend_period': 60, 'pullback_period': 5, 'trigger_period': 1, 'min_trend_return': Decimal('0.002'), 'min_pullback': Decimal('0.0006'), 'min_trigger_return': Decimal('0.0002'), 'min_range_ratio': Decimal('0.0008')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.0010277661800180548",
+      "test_average_gross_trade_roe": "0.006248818374509773",
+      "test_average_net_trade_return": "0.00022776618001805473",
+      "test_fee_paid": "19734.84207020443",
+      "test_gross_pnl": "25251.54349147531",
+      "test_gross_win_rate": "0.9642758238715038",
+      "test_max_drawdown_ratio": "0.03779294319803511",
+      "test_net_pnl": "5516.701421270851",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.5516701421270851",
+      "test_trade_count": 3611,
+      "test_trades_per_day": "53.10294117647058823529411765",
+      "test_win_rate": "0.9642758238715038",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.000976795861867964",
+      "train_average_gross_trade_roe": "0.00593891884015722",
+      "train_average_net_trade_return": "0.00017679586186796398",
+      "train_fee_paid": "119391.27891985881",
+      "train_gross_pnl": "145905.11518594107",
+      "train_gross_win_rate": "0.956287337898878",
+      "train_max_drawdown_ratio": "0.10030525201362095",
+      "train_net_pnl": "26513.83626608189",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "2.651383626608189",
+      "train_trade_count": 13726,
+      "train_trades_per_day": "65.05213270142180094786729858",
+      "train_win_rate": "0.956287337898878"
+    },
+    {
+      "combo_id": "scalp-multi-t1-r1-b1-router-btr-sl0050-rr0_25-p2",
+      "position_sizing_params": {
+        "kind": "quality-volatility",
+        "max_equity_ratio": "0.12",
+        "max_leverage": "8",
+        "min_equity_ratio": "0.02",
+        "min_leverage": "2"
+      },
+      "strategy_params": {
+        "burst_params": "{'breakout_period': 12, 'impulse_period': 1, 'volume_period': 20, 'min_impulse_return': Decimal('0.0008'), 'min_volume_ratio': Decimal('1.0'), 'breakout_buffer': Decimal('0.0000'), 'mode': 'follow'}",
+        "max_abs_trend_for_range": "0.006",
+        "range_params": "{'range_period': 45, 'edge_ratio': Decimal('0.18'), 'min_reversal_body_ratio': Decimal('0.15'), 'min_range_ratio': Decimal('0.0015')}",
+        "range_regime_period": "240",
+        "router_order": "('burst', 'trend', 'range')",
+        "trend_params": "{'trend_period': 60, 'pullback_period': 5, 'trigger_period': 1, 'min_trend_return': Decimal('0.002'), 'min_pullback': Decimal('0.0006'), 'min_trigger_return': Decimal('0.0002'), 'min_range_ratio': Decimal('0.0008')}",
+        "trend_regime_period": "240"
+      },
+      "test_average_gross_trade_return": "0.0010423704954954718",
+      "test_average_gross_trade_roe": "0.006337612612612469",
+      "test_average_net_trade_return": "0.0002423704954954719",
+      "test_fee_paid": "19545.477959422707",
+      "test_gross_pnl": "25385.3793452885",
+      "test_gross_win_rate": "0.9667792792792793",
+      "test_max_drawdown_ratio": "0.04380031908489842",
+      "test_net_pnl": "5839.901385865907",
+      "test_period": {
+        "end_at": "2026-07-08T00:00:00+00:00",
+        "start_at": "2026-05-01T00:00:00+00:00"
+      },
+      "test_return_ratio": "0.5839901385865908",
+      "test_trade_count": 3552,
+      "test_trades_per_day": "52.23529411764705882352941176",
+      "test_win_rate": "0.9667792792792793",
+      "tpsl_params": {
+        "kind": "fixed",
+        "reward_risk_ratio": "0.25",
+        "stop_loss_ratio": "0.0050"
+      },
+      "train_average_gross_trade_return": "0.0009753045821648801",
+      "train_average_gross_trade_roe": "0.00592985185956247",
+      "train_average_net_trade_return": "0.00017530458216487993",
+      "train_fee_paid": "117609.3394758247",
+      "train_gross_pnl": "144119.0173967933",
+      "train_gross_win_rate": "0.9560034677069787",
+      "train_max_drawdown_ratio": "0.15061586603904228",
+      "train_net_pnl": "26509.677920968672",
+      "train_period": {
+        "end_at": "2026-04-30T00:00:00+00:00",
+        "start_at": "2025-10-01T00:00:00+00:00"
+      },
+      "train_return_ratio": "2.6509677920968673",
+      "train_trade_count": 13842,
+      "train_trades_per_day": "65.60189573459715639810426540",
+      "train_win_rate": "0.9560034677069787"
+    }
+  ],
+  "selected_count": 20,
+  "source_results": "docs\\backtests\\scalping-train-test-combo-search.jsonl",
+  "thresholds": {
+    "min_train_average_gross_trade_roe": "0.003",
+    "min_train_gross_win_rate": "0.60",
+    "min_train_return_ratio": "0",
+    "min_train_trades_per_day": "10"
+  },
+  "top_selected_combo_id": "scalp-multi-t1-r1-b4-router-tbr-sl0050-rr0_25-p2",
+  "top_selected_test_result": {
+    "average_gross_trade_roe": "0.00656562173458711",
+    "gross_win_rate": "0.9725705329153606",
+    "max_drawdown_ratio": "0.02769684651660391",
+    "return_ratio": "0.7728799576505401",
+    "trades_per_day": "56.29411764705882352941176471"
+  }
+}

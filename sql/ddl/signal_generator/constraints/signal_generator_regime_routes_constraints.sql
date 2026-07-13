@@ -1,0 +1,1 @@
+-- Constraints are defined inline in sql/ddl/signal_generator/tables/signal_generator_regime_routes.sql.

@@ -1,0 +1,1 @@
+-- Constraints are defined inline in sql/ddl/lifecycle/tables/strategy_evaluation_metrics.sql.
