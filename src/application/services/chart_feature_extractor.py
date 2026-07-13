@@ -124,36 +124,49 @@ def calculate_registry_values(
     bars_15m: tuple[Candle, ...],
     bars_1h: tuple[Candle, ...],
 ) -> dict[str, float]:
-    closes_15m = [float(bar.close_price) for bar in bars_15m]
-    returns_15m = _simple_returns(closes_15m)
-    log_returns_15m = _log_returns(closes_15m)
+    path_4h = _price_path(bars_15m[-16:])
+    path_12h = _price_path(bars_15m[-48:])
+    path_1d = _price_path(bars_15m[-96:])
+    path_3d = _price_path(bars_15m[-288:])
+    path_7d = _price_path(bars_15m)
+    returns_1d = _simple_returns(path_1d)
+    returns_7d = _simple_returns(path_7d)
+    log_returns_4h = _log_returns(path_4h)
+    log_returns_1d = _log_returns(path_1d)
+    log_returns_7d = _log_returns(path_7d)
     closes_1h = [float(bar.close_price) for bar in bars_1h]
     volumes_1h = [float(bar.volume) for bar in bars_1h]
 
-    rv_1d = _population_stddev(log_returns_15m[-95:])
-    rv_7d = _population_stddev(log_returns_15m)
+    rv_1d = _population_stddev(log_returns_1d)
+    rv_7d = _population_stddev(log_returns_7d)
     values = {
-        "return_4h": _period_return(closes_15m[-16:]),
-        "return_12h": _period_return(closes_15m[-48:]),
-        "return_1d": _period_return(closes_15m[-96:]),
-        "return_3d": _period_return(closes_15m[-288:]),
-        "return_7d": _period_return(closes_15m),
-        "rv_4h": _population_stddev(log_returns_15m[-15:]),
+        "return_4h": _period_return(path_4h),
+        "return_12h": _period_return(path_12h),
+        "return_1d": _period_return(path_1d),
+        "return_3d": _period_return(path_3d),
+        "return_7d": _period_return(path_7d),
+        "rv_4h": _population_stddev(log_returns_4h),
         "rv_1d": rv_1d,
         "rv_7d": rv_7d,
         "rv_ratio_1d_7d": _divide(rv_1d, rv_7d),
-        "atr_ratio_1d": _atr_ratio(bars_1h[-24:]),
-        "atr_ratio_7d": _atr_ratio(bars_1h),
+        "atr_ratio_1d": _atr_ratio(
+            bars_1h[-24:],
+            first_previous_close=float(bars_1h[-25].close_price),
+        ),
+        "atr_ratio_7d": _atr_ratio(
+            bars_1h,
+            first_previous_close=float(bars_1h[0].open_price),
+        ),
         "range_ratio_7d": _divide(max(float(bar.high_price) for bar in bars_1h) - min(float(bar.low_price) for bar in bars_1h), closes_1h[-1]),
         "close_location_7d": _close_location(bars_1h),
-        "directional_efficiency_1d": _directional_efficiency(closes_15m[-96:]),
-        "directional_efficiency_7d": _directional_efficiency(closes_15m),
-        "sign_change_rate_1d": _sign_change_rate(returns_15m[-95:]),
-        "sign_change_rate_7d": _sign_change_rate(returns_15m),
-        "return_autocorr_1d": _lag_one_correlation(returns_15m[-95:]),
-        "return_autocorr_7d": _lag_one_correlation(returns_15m),
-        "max_drawdown_7d": _max_drawdown(closes_15m),
-        "max_runup_7d": _max_runup(closes_15m),
+        "directional_efficiency_1d": _directional_efficiency(path_1d),
+        "directional_efficiency_7d": _directional_efficiency(path_7d),
+        "sign_change_rate_1d": _sign_change_rate(returns_1d),
+        "sign_change_rate_7d": _sign_change_rate(returns_7d),
+        "return_autocorr_1d": _lag_one_correlation(returns_1d),
+        "return_autocorr_7d": _lag_one_correlation(returns_7d),
+        "max_drawdown_7d": _max_drawdown(path_7d),
+        "max_runup_7d": _max_runup(path_7d),
         "breakout_rate_7d": _breakout_rate(bars_1h),
         "mean_body_ratio_7d": statistics.fmean(_candle_ratios(bar)[0] for bar in bars_1h),
         "mean_upper_wick_ratio_7d": statistics.fmean(_candle_ratios(bar)[1] for bar in bars_1h),
@@ -167,6 +180,10 @@ def calculate_registry_values(
     if any(not math.isfinite(value) for value in values.values()):
         raise ValueError("calculated features must be finite")
     return values
+
+
+def _price_path(bars: tuple[Candle, ...]) -> list[float]:
+    return [float(bars[0].open_price), *(float(bar.close_price) for bar in bars)]
 
 
 def _divide(numerator: float, denominator: float) -> float:
@@ -198,13 +215,18 @@ def _population_stddev(values: list[float]) -> float:
     return statistics.pstdev(values)
 
 
-def _atr_ratio(bars: tuple[Candle, ...]) -> float:
+def _atr_ratio(
+    bars: tuple[Candle, ...],
+    *,
+    first_previous_close: float,
+) -> float:
     true_ranges = []
-    for index, bar in enumerate(bars):
+    previous_close = first_previous_close
+    for bar in bars:
         high = float(bar.high_price)
         low = float(bar.low_price)
-        previous_close = float(bars[index - 1].close_price) if index else float(bar.open_price)
         true_ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)))
+        previous_close = float(bar.close_price)
     return _divide(statistics.fmean(true_ranges), float(bars[-1].close_price))
 
 
@@ -220,8 +242,11 @@ def _directional_efficiency(closes: list[float]) -> float:
 
 
 def _sign_change_rate(returns: list[float]) -> float:
-    nonzero = [value for value in returns if value != 0]
-    pairs = tuple(zip(nonzero, nonzero[1:]))
+    pairs = tuple(
+        (left, right)
+        for left, right in zip(returns, returns[1:])
+        if left != 0 and right != 0
+    )
     return _divide(sum(left * right < 0 for left, right in pairs), len(pairs))
 
 

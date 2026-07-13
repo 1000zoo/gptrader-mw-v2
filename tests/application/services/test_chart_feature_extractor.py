@@ -1,11 +1,14 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import math
+import statistics
 
 import pytest
 
 from src.application.services.chart_feature_extractor import (
     ChartFeatureExtractor,
+    _sign_change_rate,
     aggregate_closed_candles,
     extract_chart_feature_vector,
 )
@@ -115,7 +118,7 @@ def test_extractor_calculates_targeted_return_and_shape_formulas(complete_candle
     bars_15m = aggregate_closed_candles(complete_candles, minutes=15)
     bars_1h = aggregate_closed_candles(complete_candles, minutes=60)
     recent_4h = bars_15m[-16:]
-    expected_return = float(recent_4h[-1].close_price / recent_4h[0].close_price - 1)
+    expected_return = float(recent_4h[-1].close_price / recent_4h[0].open_price - 1)
     ranges = [bar.high_price - bar.low_price for bar in bars_1h]
     expected_body_ratio = sum(
         abs(bar.close_price - bar.open_price) / width
@@ -125,6 +128,97 @@ def test_extractor_calculates_targeted_return_and_shape_formulas(complete_candle
     assert vector.values["return_4h"] == pytest.approx(expected_return)
     assert vector.values["mean_body_ratio_7d"] == pytest.approx(float(expected_body_ratio))
     assert all(math.isfinite(value) for value in vector.values.values())
+
+
+def test_period_features_cover_every_interval_in_the_named_lookback(complete_candles):
+    first_recent_index = len(complete_candles) - 24 * 60
+    first_recent = complete_candles[first_recent_index]
+    changed_open = first_recent.close_price / Decimal("2")
+    changed = replace(
+        first_recent,
+        open_price=changed_open,
+        low_price=min(first_recent.low_price, changed_open),
+    )
+    candles = (
+        complete_candles[:first_recent_index]
+        + (changed,)
+        + complete_candles[first_recent_index + 1 :]
+    )
+
+    vector = extract_chart_feature_vector(candles, ANCHOR)
+    recent = aggregate_closed_candles(candles, minutes=15)[-96:]
+    price_path = [float(recent[0].open_price), *(float(bar.close_price) for bar in recent)]
+    log_returns = [math.log(current / previous) for previous, current in zip(price_path, price_path[1:])]
+    simple_returns = [current / previous - 1 for previous, current in zip(price_path, price_path[1:])]
+    movements = [current - previous for previous, current in zip(price_path, price_path[1:])]
+    eligible_pairs = [
+        (left, right)
+        for left, right in zip(simple_returns, simple_returns[1:])
+        if left != 0 and right != 0
+    ]
+    left = simple_returns[:-1]
+    right = simple_returns[1:]
+    left_mean = statistics.fmean(left)
+    right_mean = statistics.fmean(right)
+    covariance = statistics.fmean((x - left_mean) * (y - right_mean) for x, y in zip(left, right))
+    left_variance = statistics.fmean((x - left_mean) ** 2 for x in left)
+    right_variance = statistics.fmean((y - right_mean) ** 2 for y in right)
+
+    assert len(log_returns) == 96
+    assert vector.values["return_1d"] == pytest.approx(price_path[-1] / price_path[0] - 1)
+    assert vector.values["rv_1d"] == pytest.approx(statistics.pstdev(log_returns))
+    assert vector.values["directional_efficiency_1d"] == pytest.approx(
+        abs(price_path[-1] - price_path[0]) / sum(abs(value) for value in movements)
+    )
+    assert vector.values["sign_change_rate_1d"] == pytest.approx(
+        sum(first * second < 0 for first, second in eligible_pairs) / len(eligible_pairs)
+    )
+    assert vector.values["return_autocorr_1d"] == pytest.approx(
+        covariance / math.sqrt(left_variance * right_variance)
+    )
+
+
+def test_one_day_atr_uses_close_before_the_one_day_window(complete_candles):
+    first_recent_index = len(complete_candles) - 24 * 60
+    gap = Decimal("50")
+    shifted = tuple(
+        replace(
+            candle,
+            open_price=candle.open_price + gap,
+            high_price=candle.high_price + gap,
+            low_price=candle.low_price + gap,
+            close_price=candle.close_price + gap,
+        )
+        for candle in complete_candles[first_recent_index:]
+    )
+    candles = complete_candles[:first_recent_index] + shifted
+
+    vector = extract_chart_feature_vector(candles, ANCHOR)
+    bars = aggregate_closed_candles(candles, minutes=60)
+    recent = bars[-24:]
+    previous_close = float(bars[-25].close_price)
+    true_ranges = []
+    for bar in recent:
+        high = float(bar.high_price)
+        low = float(bar.low_price)
+        true_ranges.append(max(high - low, abs(high - previous_close), abs(low - previous_close)))
+        previous_close = float(bar.close_price)
+    expected = statistics.fmean(true_ranges) / float(recent[-1].close_price)
+    wrong_first_reference = max(
+        float(recent[0].high_price - recent[0].low_price),
+        abs(float(recent[0].high_price - recent[0].open_price)),
+        abs(float(recent[0].low_price - recent[0].open_price)),
+    )
+
+    assert true_ranges[0] != pytest.approx(wrong_first_reference)
+    assert vector.values["atr_ratio_1d"] == pytest.approx(expected)
+
+
+def test_zero_returns_break_sign_change_adjacency():
+    with pytest.raises(ValueError, match="zero denominator"):
+        _sign_change_rate([0.1, 0.0, -0.2])
+
+    assert _sign_change_rate([0.1, 0.0, -0.2, -0.3]) == 0.0
 
 
 @pytest.mark.parametrize(
