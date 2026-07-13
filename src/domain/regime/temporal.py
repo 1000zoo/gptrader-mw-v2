@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 
 @dataclass(frozen=True)
@@ -8,7 +8,7 @@ class UtcInterval:
     end_at: datetime
 
     def __post_init__(self) -> None:
-        if self.start_at.utcoffset() != timedelta(0) or self.end_at.utcoffset() != timedelta(0):
+        if not _is_canonical_utc(self.start_at) or not _is_canonical_utc(self.end_at):
             raise ValueError("interval timestamps must be UTC")
         if self.end_at <= self.start_at:
             raise ValueError("interval end must be after start")
@@ -38,7 +38,7 @@ class RegimeWalkForwardFold:
 
 def is_regime_boundary(value: datetime) -> bool:
     return (
-        value.utcoffset() == timedelta(0)
+        _is_canonical_utc(value)
         and value.minute == 0
         and value.second == 0
         and value.microsecond == 0
@@ -80,10 +80,14 @@ def build_weekly_episodes(start_at: datetime, end_at: datetime) -> list[WeeklyEp
 
 def _is_monday_midnight_utc(value: datetime) -> bool:
     return (
-        value.utcoffset() == timedelta(0)
+        _is_canonical_utc(value)
         and value.weekday() == 0
         and value.hour == 0
         and value.minute == 0
         and value.second == 0
         and value.microsecond == 0
     )
+
+
+def _is_canonical_utc(value: datetime) -> bool:
+    return value.tzinfo is timezone.utc

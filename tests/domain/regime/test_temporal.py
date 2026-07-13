@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -47,6 +48,25 @@ def test_utc_interval_requires_utc_timestamps_and_positive_duration():
         UtcInterval(dt("2026-01-05"), dt("2026-01-05"))
 
 
+def test_utc_interval_rejects_zero_offset_dst_zone_timestamps():
+    london = ZoneInfo("Europe/London")
+    start_at = datetime(2026, 1, 5, tzinfo=london)
+    end_at = datetime(2026, 1, 12, tzinfo=london)
+    assert start_at.utcoffset() == timedelta(0)
+
+    with pytest.raises(ValueError, match="timestamps must be UTC"):
+        UtcInterval(start_at, end_at)
+
+
+def test_regime_boundary_rejects_zero_offset_dst_zone_timestamp():
+    boundary = datetime(2026, 1, 5, 12, tzinfo=ZoneInfo("Europe/London"))
+    assert boundary.utcoffset() == timedelta(0)
+
+    assert not is_regime_boundary(boundary)
+    with pytest.raises(ValueError, match="four-hour UTC boundary"):
+        feature_window(boundary)
+
+
 def test_weekly_mapping_episodes_are_non_overlapping_monday_utc():
     episodes = build_weekly_episodes(
         datetime(2026, 1, 5, tzinfo=timezone.utc),
@@ -73,6 +93,16 @@ def test_weekly_mapping_episodes_are_non_overlapping_monday_utc():
     ],
 )
 def test_weekly_mapping_episodes_require_monday_midnight_utc_endpoints(start_at, end_at):
+    with pytest.raises(ValueError, match="Monday 00:00 UTC"):
+        build_weekly_episodes(start_at, end_at)
+
+
+def test_weekly_mapping_episodes_reject_zero_offset_dst_zone_endpoints():
+    london = ZoneInfo("Europe/London")
+    start_at = datetime(2026, 1, 5, tzinfo=london)
+    end_at = datetime(2026, 1, 12, tzinfo=london)
+    assert start_at.utcoffset() == timedelta(0)
+
     with pytest.raises(ValueError, match="Monday 00:00 UTC"):
         build_weekly_episodes(start_at, end_at)
 
