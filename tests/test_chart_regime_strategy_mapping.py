@@ -22,6 +22,10 @@ from scripts.chart_regime_strategy_mapping import (
     write_walk_forward_reports,
 )
 from scripts.chart_regime_strategy_mapping import _canonical_hash
+from scripts.chart_regime_strategy_mapping import _gmm_bic, _gmm_parameter_count
+from scripts.chart_regime_strategy_mapping import _chronological_block_stability
+from scripts.chart_regime_strategy_mapping import _manual_router_candidate
+from scripts.chart_regime_strategy_mapping import _mapping_feature_coverage
 from scripts.scheduler_driven_scalping_backtest import (
     FEE_RATE,
     SchedulerBacktestCandidate,
@@ -51,6 +55,55 @@ def test_chart_regime_cli_help_runs_as_a_direct_script() -> None:
     )
     assert completed.returncode == 0, completed.stderr
     assert "Leakage-safe BTCUSDT regime walk-forward" in completed.stdout
+
+
+def test_gmm_bic_counts_diag_and_tied_parameters_exactly() -> None:
+    # weights + means + covariance parameters
+    assert _gmm_parameter_count(3, 4, "diag") == 2 + 12 + 12
+    assert _gmm_parameter_count(3, 4, "tied") == 2 + 12 + 10
+    assert _gmm_bic(-100.0, 50, 24) == pytest.approx(200 + 24 * __import__("math").log(50))
+
+
+def test_manual_router_is_a_distinct_public_factory_candidate() -> None:
+    from scripts.scheduler_driven_scalping_backtest import default_candidate
+
+    manual = _manual_router_candidate()
+    assert manual.candidate_id == "range-first-p2-tp0060-sl0045-e0035-l3-guard-a"
+    assert [spec.kind for spec in manual.strategies] == ["regime_router"]
+    assert manual != default_candidate()
+
+
+def test_mapping_feature_coverage_rejects_partial_point_in_time_episode() -> None:
+    from src.domain.market_feature import MarketFeatureSet, MarketFeatureValue
+
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    episode = tuple(build_weekly_episodes(start, start + timedelta(days=7)))
+    candidate = SchedulerBacktestCandidate(
+        candidate_id="flow",
+        strategies=(StrategyCandidateSpec("flow_breakout", {}),),
+        take_profit_ratio=Decimal("0.01"), stop_loss_ratio=Decimal("0.01"),
+        equity_ratio=Decimal("0.1"), leverage=Decimal("2"), candle_limit=1,
+    )
+
+    class PartialProvider:
+        def load_features(self, symbol, timeframe, as_of):
+            values = () if as_of >= start + timedelta(days=3) else tuple(
+                MarketFeatureValue(name, Decimal("1"), source, as_of, as_of)
+                for name, source in (
+                    ("taker_imbalance", "aggTrades"),
+                    ("cvd_delta", "aggTrades"),
+                    ("trade_intensity", "aggTrades"),
+                )
+            )
+            return MarketFeatureSet(symbol, timeframe, as_of, values)
+
+    valid, report = _mapping_feature_coverage(
+        _minute_market(start, 1, warmup_minutes=0), episode, (candidate,), PartialProvider()
+    )
+    assert valid["flow"] == set()
+    assert report["flow"]["eligible_episode_count"] == 0
+    assert report["flow"]["episodes"][0]["available_minutes"] < 10080
+    assert "missing point-in-time fields" in report["flow"]["episodes"][0]["rejection_reason"]
 
 
 def _fixture_walk_forward_dependencies(test_return: str = "0.01"):
@@ -235,6 +288,38 @@ def _regime_vectors(anchors):
     return tuple(vectors)
 
 
+def test_chronological_stability_refits_disjoint_time_blocks() -> None:
+    from src.domain.regime.model import RegimeModelConfig
+    from src.infrastructure.regime.sklearn_regime_model import SklearnRegimeModel
+
+    anchors = [datetime(2021, 1, 1, tzinfo=timezone.utc) + timedelta(hours=4 * index) for index in range(90)]
+    vectors = _regime_vectors(anchors)
+    mapping = _regime_vectors([
+        datetime(2025, 7, 7, tzinfo=timezone.utc) + timedelta(days=7 * index)
+        for index in range(26)
+    ])
+    real = SklearnRegimeModel()
+    primary = real.fit(RegimeModelConfig("kmeans", 3, 20260714), vectors)
+
+    class RecordingEngine:
+        def __init__(self):
+            self.blocks = []
+
+        def fit(self, config, block):
+            self.blocks.append((block[0].anchor_at, block[-1].anchor_at, len(block)))
+            return real.fit(config, block)
+
+        def assign(self, artifact, values):
+            return real.assign(artifact, values)
+
+    engine = RecordingEngine()
+    distance, drift, profiles = _chronological_block_stability(engine, primary, vectors, mapping)
+    assert engine.blocks[0][1] < engine.blocks[1][0]
+    assert [item[2] for item in engine.blocks] == [45, 45]
+    assert distance >= 0 and 0 <= drift <= 1
+    assert len(profiles) == 2
+
+
 def test_default_model_mapping_and_replay_stages_execute_end_to_end(monkeypatch, tmp_path: Path) -> None:
     import scripts.chart_regime_strategy_mapping as module
 
@@ -286,7 +371,7 @@ def test_default_model_mapping_and_replay_stages_execute_end_to_end(monkeypatch,
     grid = WalkForwardGrid(
         cluster_counts=(3,), model_types=("kmeans", "gmm"),
         gmm_covariance_types=("diag",), seeds=(20260714, 20260715, 20260716),
-        bootstrap_resamples=(10,), confidence_levels=(0.90,),
+        bootstrap_resamples=(10, 11), confidence_levels=(0.90, 0.95),
     )
     payload = run_chart_regime_walk_forward(
         BTCUSDT_FIRST_FOLD,
@@ -299,16 +384,23 @@ def test_default_model_mapping_and_replay_stages_execute_end_to_end(monkeypatch,
         output_mapping=tmp_path / "result-mapping.json",
     )
     assert set(payload["selected_models"]) == {"kmeans", "gmm"}
+    assert any(
+        len(item.get("evidence", {}).get("chronological_block_refits", ())) == 2
+        for item in payload["model_candidates"] if item.get("eligible")
+    )
     assert set(payload["mapping_artifacts"]) == {"kmeans", "gmm"}
     assert payload["mapping_metrics"]["evidence_rows"] == 26
+    assert len(payload["validation"]["candidates"]) == 48
     assert payload["comparisons"]["kmeans_dynamic"]["status"] == "ok"
-    assert payload["validation"]["selected_config_id"] == "gmm:p0.75:m0.2"
+    assert payload["validation"]["selected_config_id"].endswith("gmm:p0.75:m0.2")
     selected_hash = next(
         row["mapping_artifact_hash"] for row in payload["validation"]["candidates"]
-        if row["config_id"] == "gmm:p0.75:m0.2"
+        if row["config_id"] == payload["validation"]["selected_config_id"]
     )
     assert (BTCUSDT_FIRST_FOLD.test.start_at, selected_hash) in replay_calls
     assert payload["pipeline_events"][-1] == "reports_written"
+    assert payload["mapping_artifacts"]["gmm"]["candidate_assessments"]
+    assert "cash_contribution" in payload["continuous_diagnostics"]["gmm_dynamic"]
     assert all((tmp_path / name).is_file() for name in (
         "result.json", "result.md", "result-model.json", "result-mapping.json"
     ))

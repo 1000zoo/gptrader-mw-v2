@@ -38,6 +38,7 @@ from scripts.scheduler_driven_scalping_backtest import (
     SchedulerBacktestCandidate,
     alpha_entry_candidates,
     build_scheduler_candidates,
+    build_strategies,
     counter_microstructure_candidates,
     discovered_metrics_candidates,
     exact_historical_candidates,
@@ -750,6 +751,17 @@ COMPARISON_NAMES = (
     "kmeans_dynamic",
     "gmm_dynamic",
 )
+MANUAL_ROUTER_CANDIDATE_ID = "range-first-p2-tp0060-sl0045-e0035-l3-guard-a"
+
+
+def _manual_router_candidate() -> SchedulerBacktestCandidate:
+    matches = tuple(
+        candidate for candidate in build_scheduler_candidates()
+        if candidate.candidate_id == MANUAL_ROUTER_CANDIDATE_ID
+    )
+    if len(matches) != 1 or tuple(spec.kind for spec in matches[0].strategies) != ("regime_router",):
+        raise ValueError("predeclared manual regime-router candidate is unavailable")
+    return matches[0]
 
 
 def _utc(value: str) -> datetime:
@@ -838,6 +850,71 @@ def _model_report(artifact, config_id: str, *, eligible: bool, reasons=()):
     }
 
 
+def _gmm_parameter_count(cluster_count: int, dimensions: int, covariance_type: str) -> int:
+    if cluster_count < 1 or dimensions < 1:
+        raise ValueError("GMM parameter dimensions must be positive")
+    if covariance_type == "diag":
+        covariance_parameters = cluster_count * dimensions
+    elif covariance_type == "tied":
+        covariance_parameters = dimensions * (dimensions + 1) // 2
+    else:
+        raise ValueError("GMM covariance type must be diag or tied")
+    return (cluster_count - 1) + cluster_count * dimensions + covariance_parameters
+
+
+def _gmm_bic(log_likelihood: float, sample_count: int, parameter_count: int) -> float:
+    if not math.isfinite(log_likelihood) or sample_count < 1 or parameter_count < 1:
+        raise ValueError("BIC inputs must be finite and positive")
+    return float(-2 * log_likelihood + parameter_count * math.log(sample_count))
+
+
+def _chronological_block_stability(
+    engine: SklearnRegimeModel,
+    primary,
+    cluster_fit_vectors: tuple[object, ...],
+    mapping_vectors: tuple[object, ...],
+) -> tuple[float, float, list[dict[str, object]]]:
+    """Refit disjoint chronological halves and compare standardized profiles."""
+    midpoint = len(cluster_fit_vectors) // 2
+    blocks = (cluster_fit_vectors[:midpoint], cluster_fit_vectors[midpoint:])
+    if any(len(block) < primary.config.cluster_count for block in blocks):
+        raise ValueError("chronological blocks are too small for requested clusters")
+    block_artifacts = tuple(engine.fit(primary.config, tuple(block)) for block in blocks)
+    if any(artifact.feature_names != primary.feature_names for artifact in block_artifacts):
+        raise ValueError("chronological refits retained incompatible feature profiles")
+    profiles = []
+    primary_means = np.asarray(primary.means)
+    matched_label_series = []
+    max_distance = 0.0
+    for index, artifact in enumerate(block_artifacts):
+        block_means = np.asarray(artifact.means)
+        distances = np.linalg.norm(primary_means[:, None, :] - block_means[None, :, :], axis=2)
+        rows, columns = linear_sum_assignment(distances)
+        component_to_primary = {
+            artifact.fingerprints[column]: primary.fingerprints[row]
+            for row, column in zip(rows, columns)
+        }
+        matched = [float(distances[row, column]) for row, column in zip(rows, columns)]
+        max_distance = max(max_distance, max(matched))
+        assignments = engine.assign(artifact, mapping_vectors)
+        matched_labels = [component_to_primary[item.fingerprint] for item in assignments]
+        matched_label_series.append(matched_labels)
+        profiles.append({
+            "block_index": index,
+            "start_at": blocks[index][0].anchor_at.isoformat(),
+            "end_at": blocks[index][-1].anchor_at.isoformat(),
+            "matched_standardized_centroid_distances": matched,
+        })
+    prevalence_drift = max(
+        abs(
+            matched_label_series[0].count(fingerprint) / len(mapping_vectors)
+            - matched_label_series[1].count(fingerprint) / len(mapping_vectors)
+        )
+        for fingerprint in primary.fingerprints
+    )
+    return max_distance, prevalence_drift, profiles
+
+
 def _default_evaluate_models(
     context: Mapping[str, object], features: Mapping[str, object]
 ) -> Mapping[str, object]:
@@ -878,6 +955,7 @@ def _default_evaluate_models(
         raise ValueError("weekly Mapping Fit feature vectors are required")
     evidences = []
     evidence_by_id = {}
+    chronological_profiles_by_id = {}
     for config_id, seed_artifacts in sorted(structural.items()):
         primary = seed_artifacts[0]
         seed_assignments = [engine.assign(artifact, mapping_vectors) for artifact in seed_artifacts]
@@ -889,19 +967,18 @@ def _default_evaluate_models(
         month_counts = tuple(len(month_sets[fp]) for fp in primary.fingerprints)
         aris = [adjusted_rand_score(primary_labels, [item.fingerprint for item in values]) for values in seed_assignments[1:]]
         nmis = [normalized_mutual_info_score(primary_labels, [item.fingerprint for item in values]) for values in seed_assignments[1:]]
-        centroid_distances = []
-        primary_means = np.asarray(primary.means)
-        for artifact in seed_artifacts[1:]:
-            distances = np.linalg.norm(primary_means[:, None, :] - np.asarray(artifact.means)[None, :, :], axis=2)
-            rows, columns = linear_sum_assignment(distances)
-            centroid_distances.append(float(np.mean(distances[rows, columns])))
-        midpoint = max(1, len(primary_labels) // 2)
-        first = primary_labels[:midpoint]
-        second = primary_labels[midpoint:]
-        prevalence_drift = max(
-            abs(first.count(fp) / len(first) - second.count(fp) / max(1, len(second)))
-            for fp in primary.fingerprints
-        )
+        try:
+            matched_centroid_distance, prevalence_drift, chronological_profiles = (
+                _chronological_block_stability(
+                    engine, primary, vectors, mapping_vectors
+                )
+            )
+        except ValueError as error:
+            failed_reports.append(
+                _model_report(primary, config_id, eligible=False, reasons=(str(error),))
+            )
+            continue
+        chronological_profiles_by_id[config_id] = chronological_profiles
         low_confidence = sum(
             1
             for item in seed_assignments[0]
@@ -937,15 +1014,19 @@ def _default_evaluate_models(
                     components.append(math.log(weight) - 0.5 * (dimensions * math.log(2 * math.pi) + logdet + delta @ np.linalg.solve(matrix, delta)))
                 maximum = max(components)
                 log_terms.append(maximum + math.log(sum(math.exp(value - maximum) for value in components)))
-            parameter_count = primary.config.cluster_count * (2 * dimensions + 1) - 1
-            bic = float(-2 * sum(log_terms) + parameter_count * math.log(len(scaled)))
+            parameter_count = _gmm_parameter_count(
+                primary.config.cluster_count,
+                dimensions,
+                primary.config.covariance_type,
+            )
+            bic = _gmm_bic(sum(log_terms), len(scaled), parameter_count)
         evidence = RegimeModelEvidence(
             artifact_id=config_id, model_type=primary.config.model_type,
             cluster_fingerprints=primary.fingerprints,
             weekly_episode_counts=weekly_counts,
             distinct_calendar_month_counts=month_counts,
             seed_ari=min(aris), seed_nmi=min(nmis),
-            matched_centroid_distance=max(centroid_distances),
+            matched_centroid_distance=matched_centroid_distance,
             prevalence_drift=prevalence_drift, low_confidence_rate=low_confidence,
             silhouette=silhouette, bic=bic,
         )
@@ -966,6 +1047,7 @@ def _default_evaluate_models(
                 "low_confidence_rate": evidence_by_id[item.artifact_id].low_confidence_rate,
                 "silhouette": evidence_by_id[item.artifact_id].silhouette,
                 "bic": evidence_by_id[item.artifact_id].bic,
+                "chronological_block_refits": chronological_profiles_by_id[item.artifact_id],
             },
         }
         for item in selection.decisions
@@ -1002,15 +1084,172 @@ def _selection_policy(artifact) -> SelectionConfidenceThresholds:
 def _mapping_report(artifact) -> dict[str, object]:
     return {
         "artifact_hash": mapping_artifact_hash(artifact),
+        "bootstrap": {
+            "resamples": artifact.bootstrap.resamples,
+            "confidence": artifact.bootstrap.confidence,
+            "block_length_weeks": artifact.bootstrap.block_length_weeks,
+        },
         "entries": {
             fingerprint: {
                 "decision": entry.decision,
                 "strategy_profile_id": entry.strategy_profile_id,
+                "weekly_episode_count": entry.weekly_episode_count,
+                "distinct_month_count": entry.distinct_month_count,
+                "closed_trade_count": entry.closed_trade_count,
+                "corrected_lower_bound": entry.corrected_lower_bound,
+                "metrics": dict(entry.metrics),
                 "rejection_reasons": list(entry.rejection_reasons),
             }
             for fingerprint, entry in sorted(artifact.entries.items())
         },
+        "candidate_assessments": {
+            fingerprint: {
+                candidate_id: {
+                    "candidate_hash": assessment.candidate_hash,
+                    "eligible": assessment.eligible,
+                    "weekly_episode_count": assessment.weekly_episode_count,
+                    "distinct_month_count": assessment.distinct_month_count,
+                    "closed_trade_count": assessment.closed_trade_count,
+                    "corrected_lower_bound": assessment.corrected_lower_bound,
+                    "observed_mean": assessment.observed_mean,
+                    "metrics": dict(assessment.metrics),
+                    "rejection_reasons": list(assessment.rejection_reasons),
+                }
+                for candidate_id, assessment in sorted(assessments.items())
+            }
+            for fingerprint, assessments in sorted(artifact.candidate_assessments.items())
+        },
     }
+
+
+def _strategy_feature_requirements(strategy: object) -> dict[str, tuple[str, ...]]:
+    direct = getattr(strategy, "required_features", None)
+    if isinstance(direct, Mapping):
+        return {name: tuple(sources) for name, sources in direct.items()}
+    inner = getattr(strategy, "inner", None)
+    if inner is not None:
+        return _strategy_feature_requirements(inner)
+    children = getattr(strategy, "children", ())
+    if children:
+        combined = {}
+        for child in children:
+            combined.update(_strategy_feature_requirements(child))
+        return combined
+    name = type(strategy).__name__
+    if name == "FlowExhaustionReversalStrategy":
+        return {
+            "taker_imbalance": tuple(strategy.taker_imbalance_sources),
+            "cvd_delta": tuple(strategy.cvd_delta_sources),
+        }
+    if name in {"OpenInterestImpulseStrategy", "OpenInterestDivergenceStrategy"}:
+        return {
+            "open_interest_change_ratio_5m": ("metrics",),
+            "taker_long_short_volume_ratio": ("metrics",),
+        }
+    if name == "PositioningCrowdingReversalStrategy":
+        return {
+            "top_trader_position_long_short_ratio": ("metrics",),
+            "global_long_short_ratio": ("metrics",),
+            "taker_long_short_volume_ratio": ("metrics",),
+        }
+    if name == "GlobalRatioShockReversalStrategy":
+        return {"global_long_short_change_5m": ("metrics",)}
+    if name == "PremiumFundingReversionStrategy":
+        return {
+            "taker_imbalance": tuple(strategy.taker_imbalance_sources),
+            "cvd_delta": tuple(strategy.cvd_delta_sources),
+            "premium_index": tuple(strategy.premium_sources),
+            "mark_price": tuple(strategy.mark_sources),
+            "index_price": tuple(strategy.index_sources),
+        }
+    if name == "SessionOpeningRangeStrategy":
+        return {
+            "taker_imbalance": tuple(strategy.taker_imbalance_sources),
+            "cvd_delta": tuple(strategy.cvd_delta_sources),
+            "trade_intensity": tuple(strategy.trade_intensity_sources),
+        }
+    return {}
+
+
+def _candidate_feature_requirements(
+    candidate: SchedulerBacktestCandidate,
+) -> dict[str, tuple[str, ...]]:
+    combined = {}
+    try:
+        strategies = build_strategies(candidate)
+    except ValueError:
+        return {}
+    for strategy in strategies:
+        combined.update(_strategy_feature_requirements(strategy))
+    return dict(sorted(combined.items()))
+
+
+def _mapping_feature_coverage(
+    market: MarketSnapshot,
+    episodes: tuple[WeeklyEpisode, ...],
+    candidates: tuple[SchedulerBacktestCandidate, ...],
+    provider: object | None,
+) -> tuple[dict[str, set[datetime]], dict[str, object]]:
+    valid: dict[str, set[datetime]] = {}
+    reports = {}
+    cache = {}
+    for candidate in candidates:
+        requirements = _candidate_feature_requirements(candidate)
+        signature = tuple((name, sources) for name, sources in requirements.items())
+        valid[candidate.candidate_id] = set()
+        episode_reports = []
+        for episode in episodes:
+            key = (signature, episode.start_at)
+            if key not in cache:
+                expected = 7 * 24 * 60
+                if not requirements:
+                    cache[key] = (True, expected, None)
+                elif provider is None:
+                    cache[key] = (False, 0, "market feature provider unavailable")
+                else:
+                    available = 0
+                    missing_reason = None
+                    for candle in market.candles:
+                        if not episode.start_at <= candle.opened_at < episode.end_at:
+                            continue
+                        as_of = candle.closed_at
+                        feature_set = provider.load_features(market.symbol, market.timeframe, as_of)
+                        missing = []
+                        for feature_name, allowed_sources in requirements.items():
+                            value = feature_set.get(feature_name)
+                            if (
+                                value is None
+                                or value.source not in allowed_sources
+                                or value.available_at > as_of
+                            ):
+                                missing.append(feature_name)
+                        if missing:
+                            missing_reason = (
+                                f"missing point-in-time fields at {as_of.isoformat()}: "
+                                + ",".join(sorted(missing))
+                            )
+                            break
+                        available += 1
+                    cache[key] = (available == expected, available, missing_reason)
+            is_valid, available_minutes, reason = cache[key]
+            if is_valid:
+                valid[candidate.candidate_id].add(episode.start_at)
+            episode_reports.append({
+                "episode_start_at": episode.start_at.isoformat(),
+                "expected_minutes": 7 * 24 * 60,
+                "available_minutes": available_minutes,
+                "eligible": is_valid,
+                "rejection_reason": reason,
+            })
+        reports[candidate.candidate_id] = {
+            "required_fields": {
+                name: list(sources) for name, sources in requirements.items()
+            },
+            "eligible_episode_count": len(valid[candidate.candidate_id]),
+            "rejected_episode_count": len(episodes) - len(valid[candidate.candidate_id]),
+            "episodes": episode_reports,
+        }
+    return valid, reports
 
 
 def _default_build_mappings(
@@ -1037,13 +1276,29 @@ def _default_build_mappings(
     # Candidate evidence is independent of cluster/model. Execute it once, then
     # replace only the assignment label for each frozen model family.
     reference = next(iter(assignments_by_family.values()))
-    evidence = run_mapping_episodes(
-        prepared["market"],
-        episodes=episodes,
-        assignments=reference,
-        candidates=tuple(context["candidates"]),
-        market_feature_provider=prepared.get("provider"),
+    resolved_candidates = tuple(context["candidates"])
+    valid_episodes, feature_coverage = _mapping_feature_coverage(
+        prepared["market"], episodes, resolved_candidates, prepared.get("provider")
     )
+    evidence = []
+    for episode in episodes:
+        episode_rows = run_mapping_episodes(
+            prepared["market"],
+            episodes=(episode,),
+            assignments={episode.anchor_at: reference[episode.anchor_at]},
+            candidates=resolved_candidates,
+            market_feature_provider=prepared.get("provider"),
+        )
+        evidence.extend(
+            row for row in episode_rows
+            if episode.start_at in valid_episodes[row["candidate_id"]]
+        )
+    if not evidence:
+        return {
+            "selected": {}, "_artifacts": {},
+            "feature_coverage": feature_coverage,
+            "mapping_metrics": {"status": "cash_only", "evidence_rows": 0},
+        }
     by_key = {(row["episode_start_at"], row["candidate_id"]): row for row in evidence}
     mapping_artifacts = {}
     reports = {}
@@ -1053,21 +1308,31 @@ def _default_build_mappings(
         assignment = assignments_by_family[family]
         for episode in episodes:
             for candidate in context["candidates"]:
-                row = dict(by_key[(episode.start_at.isoformat(), candidate.candidate_id)])
+                key = (episode.start_at.isoformat(), candidate.candidate_id)
+                if key not in by_key:
+                    continue
+                row = dict(by_key[key])
                 row["cluster_fingerprint"] = assignment[episode.anchor_at]
                 family_rows.append(row)
-        result = BuildStrategyMappingUseCase().execute(
-            BuildStrategyMappingCommand(
-                evidence_rows=tuple(family_rows),
-                regime_model_artifact_hash=model_artifact_hash(model_artifact),
-                regime_model_fingerprint_hash=model_fingerprint_hash(model_artifact),
-                selection_confidence_thresholds=_selection_policy(model_artifact),
-                bootstrap_resamples=grid.bootstrap_resamples[0],
-                confidence=Decimal(str(grid.confidence_levels[-1])),
-            )
-        )
-        mapping_artifacts[family] = result.artifact
-        reports[family] = _mapping_report(result.artifact)
+        family_artifacts = {}
+        family_reports = {}
+        for resamples in grid.bootstrap_resamples:
+            for confidence in grid.confidence_levels:
+                mapping_config_id = f"bootstrap:{resamples}:confidence:{confidence}"
+                result = BuildStrategyMappingUseCase().execute(
+                    BuildStrategyMappingCommand(
+                        evidence_rows=tuple(family_rows),
+                        regime_model_artifact_hash=model_artifact_hash(model_artifact),
+                        regime_model_fingerprint_hash=model_fingerprint_hash(model_artifact),
+                        selection_confidence_thresholds=_selection_policy(model_artifact),
+                        bootstrap_resamples=resamples,
+                        confidence=Decimal(str(confidence)),
+                    )
+                )
+                family_artifacts[mapping_config_id] = result.artifact
+                family_reports[mapping_config_id] = _mapping_report(result.artifact)
+        mapping_artifacts[family] = family_artifacts
+        reports[family] = family_reports
     global_rows = [dict(row, cluster_fingerprint="all") for row in evidence]
     global_mapping = BuildStrategyMappingUseCase().execute(
         BuildStrategyMappingCommand(
@@ -1087,6 +1352,7 @@ def _default_build_mappings(
         "_artifacts": mapping_artifacts,
         "train_selected_candidate_id": global_entry.strategy_profile_id,
         "train_selected_decision": global_entry.decision,
+        "feature_coverage": feature_coverage,
         "mapping_metrics": {"weekly_episode_count": len(episodes), "evidence_rows": len(evidence)},
     }
 
@@ -1109,7 +1375,6 @@ def _default_validate(
     selected_models = {}
     for family in available:
         model_artifact = model_objects[family]
-        base_mapping = mapping_objects[family]
         policies = []
         if family == "gmm":
             for probability in grid.gmm_probability_mins:
@@ -1133,33 +1398,41 @@ def _default_validate(
                     ),
                 ))
         family_scores = []
-        for config_id, candidate_model, policy in policies:
-            candidate_mapping = replace(
-                base_mapping,
-                regime_model_artifact_hash=model_artifact_hash(candidate_model),
-                regime_model_fingerprint_hash=model_fingerprint_hash(candidate_model),
-                selection_confidence_thresholds=policy,
+        for mapping_config_id, base_mapping in sorted(mapping_objects[family].items()):
+            audited_candidates = tuple(
+                candidate for candidate in candidates
+                if candidate.candidate_id in base_mapping.candidate_hashes
             )
-            replay = run_scheduler_driven_regime_backtest(
-                prepared["market"], start_at=interval.start_at, end_at=interval.end_at,
-                candidates=candidates, model_artifact=candidate_model,
-                mapping_artifact=candidate_mapping, market_feature_provider=provider,
-                include_deferred=bool(context["include_deferred"]),
-            )
-            continuous_return = Decimal(str(replay.get("return_ratio", "0")))
-            drawdown = Decimal(str(replay.get("max_drawdown_ratio", "0")))
-            turnover = Decimal(str(replay.get("turnover", replay.get("strategy_turnover", "0"))))
-            record = {
-                "family": family, "config_id": config_id,
-                "return_ratio": _decimal_text(continuous_return),
-                "max_drawdown_ratio": _decimal_text(drawdown),
-                "turnover": _decimal_text(turnover),
-                "mapping_artifact_hash": mapping_artifact_hash(candidate_mapping),
-                "_artifact": candidate_mapping,
-                "_model_artifact": candidate_model,
-            }
-            scored.append(record)
-            family_scores.append(record)
+            for policy_config_id, candidate_model, policy in policies:
+                config_id = f"{mapping_config_id}:{policy_config_id}"
+                candidate_mapping = replace(
+                    base_mapping,
+                    regime_model_artifact_hash=model_artifact_hash(candidate_model),
+                    regime_model_fingerprint_hash=model_fingerprint_hash(candidate_model),
+                    selection_confidence_thresholds=policy,
+                )
+                replay = run_scheduler_driven_regime_backtest(
+                    prepared["market"], start_at=interval.start_at, end_at=interval.end_at,
+                    candidates=audited_candidates, model_artifact=candidate_model,
+                    mapping_artifact=candidate_mapping, market_feature_provider=provider,
+                    include_deferred=bool(context["include_deferred"]),
+                )
+                continuous_return = Decimal(str(replay.get("return_ratio", "0")))
+                drawdown = Decimal(str(replay.get("max_drawdown_ratio", "0")))
+                turnover = Decimal(str(replay.get("turnover", replay.get("strategy_turnover", "0"))))
+                record = {
+                    "family": family, "config_id": config_id,
+                    "mapping_config_id": mapping_config_id,
+                    "policy_config_id": policy_config_id,
+                    "return_ratio": _decimal_text(continuous_return),
+                    "max_drawdown_ratio": _decimal_text(drawdown),
+                    "turnover": _decimal_text(turnover),
+                    "mapping_artifact_hash": mapping_artifact_hash(candidate_mapping),
+                    "_artifact": candidate_mapping,
+                    "_model_artifact": candidate_model,
+                }
+                scored.append(record)
+                family_scores.append(record)
         winner = min(
             family_scores,
             key=lambda item: (
@@ -1191,6 +1464,57 @@ def _cash_comparison(reason: str | None = None) -> dict[str, object]:
     if reason:
         result["rejection_reasons"] = [reason]
     return result
+
+
+def _continuous_diagnostics(comparisons: Mapping[str, object]) -> dict[str, object]:
+    report = {}
+    for name in COMPARISON_NAMES:
+        comparison = comparisons.get(name, {})
+        metrics = comparison.get("continuous_metrics", {}) if isinstance(comparison, Mapping) else {}
+        if not isinstance(metrics, Mapping):
+            metrics = {}
+        trades = metrics.get("trades", ())
+        trades = trades if isinstance(trades, (tuple, list)) else ()
+        positive = sorted(
+            (Decimal(str(item.get("net_pnl", "0"))) for item in trades if Decimal(str(item.get("net_pnl", "0"))) > 0),
+            reverse=True,
+        )
+        positive_total = sum(positive, Decimal(0))
+        owners = {}
+        for trade in trades:
+            owner = trade.get("owner_strategy_profile_id") or comparison.get("candidate_id") or "unknown"
+            owners[owner] = owners.get(owner, 0) + 1
+        total_bars = int(metrics.get("cash_bars", 0)) + sum(
+            int(value) for value in metrics.get("time_in_cluster_bars", {}).values()
+        ) if isinstance(metrics.get("time_in_cluster_bars", {}), Mapping) else int(metrics.get("cash_bars", 0))
+        report[name] = {
+            "cash_contribution": {
+                "cash_bars": int(metrics.get("cash_bars", 0)),
+                "cash_bar_share": (
+                    str(Decimal(int(metrics.get("cash_bars", 0))) / Decimal(total_bars))
+                    if total_bars else "0"
+                ),
+                "entries_while_cash": int(metrics.get("entries_while_cash", 0)),
+            },
+            "confidence": {
+                "assignment_count": len(metrics.get("confidence_diagnostics", ())),
+                "diagnostics": metrics.get("confidence_diagnostics", ()),
+            },
+            "transitions": metrics.get("transition_counts", {}),
+            "actual_turnover_notional": metrics.get("actual_turnover_notional", "0"),
+            "signal_discontinuity_count": metrics.get("signal_discontinuity_count", 0),
+            "concentration": {
+                "top_5_positive_trade_pnl_share": (
+                    str(sum(positive[:5], Decimal(0)) / positive_total) if positive_total else "0"
+                ),
+                "strategy_trade_shares": {
+                    owner: str(Decimal(count) / Decimal(len(trades)))
+                    for owner, count in sorted(owners.items())
+                } if trades else {},
+                "single_fold_return_share": "1" if trades else "0",
+            },
+        }
+    return report
 
 
 def _default_replay_test(
@@ -1244,7 +1568,7 @@ def _default_replay_test(
         }
     else:
         results["train_selected_fixed"] = _cash_comparison("mapping-fit statistical gate selected cash")
-    manual_router = replace(adopted, candidate_id="manual-regime-router-ohlcv-v1")
+    manual_router = _manual_router_candidate()
     manual_result = run_scheduler_driven_backtest(
         market,
         context_start_at=test.start_at - timedelta(
@@ -1255,7 +1579,7 @@ def _default_replay_test(
     )
     results["manual_regime_router"] = {
         "status": "ok",
-        "router_rule": "predeclared_ohlcv_trend_range_volatility_v1",
+        "router_rule": "existing_hand_authored_regime_router",
         "candidate_id": manual_router.candidate_id,
         "continuous_metrics": manual_result,
     }
@@ -1267,7 +1591,10 @@ def _default_replay_test(
             market,
             start_at=test.start_at,
             end_at=test.end_at,
-            candidates=candidates,
+            candidates=tuple(
+                candidate for candidate in candidates
+                if candidate.candidate_id in mapping_objects[family].candidate_hashes
+            ),
             model_artifact=model_objects[family],
             mapping_artifact=mapping_objects[family],
             market_feature_provider=provider,
@@ -1511,9 +1838,11 @@ def run_chart_regime_walk_forward(
         "selected_models": models.get("selected", {}),
         "mapping_artifacts": mappings.get("selected", {}),
         "mapping_metrics": mappings.get("mapping_metrics", {}),
+        "candidate_feature_coverage": mappings.get("feature_coverage", {}),
         "validation": validation,
         "frozen_artifact_hashes": {"model": model_frozen, "mapping": mapping_frozen},
         "comparisons": comparisons,
+        "continuous_diagnostics": _continuous_diagnostics(comparisons),
         "pipeline_events": events,
         "data_access_audit": access_audit,
         "leakage_audit": {"frozen_before_test": events.index("mapping_frozen") < events.index("first_test_classification")},
@@ -1581,7 +1910,28 @@ def render_walk_forward_markdown(payload: Mapping[str, object]) -> str:
     ]
     for name in COMPARISON_NAMES:
         result = comparisons.get(name, {}) if isinstance(comparisons, Mapping) else {}
-        lines.append(f"- {name}: {result.get('status', 'missing')}")
+        metrics = result.get("continuous_metrics", {})
+        lines.append(
+            f"- {name}: {result.get('status', 'missing')}; "
+            f"return={metrics.get('return_ratio', 'n/a')}; "
+            f"MDD={metrics.get('portfolio_max_drawdown_ratio', metrics.get('max_drawdown_ratio', 'n/a'))}; "
+            f"trades={metrics.get('trade_count', 0)}"
+        )
+    lines.extend(("", "## Frozen models and mappings", ""))
+    for family, model in payload.get("selected_models", {}).items():
+        lines.append(f"- {family}: model `{model.get('artifact_hash')}`, mapping `{payload.get('mapping_artifacts', {}).get(family, {}).get('artifact_hash')}`")
+        entries = payload.get("mapping_artifacts", {}).get(family, {}).get("entries", {})
+        for fingerprint, entry in entries.items():
+            destination = entry.get("strategy_profile_id") or "cash"
+            lines.append(
+                f"  - `{fingerprint}` -> `{destination}` "
+                f"(episodes={entry.get('weekly_episode_count', 0)}, trades={entry.get('closed_trade_count', 0)}, LCB={entry.get('corrected_lower_bound', '0')})"
+            )
+    lines.extend(("", "## Evidence coverage and diagnostics", ""))
+    coverage = payload.get("candidate_feature_coverage", {})
+    lines.append(f"- Candidate coverage records: {len(coverage)}")
+    lines.append(f"- Rejected model configurations: {len(payload.get('rejected_model_configurations', ())) }")
+    lines.append(f"- Mapping metrics: `{json.dumps(payload.get('mapping_metrics', {}), sort_keys=True)}`")
     lines.extend(("", "## Costs and provenance", "", f"- Cost model: `{json.dumps(payload.get('cost_model', {}), sort_keys=True)}`", f"- Data provenance hash: `{payload.get('data_provenance_hash', 'unknown')}`", ""))
     return "\n".join(lines)
 
