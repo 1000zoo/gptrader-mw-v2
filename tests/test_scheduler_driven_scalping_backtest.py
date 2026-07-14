@@ -285,7 +285,8 @@ def test_scheduler_driven_backtest_uses_scheduler_path_without_external_io() -> 
 
     assert result["engine"] == "scheduler_driven"
     assert result["scheduler_path"] == "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute"
-    assert result["signal_count"] == 39
+    # The candle closing exactly at end_at is terminal management context, not an entry decision.
+    assert result["signal_count"] == 38
     assert result["trade_count"] == 0
 
 
@@ -308,6 +309,145 @@ def test_scheduler_backtest_default_output_matches_explicit_legacy_options() -> 
 
     assert implicit == explicit
     assert "trades" not in implicit
+
+
+def test_scheduler_backtest_default_payload_has_frozen_json_schema() -> None:
+    market = _flat_market()
+    result = run_scheduler_driven_backtest(
+        market,
+        start_at=market.opened_at,
+        end_at=market.closed_at,
+        include_deferred=True,
+    )
+
+    assert tuple(result) == (
+        "engine",
+        "candidate_id",
+        "symbol",
+        "scheduler_path",
+        "cost_model",
+        "start_at",
+        "end_at",
+        "trade_count",
+        "trades_per_day",
+        "daily_return_ratio",
+        "net_win_rate",
+        "return_ratio",
+        "gross_pnl",
+        "net_pnl",
+        "fee_paid",
+        "max_drawdown_ratio",
+        "average_net_trade_roe",
+        "average_net_trade_expectancy_ratio",
+        "signal_count",
+        "skipped_by_guard",
+        "candidate",
+        "candidate_definition_hash",
+        "feature_cache_hash",
+        "feature_source_coverage",
+        "feature_unavailable_counts",
+        "feature_provenance",
+        "future_feature_access_count",
+    )
+    assert {key: type(value) for key, value in result.items()} == {
+        "engine": str, "candidate_id": str, "symbol": str, "scheduler_path": str,
+        "cost_model": dict, "start_at": str, "end_at": str, "trade_count": int,
+        "trades_per_day": str, "daily_return_ratio": str, "net_win_rate": str,
+        "return_ratio": str, "gross_pnl": str, "net_pnl": str, "fee_paid": str,
+        "max_drawdown_ratio": str, "average_net_trade_roe": str,
+        "average_net_trade_expectancy_ratio": str, "signal_count": int,
+        "skipped_by_guard": int, "candidate": dict, "candidate_definition_hash": str,
+        "feature_cache_hash": type(None), "feature_source_coverage": dict,
+        "feature_unavailable_counts": dict, "feature_provenance": dict,
+        "future_feature_access_count": int,
+    }
+    assert isinstance(json.dumps(result, sort_keys=True), str)
+    assert not ({"trades", "initial_equity", "final_equity", "feature_config_hash"} & result.keys())
+
+
+def test_scheduler_context_warmup_can_make_first_episode_decision_eligible(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    evaluated = []
+
+    class AlwaysLong:
+        def evaluate(self, context):
+            evaluated.append(context.market.latest_candle.closed_at)
+            return StrategyResult("always-long", Signal(SignalDirection.LONG, Decimal("1")))
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysLong(),))
+    candles = tuple(
+        Candle(
+            symbol=Symbol("BTC", "USDT"),
+            timeframe=Timeframe(1, "m"),
+            opened_at=start + timedelta(minutes=index),
+            closed_at=start + timedelta(minutes=index + 1),
+            open_price=Decimal("100"), high_price=Decimal("100"),
+            low_price=Decimal("100"), close_price=Decimal("100"), volume=Decimal("1"),
+        )
+        for index in range(-3, 2)
+    )
+    candidate = SchedulerBacktestCandidate(
+        candidate_id="context-candidate",
+        strategies=(StrategyCandidateSpec("unused", {}),),
+        take_profit_ratio=Decimal("0.5"), stop_loss_ratio=Decimal("0.5"),
+        equity_ratio=Decimal("0.1"), leverage=Decimal("2"), candle_limit=3,
+    )
+    result = run_scheduler_driven_backtest(
+        MarketSnapshot(candles),
+        context_start_at=start - timedelta(minutes=3),
+        start_at=start,
+        end_at=start + timedelta(minutes=2),
+        candidate=candidate,
+        include_trade_details=True,
+    )
+
+    assert evaluated[0] == start
+    assert result["trades"][0]["entry_at"] == start.isoformat()
+    assert all(when >= start for when in evaluated)
+
+
+def test_scheduler_does_not_open_a_new_position_on_terminal_candle(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    end = start + timedelta(minutes=2)
+    evaluated = []
+
+    class TerminalLong:
+        def evaluate(self, context):
+            closed_at = context.market.latest_candle.closed_at
+            evaluated.append(closed_at)
+            signal = Signal(SignalDirection.LONG, Decimal("1")) if closed_at == end else Signal.wait()
+            return StrategyResult("terminal-long", signal)
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (TerminalLong(),))
+    candles = tuple(
+        Candle(
+            symbol=Symbol("BTC", "USDT"), timeframe=Timeframe(1, "m"),
+            opened_at=start + timedelta(minutes=index),
+            closed_at=start + timedelta(minutes=index + 1),
+            open_price=Decimal("100"), high_price=Decimal("100"),
+            low_price=Decimal("100"), close_price=Decimal("100"), volume=Decimal("1"),
+        )
+        for index in range(2)
+    )
+    candidate = SchedulerBacktestCandidate(
+        candidate_id="terminal-candidate",
+        strategies=(StrategyCandidateSpec("unused", {}),),
+        take_profit_ratio=Decimal("0.1"), stop_loss_ratio=Decimal("0.1"),
+        equity_ratio=Decimal("0.1"), leverage=Decimal("2"), candle_limit=1,
+    )
+
+    result = run_scheduler_driven_backtest(
+        MarketSnapshot(candles), start_at=start, end_at=end,
+        candidate=candidate, include_trade_details=True,
+    )
+
+    assert evaluated == [start + timedelta(minutes=1)]
+    assert result["trade_count"] == 0
+    assert result["trades"] == []
 
 
 def test_scheduler_backtest_can_emit_forced_close_trade_details(monkeypatch) -> None:

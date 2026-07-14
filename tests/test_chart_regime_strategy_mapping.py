@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 
 from scripts.chart_regime_strategy_mapping import run_mapping_episodes
+from scripts.chart_regime_strategy_mapping import _canonical_hash
 from scripts.scheduler_driven_scalping_backtest import (
     SchedulerBacktestCandidate,
     StrategyCandidateSpec,
@@ -18,6 +19,7 @@ def _minute_market(
     weeks: int = 2,
     price: Decimal = Decimal("100"),
     symbol: Symbol | None = None,
+    warmup_minutes: int = 300,
 ) -> MarketSnapshot:
     symbol = symbol or Symbol("BTC", "USDT")
     timeframe = Timeframe(1, "m")
@@ -33,7 +35,7 @@ def _minute_market(
             close_price=price,
             volume=Decimal("10"),
         )
-        for index in range(weeks * 7 * 24 * 60)
+        for index in range(-warmup_minutes, weeks * 7 * 24 * 60)
     ))
 
 
@@ -108,10 +110,10 @@ def test_mapping_runs_flat_nonoverlapping_weekly_evidence(monkeypatch) -> None:
     assert all(kwargs["force_close_at_end"] is True for _, kwargs in calls)
     assert all(kwargs["include_trade_details"] is True for _, kwargs in calls)
     assert [(snapshot.opened_at, snapshot.closed_at) for snapshot, _ in calls] == [
-        (episodes[0].start_at, episodes[0].end_at),
-        (episodes[0].start_at, episodes[0].end_at),
-        (episodes[1].start_at, episodes[1].end_at),
-        (episodes[1].start_at, episodes[1].end_at),
+        (episodes[0].start_at - timedelta(minutes=1), episodes[0].end_at),
+        (episodes[0].start_at - timedelta(minutes=1), episodes[0].end_at),
+        (episodes[1].start_at - timedelta(minutes=1), episodes[1].end_at),
+        (episodes[1].start_at - timedelta(minutes=1), episodes[1].end_at),
     ]
     assert all(row["initial_equity"] == "4321" and row["final_equity"] == "4321" for row in rows)
 
@@ -352,3 +354,143 @@ def test_mapping_rejects_symbol_mismatch_and_non_minute_market(monkeypatch) -> N
     ))
     with pytest.raises(ValueError, match="1m"):
         run_mapping_episodes(daily, **kwargs)
+
+
+def test_mapping_supplies_identical_max_candidate_warmup_to_every_candidate(monkeypatch) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    calls = []
+
+    def fake_backtest(snapshot, **kwargs):
+        calls.append((snapshot, kwargs))
+        return _evidence_result(kwargs)
+
+    monkeypatch.setattr(module, "run_scheduler_driven_backtest", fake_backtest)
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    episodes = tuple(build_weekly_episodes(start, start + timedelta(days=7)))
+    short = _candidate("short")
+    long = SchedulerBacktestCandidate(
+        candidate_id="long",
+        strategies=short.strategies,
+        take_profit_ratio=short.take_profit_ratio,
+        stop_loss_ratio=short.stop_loss_ratio,
+        equity_ratio=short.equity_ratio,
+        leverage=short.leverage,
+        candle_limit=5,
+    )
+
+    run_mapping_episodes(
+        _minute_market(start, 1),
+        episodes=episodes,
+        assignments={start: "cluster"},
+        candidates=(short, long),
+    )
+
+    expected_context_start = start - timedelta(minutes=5)
+    assert len(calls) == 2
+    assert all(snapshot.opened_at == expected_context_start for snapshot, _ in calls)
+    assert calls[0][0].candles == calls[1][0].candles
+    assert all(kwargs["context_start_at"] == expected_context_start for _, kwargs in calls)
+
+
+def test_canonical_hash_type_tags_decimals_without_spelling_differences() -> None:
+    assert _canonical_hash({"value": Decimal("100")}) == _canonical_hash(
+        {"value": Decimal("1E2")}
+    )
+    assert _canonical_hash({"value": Decimal("1")}) != _canonical_hash({"value": "1"})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("return_ratio", "0.1"),
+        ("daily_return_ratio", "0.1"),
+        ("trades_per_day", "1"),
+        ("net_win_rate", "2"),
+        ("max_drawdown_ratio", "2"),
+        ("average_net_trade_expectancy_ratio", "0.1"),
+        ("profit_factor", "1"),
+    ),
+)
+def test_mapping_rejects_tampered_derived_summary(monkeypatch, field, value) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    monkeypatch.setattr(
+        module,
+        "run_scheduler_driven_backtest",
+        lambda snapshot, **kwargs: _evidence_result(kwargs, **{field: value}),
+    )
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    episodes = tuple(build_weekly_episodes(start, start + timedelta(days=7)))
+
+    with pytest.raises(ValueError, match=field):
+        run_mapping_episodes(
+            _minute_market(start, 1),
+            episodes=episodes,
+            assignments={start: "cluster"},
+            candidates=(_candidate("a"),),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("entry_price", "0", "entry_price"),
+        ("quantity", "0", "quantity"),
+        ("margin", "0", "margin"),
+        ("fee_paid", "-0.1", "fee_paid"),
+        ("net_pnl", "2", "net_pnl"),
+        ("entry_at", "2026-01-04T23:59:00+00:00", "entry_at"),
+        ("exit_at", "2026-01-05T00:00:00+00:00", "exit_at"),
+        ("holding_bars", 2, "holding_bars"),
+    ),
+)
+def test_mapping_rejects_invalid_trade_accounting_or_bounds(
+    monkeypatch, field, value, message
+) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+
+    def fake_backtest(snapshot, **kwargs):
+        initial = kwargs["initial_equity"]
+        trade = {
+            "entry_at": start.isoformat(),
+            "exit_at": (start + timedelta(minutes=1)).isoformat(),
+            "entry_price": "100",
+            "exit_price": "101",
+            "direction": "long",
+            "quantity": "1",
+            "margin": "100",
+            "gross_pnl": "1",
+            "net_pnl": "0.9",
+            "fee_paid": "0.1",
+            "exit_reason": "take_profit",
+            "holding_bars": 1,
+        }
+        trade[field] = value
+        return _evidence_result(
+            kwargs,
+            trade_count=1,
+            trades=[trade],
+            trades_per_day=str(Decimal(1) / Decimal(7)),
+            gross_pnl="1",
+            net_pnl="0.9",
+            fee_paid="0.1",
+            final_equity=str(initial + Decimal("0.9")),
+            return_ratio=str(Decimal("0.9") / initial),
+            daily_return_ratio=str((Decimal("0.9") / initial) / Decimal(7)),
+            net_win_rate="1",
+            average_net_trade_roe="0.009",
+            average_net_trade_expectancy_ratio=str(Decimal("0.9") / initial),
+        )
+
+    monkeypatch.setattr(module, "run_scheduler_driven_backtest", fake_backtest)
+    episodes = tuple(build_weekly_episodes(start, start + timedelta(days=7)))
+    with pytest.raises(ValueError, match=message):
+        run_mapping_episodes(
+            _minute_market(start, 1),
+            episodes=episodes,
+            assignments={start: "cluster"},
+            candidates=(_candidate("a"),),
+        )

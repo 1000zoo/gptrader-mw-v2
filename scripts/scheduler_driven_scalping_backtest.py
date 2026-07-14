@@ -677,6 +677,7 @@ def run_scheduler_driven_backtest(
     symbol: Symbol = SYMBOL,
     market_feature_provider: MarketFeatureProviderPort | None = None,
     include_deferred: bool = False,
+    context_start_at: datetime | None = None,
     initial_equity: Decimal = INITIAL_EQUITY,
     include_trade_details: bool = False,
     force_close_at_end: bool = True,
@@ -698,7 +699,13 @@ def run_scheduler_driven_backtest(
         if market_feature_provider is not None
         else EmptyMarketFeatureProvider()
     )
-    selected = BacktestMarketSnapshot(_candles_between(market.candles, start_at, end_at))
+    if context_start_at is not None:
+        if context_start_at.tzinfo is not timezone.utc or context_start_at > start_at:
+            raise ValueError("context_start_at must be canonical UTC at or before start_at")
+    selection_start = context_start_at if context_start_at is not None else start_at
+    selected = BacktestMarketSnapshot(_candles_between(market.candles, selection_start, end_at))
+    if context_start_at is not None and selected.candles[0].opened_at != context_start_at:
+        raise ValueError("market does not contain the requested context_start_at")
     market_data = CursorMarketData(selected)
     signal_log = InMemorySignalLogRepository()
     order_execution = BacktestOrderExecution(market_data)
@@ -739,7 +746,13 @@ def run_scheduler_driven_backtest(
     open_position: BacktestPosition | None = None
     trades: list[BacktestTrade] = []
     skipped_by_guard = 0
-    start_index = min(candidate.candle_limit - 1, len(selected.candles) - 1)
+    if context_start_at is None:
+        start_index = min(candidate.candle_limit - 1, len(selected.candles) - 1)
+    else:
+        closed_times = tuple(candle.closed_at for candle in selected.candles)
+        start_index = bisect_left(closed_times, start_at)
+        if start_index >= len(selected.candles) or start_index < candidate.candle_limit - 1:
+            raise ValueError("context does not contain enough warmup candles for candidate")
     for index in range(start_index, len(selected.candles)):
         market_data.cursor = index
         if open_position is not None:
@@ -759,6 +772,11 @@ def run_scheduler_driven_backtest(
                 )
                 open_position = None
                 guard.record_trade(index=index, closed_trade=closed, equity=equity)
+            continue
+
+        # Decisions are half-open on closed_at: [start_at, end_at).  The candle
+        # closing at end_at can manage an existing position above, but cannot open one.
+        if selected.candles[index].closed_at >= end_at:
             continue
 
         if not guard.allows_entry(index=index, equity=equity):

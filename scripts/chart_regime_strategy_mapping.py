@@ -99,27 +99,52 @@ def run_mapping_episodes(
     if market.timeframe != TIMEFRAME:
         raise ValueError("execution market timeframe must be exactly 1m")
 
+    provider_warmup = getattr(market_feature_provider, "required_warmup_candles", 0)
+    if (
+        not isinstance(provider_warmup, int)
+        or isinstance(provider_warmup, bool)
+        or provider_warmup < 0
+    ):
+        raise ValueError("provider required_warmup_candles must be a nonnegative integer")
+    warmup_candles = max(
+        max(candidate.candle_limit for candidate in resolved),
+        provider_warmup,
+    )
+    candidate_hashes = {
+        candidate.candidate_id: _canonical_hash(
+            {
+                "engine_version": BACKTEST_ENGINE_VERSION,
+                "symbol": selected_symbol.pair,
+                "initial_equity": initial_equity,
+                "fee_rate_per_side": FEE_RATE,
+                "slippage_rate_per_side": SLIPPAGE_RATE,
+                "account_risk": {
+                    "base_risk_ratio": Decimal("0.02"),
+                    "max_total_exposure_ratio": Decimal("1"),
+                    "max_symbol_exposure_ratio": Decimal("1"),
+                },
+                "candidate": _candidate_behavior_payload(candidate),
+            }
+        )
+        for candidate in resolved
+    }
+
     rows: list[dict[str, object]] = []
     for episode in normalized_episodes:
-        sliced = _slice_episode(market, episode)
+        context_start_at = episode.start_at - timedelta(minutes=warmup_candles)
+        sliced = _slice_episode(market, episode, context_start_at=context_start_at)
+        market_payload_hash = _canonical_hash(
+            {
+                "context_start_at": context_start_at.isoformat(),
+                "execution_start_at": episode.start_at.isoformat(),
+                "execution_end_at": episode.end_at.isoformat(),
+                "market": _market_payload(sliced),
+            }
+        )
         for candidate in resolved:
-            candidate_hash = _canonical_hash(
-                {
-                    "engine_version": BACKTEST_ENGINE_VERSION,
-                    "symbol": selected_symbol.pair,
-                    "initial_equity": initial_equity,
-                    "fee_rate_per_side": FEE_RATE,
-                    "slippage_rate_per_side": SLIPPAGE_RATE,
-                    "account_risk": {
-                        "base_risk_ratio": Decimal("0.02"),
-                        "max_total_exposure_ratio": Decimal("1"),
-                        "max_symbol_exposure_ratio": Decimal("1"),
-                    },
-                    "candidate": _candidate_behavior_payload(candidate),
-                }
-            )
             result = run_scheduler_driven_backtest(
                 sliced,
+                context_start_at=context_start_at,
                 start_at=episode.start_at,
                 end_at=episode.end_at,
                 candidate=candidate,
@@ -135,6 +160,7 @@ def run_mapping_episodes(
                 candidate=candidate,
                 initial_equity=initial_equity,
                 market_feature_provider=market_feature_provider,
+                episode=episode,
             )
             feature_identity = {
                 "feature_cache_hash": validated["feature_cache_hash"],
@@ -142,15 +168,17 @@ def run_mapping_episodes(
                 "feature_provenance": validated["feature_provenance"],
             }
             data_hash = _canonical_hash(
-                {"market": _market_payload(sliced), "feature_identity": feature_identity}
+                {"market_payload_hash": market_payload_hash, "feature_identity": feature_identity}
             )
             row = {
+                "context_start_at": context_start_at.isoformat(),
                 "episode_start_at": episode.start_at.isoformat(),
                 "episode_end_at": episode.end_at.isoformat(),
                 "cluster_fingerprint": cluster_by_anchor[episode.anchor_at],
                 "candidate_id": candidate.candidate_id,
+                "market_context_hash": market_payload_hash,
                 "data_hash": data_hash,
-                "candidate_hash": candidate_hash,
+                "candidate_hash": candidate_hashes[candidate.candidate_id],
             }
             row.update(validated)
             rows.append(row)
@@ -237,13 +265,18 @@ def _validate_assignments(
     return result
 
 
-def _slice_episode(market: MarketSnapshot, episode: WeeklyEpisode) -> MarketSnapshot:
+def _slice_episode(
+    market: MarketSnapshot,
+    episode: WeeklyEpisode,
+    *,
+    context_start_at: datetime,
+) -> MarketSnapshot:
     candles = tuple(
         candle for candle in market.candles
-        if episode.start_at <= candle.opened_at and candle.closed_at <= episode.end_at
+        if context_start_at <= candle.opened_at and candle.closed_at <= episode.end_at
     )
-    if not candles or candles[0].opened_at != episode.start_at or candles[-1].closed_at != episode.end_at:
-        raise ValueError("episode market data is absent or incomplete")
+    if not candles or candles[0].opened_at != context_start_at or candles[-1].closed_at != episode.end_at:
+        raise ValueError("episode market context or execution data is absent or incomplete")
     if any(left.closed_at != right.opened_at for left, right in zip(candles, candles[1:])):
         raise ValueError("episode market data contains a gap")
     if any(not _is_canonical_utc(value) for candle in candles for value in (candle.opened_at, candle.closed_at)):
@@ -285,9 +318,8 @@ def _canonicalize(value: object) -> object:
     if isinstance(value, Decimal):
         if not value.is_finite():
             raise ValueError("canonical hash decimals must be finite")
-        if value == 0:
-            return "0"
-        return format(value.normalize(), "f")
+        normalized = "0" if value == 0 else format(value.normalize(), "f")
+        return {"$decimal": normalized}
     if isinstance(value, Mapping):
         if any(not isinstance(key, str) for key in value):
             raise ValueError("canonical hash mapping keys must be strings")
@@ -335,6 +367,7 @@ def _validate_backtest_evidence(
     candidate: SchedulerBacktestCandidate,
     initial_equity: Decimal,
     market_feature_provider,
+    episode: WeeklyEpisode,
 ) -> dict[str, object]:
     if not isinstance(result, Mapping):
         raise ValueError("backtest evidence must be a mapping")
@@ -366,15 +399,77 @@ def _validate_backtest_evidence(
     trades = result["trades"]
     if not isinstance(trades, list):
         raise ValueError("backtest evidence trades must be a list")
-    validated_trades = [_validate_trade(item, index) for index, item in enumerate(trades)]
+    validated_trades = [
+        _validate_trade(item, index, episode=episode) for index, item in enumerate(trades)
+    ]
     if trade_count != len(validated_trades):
         raise ValueError("backtest evidence trade_count does not match trades")
-    if sum((item["gross_pnl"] for item in validated_trades), Decimal("0")) != decimals["gross_pnl"]:
-        raise ValueError("backtest evidence gross_pnl does not match trades")
-    if sum((item["net_pnl"] for item in validated_trades), Decimal("0")) != decimals["net_pnl"]:
-        raise ValueError("backtest evidence net_pnl does not match trades")
-    if sum((item["fee_paid"] for item in validated_trades), Decimal("0")) != decimals["fee_paid"]:
-        raise ValueError("backtest evidence fee_paid does not match trades")
+    total_gross = sum((item["gross_pnl"] for item in validated_trades), Decimal("0"))
+    total_net = sum((item["net_pnl"] for item in validated_trades), Decimal("0"))
+    total_fees = sum((item["fee_paid"] for item in validated_trades), Decimal("0"))
+    _require_decimal_match("gross_pnl", decimals["gross_pnl"], total_gross)
+    _require_decimal_match("net_pnl", decimals["net_pnl"], total_net)
+    _require_decimal_match("fee_paid", decimals["fee_paid"], total_fees)
+    _require_decimal_match(
+        "final_equity", decimals["final_equity"], initial_equity + total_net
+    )
+    expected_return = total_net / initial_equity
+    _require_decimal_match("return_ratio", decimals["return_ratio"], expected_return)
+    _require_decimal_match(
+        "daily_return_ratio",
+        decimals["daily_return_ratio"],
+        expected_return / Decimal("7"),
+    )
+    _require_decimal_match(
+        "trades_per_day",
+        decimals["trades_per_day"],
+        Decimal(trade_count) / Decimal("7"),
+    )
+    wins = sum(1 for item in validated_trades if item["net_pnl"] > 0)
+    expected_win_rate = Decimal(wins) / Decimal(trade_count) if trade_count else Decimal("0")
+    if not Decimal("0") <= decimals["net_win_rate"] <= Decimal("1"):
+        raise ValueError("backtest evidence net_win_rate must be between zero and one")
+    _require_decimal_match("net_win_rate", decimals["net_win_rate"], expected_win_rate)
+    expected_average_roe = (
+        sum((item["net_pnl"] / item["margin"] for item in validated_trades), Decimal("0"))
+        / Decimal(trade_count)
+        if trade_count
+        else Decimal("0")
+    )
+    _require_decimal_match(
+        "average_net_trade_roe",
+        decimals["average_net_trade_roe"],
+        expected_average_roe,
+    )
+    expected_expectancy = (
+        (total_net / Decimal(trade_count)) / initial_equity
+        if trade_count
+        else Decimal("0")
+    )
+    _require_decimal_match(
+        "average_net_trade_expectancy_ratio",
+        decimals["average_net_trade_expectancy_ratio"],
+        expected_expectancy,
+    )
+    # Closed trades cannot reconstruct intratrade equity, so drawdown is bounded
+    # and trusted from the scheduler's marked closed-equity path rather than derived here.
+    if not Decimal("0") <= decimals["max_drawdown_ratio"] <= Decimal("1"):
+        raise ValueError("backtest evidence max_drawdown_ratio must be between zero and one")
+    profit_factor = None
+    if "profit_factor" in result:
+        profit_factor = _finite_decimal(result["profit_factor"], "profit_factor")
+        gross_profit = sum(
+            (item["gross_pnl"] for item in validated_trades if item["gross_pnl"] > 0),
+            Decimal("0"),
+        )
+        gross_loss = -sum(
+            (item["gross_pnl"] for item in validated_trades if item["gross_pnl"] < 0),
+            Decimal("0"),
+        )
+        if gross_loss == 0 and gross_profit > 0:
+            raise ValueError("backtest evidence profit_factor is unbounded without losing trades")
+        expected_profit_factor = gross_profit / gross_loss if gross_loss else Decimal("0")
+        _require_decimal_match("profit_factor", profit_factor, expected_profit_factor)
 
     feature_cache_hash = result["feature_cache_hash"]
     feature_config_hash = result["feature_config_hash"]
@@ -397,28 +492,36 @@ def _validate_backtest_evidence(
         if declared_provenance is not None and dict(feature_provenance) != dict(declared_provenance):
             raise ValueError("backtest evidence feature_provenance mismatch")
 
-    return {
-        "initial_equity": result["initial_equity"],
-        "final_equity": result["final_equity"],
+    validated_result = {
+        "initial_equity": _decimal_text(initial_equity),
+        "final_equity": _decimal_text(initial_equity + total_net),
         "trade_count": trade_count,
-        "trades_per_day": result["trades_per_day"],
-        "gross_pnl": result["gross_pnl"],
-        "net_pnl": result["net_pnl"],
-        "fee_paid": result["fee_paid"],
-        "return_ratio": result["return_ratio"],
-        "daily_return_ratio": result["daily_return_ratio"],
-        "max_drawdown_ratio": result["max_drawdown_ratio"],
-        "net_win_rate": result["net_win_rate"],
-        "average_net_trade_roe": result["average_net_trade_roe"],
-        "average_net_trade_expectancy_ratio": result["average_net_trade_expectancy_ratio"],
-        "trades": trades,
+        "trades_per_day": _decimal_text(Decimal(trade_count) / Decimal("7")),
+        "gross_pnl": _decimal_text(total_gross),
+        "net_pnl": _decimal_text(total_net),
+        "fee_paid": _decimal_text(total_fees),
+        "return_ratio": _decimal_text(expected_return),
+        "daily_return_ratio": _decimal_text(expected_return / Decimal("7")),
+        "max_drawdown_ratio": _decimal_text(decimals["max_drawdown_ratio"]),
+        "net_win_rate": _decimal_text(expected_win_rate),
+        "average_net_trade_roe": _decimal_text(expected_average_roe),
+        "average_net_trade_expectancy_ratio": _decimal_text(expected_expectancy),
+        "trades": [item["payload"] for item in validated_trades],
         "feature_cache_hash": feature_cache_hash,
         "feature_provenance": dict(feature_provenance),
         "feature_config_hash": feature_config_hash,
     }
+    if profit_factor is not None:
+        validated_result["profit_factor"] = _decimal_text(profit_factor)
+    return validated_result
 
 
-def _validate_trade(value: object, index: int) -> dict[str, Decimal]:
+def _validate_trade(
+    value: object,
+    index: int,
+    *,
+    episode: WeeklyEpisode,
+) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise ValueError(f"trade {index} must be a mapping")
     required = {
@@ -427,8 +530,10 @@ def _validate_trade(value: object, index: int) -> dict[str, Decimal]:
     missing = sorted(required - set(value))
     if missing:
         raise ValueError(f"trade {index} missing required fields: {', '.join(missing)}")
-    for field in ("entry_at", "exit_at"):
-        _parse_canonical_utc(value[field], f"trade {index} {field}")
+    entry_at = _parse_canonical_utc(value["entry_at"], f"trade {index} entry_at")
+    exit_at = _parse_canonical_utc(value["exit_at"], f"trade {index} exit_at")
+    if not episode.start_at <= entry_at < exit_at <= episode.end_at:
+        raise ValueError(f"trade {index} entry_at/exit_at must stay within the episode")
     if value["direction"] not in {"long", "short"}:
         raise ValueError(f"trade {index} direction is invalid")
     if not isinstance(value["exit_reason"], str) or not value["exit_reason"].strip():
@@ -436,7 +541,52 @@ def _validate_trade(value: object, index: int) -> dict[str, Decimal]:
     holding_bars = value["holding_bars"]
     if not isinstance(holding_bars, int) or isinstance(holding_bars, bool) or holding_bars < 0:
         raise ValueError(f"trade {index} holding_bars must be a nonnegative integer")
-    return {field: _finite_decimal(value[field], f"trade {index} {field}") for field in _TRADE_DECIMAL_FIELDS}
+    elapsed_minutes = Decimal(str((exit_at - entry_at).total_seconds())) / Decimal("60")
+    if elapsed_minutes != Decimal(holding_bars):
+        raise ValueError(f"trade {index} holding_bars must match its positive 1m duration")
+    decimals = {
+        field: _finite_decimal(value[field], f"trade {index} {field}")
+        for field in _TRADE_DECIMAL_FIELDS
+    }
+    for field in ("entry_price", "exit_price", "quantity", "margin"):
+        if decimals[field] <= 0:
+            raise ValueError(f"trade {index} {field} must be positive")
+    if decimals["fee_paid"] < 0:
+        raise ValueError(f"trade {index} fee_paid must be nonnegative")
+    _require_decimal_match(
+        f"trade {index} net_pnl",
+        decimals["net_pnl"],
+        decimals["gross_pnl"] - decimals["fee_paid"],
+    )
+    return {
+        **decimals,
+        "payload": {
+            "entry_at": entry_at.isoformat(),
+            "exit_at": exit_at.isoformat(),
+            "entry_price": _decimal_text(decimals["entry_price"]),
+            "exit_price": _decimal_text(decimals["exit_price"]),
+            "direction": value["direction"],
+            "quantity": _decimal_text(decimals["quantity"]),
+            "margin": _decimal_text(decimals["margin"]),
+            "gross_pnl": _decimal_text(decimals["gross_pnl"]),
+            "net_pnl": _decimal_text(decimals["net_pnl"]),
+            "fee_paid": _decimal_text(decimals["fee_paid"]),
+            "exit_reason": value["exit_reason"],
+            "holding_bars": holding_bars,
+        },
+    }
+
+
+def _require_decimal_match(field: str, actual: Decimal, expected: Decimal) -> None:
+    tolerance = Decimal("1e-24")
+    if abs(actual - expected) > tolerance:
+        raise ValueError(f"backtest evidence {field} is inconsistent")
+
+
+def _decimal_text(value: Decimal) -> str:
+    if value == 0:
+        return "0"
+    return format(value.normalize(), "f")
 
 
 def _finite_decimal(value: object, field: str) -> Decimal:
