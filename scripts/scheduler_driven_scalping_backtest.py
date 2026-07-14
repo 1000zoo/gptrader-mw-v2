@@ -752,9 +752,11 @@ def run_scheduler_driven_backtest(
             if closed is not None:
                 trades.append(closed)
                 equity += closed.net_pnl
-                peak = max(peak, equity)
-                if peak > Decimal("0"):
-                    max_drawdown = max(max_drawdown, (peak - equity) / peak)
+                peak, max_drawdown = _update_drawdown(
+                    equity=equity,
+                    peak=peak,
+                    max_drawdown=max_drawdown,
+                )
                 open_position = None
                 guard.record_trade(index=index, closed_trade=closed, equity=equity)
             continue
@@ -807,6 +809,11 @@ def run_scheduler_driven_backtest(
             )
         )
         equity += trades[-1].net_pnl
+        peak, max_drawdown = _update_drawdown(
+            equity=equity,
+            peak=peak,
+            max_drawdown=max_drawdown,
+        )
 
     days = Decimal(str((end_at - start_at).total_seconds())) / Decimal("86400")
     wins = sum(1 for trade in trades if trade.net_pnl > Decimal("0"))
@@ -823,6 +830,14 @@ def run_scheduler_driven_backtest(
         (net_pnl / Decimal(len(trades))) / initial_equity
         if trades
         else Decimal("0")
+    )
+    feature_cache_hash = getattr(feature_provider, "feature_cache_hash", None)
+    feature_source_coverage = getattr(feature_provider, "feature_source_coverage", {})
+    feature_unavailable_counts = getattr(feature_provider, "feature_unavailable_counts", {})
+    feature_provenance = getattr(
+        feature_provider,
+        "feature_provenance",
+        {"provider": type(feature_provider).__name__} if market_feature_provider is not None else {},
     )
     result = {
         "engine": "scheduler_driven",
@@ -852,20 +867,72 @@ def run_scheduler_driven_backtest(
         "skipped_by_guard": skipped_by_guard,
         "candidate": candidate_payload(candidate),
         "candidate_definition_hash": candidate_definition_hash(candidate_payload(candidate)),
-        "feature_cache_hash": getattr(feature_provider, "feature_cache_hash", None),
-        "feature_source_coverage": getattr(feature_provider, "feature_source_coverage", {}),
-        "feature_unavailable_counts": getattr(feature_provider, "feature_unavailable_counts", {}),
-        "feature_provenance": getattr(
-            feature_provider,
-            "feature_provenance",
-            {"provider": type(feature_provider).__name__} if market_feature_provider is not None else {},
-        ),
+        "feature_cache_hash": feature_cache_hash,
+        "feature_source_coverage": feature_source_coverage,
+        "feature_unavailable_counts": feature_unavailable_counts,
+        "feature_provenance": feature_provenance,
         "future_feature_access_count": 0,
     }
     if include_trade_details:
         result["trades"] = [_trade_payload(trade) for trade in trades]
         result["position_open_at_end"] = open_position is not None and not force_close_at_end
+        result["initial_equity"] = str(initial_equity)
+        result["final_equity"] = str(equity)
+        result["feature_config_hash"] = feature_provider_config_hash(
+            market_feature_provider,
+            feature_cache_hash=feature_cache_hash,
+            feature_source_coverage=feature_source_coverage,
+            feature_unavailable_counts=feature_unavailable_counts,
+            feature_provenance=feature_provenance,
+        )
     return result
+
+
+def _update_drawdown(
+    *, equity: Decimal, peak: Decimal, max_drawdown: Decimal
+) -> tuple[Decimal, Decimal]:
+    peak = max(peak, equity)
+    if peak > Decimal("0"):
+        max_drawdown = max(max_drawdown, (peak - equity) / peak)
+    return peak, max_drawdown
+
+
+def feature_provider_config_hash(
+    provider,
+    *,
+    feature_cache_hash=None,
+    feature_source_coverage=None,
+    feature_unavailable_counts=None,
+    feature_provenance=None,
+) -> str | None:
+    if provider is None:
+        return None
+    return candidate_definition_hash(
+        {
+            "provider": type(provider).__name__,
+            "declared_config_hash": getattr(provider, "feature_config_hash", None),
+            "feature_cache_hash": (
+                getattr(provider, "feature_cache_hash", None)
+                if feature_cache_hash is None
+                else feature_cache_hash
+            ),
+            "feature_source_coverage": (
+                getattr(provider, "feature_source_coverage", {})
+                if feature_source_coverage is None
+                else feature_source_coverage
+            ),
+            "feature_unavailable_counts": (
+                getattr(provider, "feature_unavailable_counts", {})
+                if feature_unavailable_counts is None
+                else feature_unavailable_counts
+            ),
+            "feature_provenance": (
+                getattr(provider, "feature_provenance", {"provider": type(provider).__name__})
+                if feature_provenance is None
+                else feature_provenance
+            ),
+        }
+    )
 
 
 def run_train_test_search(

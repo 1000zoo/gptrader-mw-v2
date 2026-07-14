@@ -362,6 +362,15 @@ def test_scheduler_backtest_can_emit_forced_close_trade_details(monkeypatch) -> 
     assert left_open["net_pnl"] == "0"
     assert left_open["position_open_at_end"] is True
     assert forced["position_open_at_end"] is False
+    assert Decimal(forced["max_drawdown_ratio"]) > 0
+    assert Decimal(forced["max_drawdown_ratio"]) == (
+        -Decimal(forced["net_pnl"]) / Decimal(forced["initial_equity"])
+    )
+    assert Decimal(forced["final_equity"]) == (
+        Decimal(forced["initial_equity"]) + Decimal(forced["net_pnl"])
+    )
+    assert forced["feature_cache_hash"] is None
+    assert forced["feature_config_hash"] is None
 
 
 @pytest.mark.parametrize("initial_equity", (Decimal("0"), Decimal("-1"), Decimal("NaN"), True))
@@ -906,6 +915,7 @@ def test_backtest_injects_same_feature_provider_and_exports_provenance(monkeypat
         end_at=market.candles[-1].closed_at,
         market_feature_provider=provider,
         include_deferred=True,
+        include_trade_details=True,
     )
 
     assert captured == [provider, provider]
@@ -913,6 +923,9 @@ def test_backtest_injects_same_feature_provider_and_exports_provenance(monkeypat
     assert result["feature_source_coverage"] == {"aggTrades": 10}
     assert result["feature_unavailable_counts"] == {"fundingRate": 3}
     assert result["feature_provenance"] == {"venue": "binance"}
+    assert len(result["feature_config_hash"]) == 64
+    assert result["initial_equity"] == "10000"
+    assert result["final_equity"] == "10000"
     assert result["candidate_definition_hash"] == candidate_definition_hash(result["candidate"])
 
 
