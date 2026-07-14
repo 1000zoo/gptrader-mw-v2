@@ -27,6 +27,7 @@ from src.domain.regime.model import (
 )
 from src.infrastructure.regime.json_regime_artifact_repository import (
     JsonRegimeArtifactRepository,
+    mapping_artifact_hash,
     model_artifact_hash,
     model_fingerprint_hash,
 )
@@ -205,7 +206,8 @@ def test_mapping_round_trip_preserves_strategy_cash_zero_evidence_and_infinity(t
     mapping = _mapping(model)
     repo = JsonRegimeArtifactRepository(tmp_path)
     repo.save_model(model)
-    repo.save_mapping(mapping)
+    saved_hash = repo.save_mapping(mapping)
+    assert mapping_artifact_hash(mapping) == saved_hash
     first = (tmp_path / "mapping.json").read_bytes()
     repo.save_mapping(mapping)
 

@@ -96,6 +96,13 @@ def model_fingerprint_hash(artifact: RegimeModelArtifact) -> str:
     return canonical_artifact_hash(identity)
 
 
+def mapping_artifact_hash(artifact: StrategyMappingArtifact) -> str:
+    """Return the content hash used by the persisted mapping envelope."""
+    if not isinstance(artifact, StrategyMappingArtifact):
+        raise ValueError("mapping artifact has an invalid type")
+    return canonical_artifact_hash(_mapping_payload(artifact))
+
+
 def _decimal_text(value: Decimal) -> str:
     if value == Decimal("Infinity"):
         return "Infinity"
@@ -680,5 +687,6 @@ __all__ = [
     "JsonRegimeArtifactRepository",
     "canonical_artifact_hash",
     "model_artifact_hash",
+    "mapping_artifact_hash",
     "model_fingerprint_hash",
 ]

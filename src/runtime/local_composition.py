@@ -20,6 +20,12 @@ from src.application.usecases.strategy_lifecycle import (
     RunStrategyBacktestCycleUseCase,
     RunStrategyLifecycleUseCase,
 )
+from src.application.usecases.regime import SelectStrategyUseCase
+from src.domain.regime import (
+    CHART_FEATURE_SCHEMA_VERSION,
+    SelectionArtifactSnapshot,
+    SelectionConfidenceThresholds,
+)
 from src.domain.execution import OrderRequest, OrderResult
 from src.domain.lifecycle import (
     SignalGeneratorDefinition,
@@ -35,12 +41,23 @@ from src.domain.risk import (
 from src.domain.signal import SignalDirection
 from src.domain.signal_generator import CompositeSignalGenerator
 from src.infrastructure.persistence import (
+    SqliteRegimeSelectionStateRepository,
     SqliteRuntimeStateRepository,
     SqliteSignalLogRepository,
 )
+from src.infrastructure.regime import (
+    JsonRegimeArtifactRepository,
+    mapping_artifact_hash,
+    model_artifact_hash,
+    model_fingerprint_hash,
+)
 from src.interfaces.api import create_app
 from src.interfaces.api.trade_controller import create_trade_router
-from src.interfaces.scheduler import StrategyLifecycleScheduler, TradeScheduler
+from src.interfaces.scheduler import (
+    RegimeSelectionScheduler,
+    StrategyLifecycleScheduler,
+    TradeScheduler,
+)
 from src.domain.strategy.implementations import (
     AtrTakeProfitStopLossStrategy,
     FixedRatioTakeProfitStopLossStrategy,
@@ -66,6 +83,12 @@ class LocalRuntime:
         self.settings = settings or RuntimeSettings()
         self.status = _runtime_status(self.settings)
         database_path = _sqlite_path_from_url(self.settings.database_url)
+        self._regime_selection_scheduler = None
+        self._regime_selection_snapshot = None
+        self._regime_model_artifact = None
+        self._regime_mapping_artifact = None
+        if self.settings.regime_selection_enabled:
+            self._compose_regime_selection(database_path)
         runtime_logger.info(
             "runtime creation started",
             mode=self.settings.mode.value,
@@ -141,6 +164,92 @@ class LocalRuntime:
             mode=self.settings.mode.value,
             symbol=self.settings.symbol,
             timeframe=self.settings.timeframe,
+        )
+
+    @property
+    def regime_selection_scheduler(self) -> RegimeSelectionScheduler | None:
+        return self._regime_selection_scheduler
+
+    @property
+    def regime_selection_snapshot(self) -> SelectionArtifactSnapshot | None:
+        return self._regime_selection_snapshot
+
+    @property
+    def regime_model_artifact(self):
+        return self._regime_model_artifact
+
+    @property
+    def regime_mapping_artifact(self):
+        return self._regime_mapping_artifact
+
+    def _compose_regime_selection(self, database_path: str) -> None:
+        model_path = _regime_artifact_file(
+            self.settings.regime_model_artifact_path,
+            expected_name="model.json",
+            label="regime model artifact path",
+        )
+        mapping_path = _regime_artifact_file(
+            self.settings.regime_mapping_artifact_path,
+            expected_name="mapping.json",
+            label="regime mapping artifact path",
+        )
+        model_repository = JsonRegimeArtifactRepository(model_path.parent)
+        model = model_repository.load_model(
+            expected_symbol=self.settings.symbol,
+            expected_schema=CHART_FEATURE_SCHEMA_VERSION,
+        )
+        model_hash = model_artifact_hash(model)
+        fingerprint_hash = model_fingerprint_hash(model)
+        mapping_repository = JsonRegimeArtifactRepository(mapping_path.parent)
+        mapping = mapping_repository.load_mapping(
+            expected_candidate_definition_hash=(
+                self.settings.regime_candidate_definition_hash
+            ),
+            expected_candidate_universe_hash=(
+                self.settings.regime_candidate_universe_hash
+            ),
+            expected_data_provenance_hash=(
+                self.settings.regime_data_provenance_hash
+            ),
+            expected_model_artifact_hash=model_hash,
+            expected_model_fingerprint_hash=fingerprint_hash,
+        )
+        if mapping.cluster_fingerprints != model.fingerprints:
+            raise ValueError(
+                "mapping cluster fingerprints do not match model cluster fingerprints"
+            )
+        if model.config.model_type == "gmm":
+            thresholds = SelectionConfidenceThresholds(
+                model_type="gmm",
+                gmm_probability_min=self.settings.regime_gmm_p_min,
+                gmm_margin_min=self.settings.regime_gmm_margin_min,
+            )
+        else:
+            if not model.distance_thresholds:
+                raise ValueError("KMeans model distance thresholds are required")
+            # Task 8 currently accepts one global cutoff. The maximum persisted
+            # per-cluster threshold is the frozen, conservative global cutoff.
+            effective_distance = (
+                self.settings.regime_kmeans_max_distance
+                if self.settings.regime_kmeans_max_distance is not None
+                else max(model.distance_thresholds)
+            )
+            thresholds = SelectionConfidenceThresholds(
+                model_type="kmeans",
+                kmeans_max_standardized_distance=effective_distance,
+            )
+        snapshot = SelectionArtifactSnapshot.from_mapping_artifact(
+            mapping,
+            mapping_artifact_hash=mapping_artifact_hash(mapping),
+            model_type=model.config.model_type,
+            confidence_thresholds=thresholds,
+        )
+        selection_repository = SqliteRegimeSelectionStateRepository(database_path)
+        self._regime_model_artifact = model
+        self._regime_mapping_artifact = mapping
+        self._regime_selection_snapshot = snapshot
+        self._regime_selection_scheduler = RegimeSelectionScheduler(
+            SelectStrategyUseCase(), selection_repository
         )
 
     def health_details(self) -> dict[str, object]:
@@ -569,6 +678,22 @@ def _runtime_status(settings: RuntimeSettings) -> RuntimeStatus:
             ),
         )
     return RuntimeStatus.local(settings)
+
+
+def _regime_artifact_file(
+    value: str | None,
+    *,
+    expected_name: str,
+    label: str,
+) -> Path:
+    if value is None:
+        raise ValueError(f"{label} is required")
+    path = Path(value).expanduser().resolve()
+    if path.name != expected_name:
+        raise ValueError(f"{label} must point to {expected_name}")
+    if not path.is_file():
+        raise ValueError(f"{label} must point to an existing file")
+    return path
 
 
 def _sqlite_path_from_url(database_url: str) -> str:

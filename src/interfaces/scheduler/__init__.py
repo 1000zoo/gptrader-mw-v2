@@ -3,6 +3,10 @@ from src.interfaces.scheduler.strategy_lifecycle_scheduler import (
     ScheduledStrategyLifecycleRun,
     StrategyLifecycleScheduler,
 )
+from src.interfaces.scheduler.regime_selection_scheduler import (
+    RegimeSelectionScheduler,
+    ScheduledRegimeSelection,
+)
 from src.interfaces.scheduler.trade_scheduler import (
     ScheduledPositionClose,
     ScheduledPositionSync,
@@ -16,6 +20,8 @@ __all__ = [
     "ScheduledStrategyBacktestCycleRun",
     "ScheduledStrategyLifecycleRun",
     "ScheduledTradeExecution",
+    "ScheduledRegimeSelection",
+    "RegimeSelectionScheduler",
     "StrategyLifecycleScheduler",
     "TradeScheduler",
 ]
