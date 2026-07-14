@@ -1,6 +1,7 @@
 
 from src.infrastructure.persistence.repositories import (
     RuntimeRecord,
+    SqliteRegimeSelectionStateRepository,
     SqliteRuntimeStateRepository,
     SqliteSignalLogRepository,
     SqliteStrategyRepository,
@@ -8,6 +9,7 @@ from src.infrastructure.persistence.repositories import (
 
 __all__ = [
     "RuntimeRecord",
+    "SqliteRegimeSelectionStateRepository",
     "SqliteRuntimeStateRepository",
     "SqliteSignalLogRepository",
     "SqliteStrategyRepository",
