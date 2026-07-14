@@ -13,6 +13,12 @@ from src.application.usecases.regime.select_regime_model_usecase import (
     SelectRegimeModelUseCase,
     select_model,
 )
+from src.application.usecases.regime.build_strategy_mapping_usecase import (
+    BuildStrategyMappingCommand,
+    BuildStrategyMappingResult,
+    BuildStrategyMappingUseCase,
+    corrected_lower_bound,
+)
 
 __all__ = [
     "FitRegimeModelCommand",
@@ -26,4 +32,8 @@ __all__ = [
     "SelectRegimeModelResult",
     "SelectRegimeModelUseCase",
     "select_model",
+    "BuildStrategyMappingCommand",
+    "BuildStrategyMappingResult",
+    "BuildStrategyMappingUseCase",
+    "corrected_lower_bound",
 ]

@@ -12,6 +12,15 @@ from src.domain.regime.temporal import (
     feature_window,
     is_regime_boundary,
 )
+from src.domain.regime.mapping import (
+    STRATEGY_MAPPING_ARTIFACT_VERSION,
+    BootstrapConfig,
+    CandidateMappingAssessment,
+    MappingThresholds,
+    StrategyMappingArtifact,
+    StrategyMappingEntry,
+    WeeklyStrategyEvidence,
+)
 
 __all__ = [
     "CHART_FEATURE_REGISTRY_V1",
@@ -24,4 +33,11 @@ __all__ = [
     "build_weekly_episodes",
     "feature_window",
     "is_regime_boundary",
+    "STRATEGY_MAPPING_ARTIFACT_VERSION",
+    "BootstrapConfig",
+    "CandidateMappingAssessment",
+    "MappingThresholds",
+    "StrategyMappingArtifact",
+    "StrategyMappingEntry",
+    "WeeklyStrategyEvidence",
 ]
