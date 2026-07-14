@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -10,9 +11,15 @@ from src.application.usecases.regime.build_strategy_mapping_usecase import (
     BuildStrategyMappingUseCase,
     corrected_lower_bound,
 )
+from src.domain.regime.mapping import WeeklyStrategyEvidence
 
 
 UTC = timezone.utc
+
+
+def _sha(label: str) -> str:
+    import hashlib
+    return hashlib.sha256(label.encode()).hexdigest()
 
 
 def _rows(
@@ -45,10 +52,12 @@ def _rows(
                         {"net_pnl": str(pnl), "holding_bars": 10}
                         for pnl in trade_values
                     ],
-                    "candidate_hash": f"hash-{candidate_id}",
-                    "market_context_hash": f"market-{index}",
-                    "data_hash": f"data-{index}",
-                    "feature_config_hash": "feature-config",
+                    "candidate_hash": _sha(f"candidate-{candidate_id}"),
+                    "market_context_hash": _sha(f"market-{index}"),
+                    "data_hash": _sha(f"data-{index}"),
+                    "feature_cache_hash": _sha(f"cache-{index}"),
+                    "feature_provenance": {"source": "test"},
+                    "feature_config_hash": _sha("feature-config"),
                 }
             )
     return rows
@@ -172,6 +181,119 @@ def test_globally_consecutive_weeks_may_be_assigned_to_alternating_clusters() ->
     artifact = _build(rows)
     assert set(artifact.entries) == {"cluster-0", "cluster-1"}
     assert all(entry.decision == "cash" for entry in artifact.entries.values())
+    assert all(
+        "insufficient_consecutive_blocks" in entry.rejection_reasons
+        for entry in artifact.entries.values()
+    )
+
+
+def test_multi_run_calendar_blocks_are_deterministic_without_gap_spanning() -> None:
+    rows = _rows({"candidate": [".01", ".02", "-.9", ".03", ".04"]}, trades_per_week=5)
+    # The middle week belongs to another cluster. cluster-a has two genuine runs:
+    # Jan 5/12 and Jan 26/Feb 2. Jan 12/Jan 26 must never form a 14-day block.
+    for index, row in enumerate(rows):
+        row["cluster_fingerprint"] = "cluster-b" if index == 2 else "cluster-a"
+    # Give cluster-b a second true adjacent observation so the mapping can audit both.
+    extra = _rows({"candidate": ["-.8"]}, trades_per_week=5, start=datetime(2026, 2, 9, tzinfo=UTC))[0]
+    extra["cluster_fingerprint"] = "cluster-b"
+    rows.append(extra)
+    first = _build(rows)
+    second = _build(list(reversed(rows)))
+    a = first.candidate_assessments["cluster-a"]["candidate"]
+    assert first == second
+    assert a.metrics["worst_14_day_block_return"] == Decimal(".0302")
+    assert "insufficient_consecutive_blocks" not in a.rejection_reasons
+
+
+def test_prebuilt_weekly_evidence_is_revalidated_on_execute() -> None:
+    parsed = WeeklyStrategyEvidence.from_row(_rows({"candidate": [".01"] * 2})[0])
+    object.__setattr__(parsed, "data_hash", "forged")
+    with pytest.raises(ValueError, match="data_hash"):
+        _build([parsed])
+
+
+def test_artifact_rejects_forged_strategy_statistics_and_nonfinite_metric_policy() -> None:
+    artifact = _build(_rows({"candidate": [".01"] * 8, "other": [".005"] * 8}, trades_per_week=4, start=datetime(2026, 1, 26, tzinfo=UTC)))
+    cluster = "cluster-a"
+    entry = artifact.entries[cluster]
+    with pytest.raises(ValueError, match="strategy entry"):
+        replace(artifact, entries={cluster: replace(entry, closed_trade_count=entry.closed_trade_count + 1)})
+    metrics = dict(entry.metrics)
+    metrics["mean_weekly_return"] = Decimal("Infinity")
+    with pytest.raises(ValueError, match="must be finite"):
+        replace(entry, metrics=metrics)
+    metrics = dict(entry.metrics)
+    metrics["profit_factor"] = Decimal("Infinity")
+    assert replace(entry, metrics=metrics).metrics["profit_factor"] == Decimal("Infinity")
+    metrics["profit_factor"] = Decimal("NaN")
+    with pytest.raises(ValueError, match="non-NaN"):
+        replace(entry, metrics=metrics)
+
+
+def test_artifact_rejects_forged_cash_statistics_and_candidate_universe() -> None:
+    rows = _rows({"candidate": ["-.01"] * 4, "other": ["-.02"] * 4}, trades_per_week=4)
+    artifact = _build(rows)
+    cluster = "cluster-a"
+    cash = artifact.entries[cluster]
+    with pytest.raises(ValueError, match="cash entry"):
+        replace(artifact, entries={cluster: replace(cash, closed_trade_count=1)})
+    with pytest.raises(ValueError, match="candidate universe"):
+        replace(artifact, candidate_assessments={cluster: {"candidate": artifact.candidate_assessments[cluster]["candidate"]}})
+
+
+def test_direct_evidence_construction_enforces_interval_and_feature_identity() -> None:
+    parsed = WeeklyStrategyEvidence.from_row(_rows({"candidate": [".01"]})[0])
+    with pytest.raises(ValueError, match="Monday"):
+        replace(parsed, episode_start_at=parsed.episode_start_at + timedelta(days=1))
+    with pytest.raises(ValueError, match="all-null or all-present"):
+        replace(parsed, feature_cache_hash=None)
+    source = {"nested": {"items": [1, 2]}}
+    copied = replace(parsed, feature_provenance=source)
+    source["nested"]["items"].append(3)
+    assert tuple(copied.feature_provenance["nested"]["items"]) == (1, 2)
+
+
+def test_same_candidate_episode_cannot_be_silently_assigned_to_two_clusters() -> None:
+    rows = _rows({"candidate": [".01"] * 2})
+    duplicate = dict(rows[0])
+    duplicate["cluster_fingerprint"] = "cluster-b"
+    with pytest.raises(ValueError, match="conflicting clusters"):
+        _build(rows + [duplicate])
+
+
+def test_task5_no_provider_rows_are_consumed_with_null_feature_identity(monkeypatch) -> None:
+    import scripts.chart_regime_strategy_mapping as task5
+    from scripts.scheduler_driven_scalping_backtest import SchedulerBacktestCandidate, StrategyCandidateSpec
+    from src.domain.market import Candle, MarketSnapshot, Symbol, Timeframe
+    from src.domain.regime import build_weekly_episodes
+
+    start = datetime(2026, 1, 5, tzinfo=UTC)
+    symbol = Symbol("BTC", "USDT")
+    timeframe = Timeframe(1, "m")
+    market = MarketSnapshot(tuple(
+        Candle(symbol, timeframe, start + timedelta(minutes=i), start + timedelta(minutes=i + 1), Decimal(100), Decimal(100), Decimal(100), Decimal(100), Decimal(1))
+        for i in range(-1, 2 * 10080)
+    ))
+    candidate = SchedulerBacktestCandidate(
+        candidate_id="candidate", strategies=(StrategyCandidateSpec("latest-close-moving-average", {}),),
+        take_profit_ratio=Decimal(".01"), stop_loss_ratio=Decimal(".01"),
+        equity_ratio=Decimal(".1"), leverage=Decimal(1), candle_limit=1,
+    )
+    def fake_backtest(snapshot, **kwargs):
+        initial = kwargs["initial_equity"]
+        return {
+            "candidate_id": "candidate", "initial_equity": str(initial), "final_equity": str(initial),
+            "trade_count": 0, "trades_per_day": "0", "gross_pnl": "0", "net_pnl": "0",
+            "fee_paid": "0", "return_ratio": "0", "daily_return_ratio": "0", "max_drawdown_ratio": "0",
+            "net_win_rate": "0", "average_net_trade_roe": "0", "average_net_trade_expectancy_ratio": "0",
+            "trades": [], "feature_cache_hash": None, "feature_provenance": {}, "feature_config_hash": None,
+        }
+    monkeypatch.setattr(task5, "run_scheduler_driven_backtest", fake_backtest)
+    episodes = tuple(build_weekly_episodes(start, start + timedelta(days=14)))
+    rows = task5.run_mapping_episodes(market, episodes=episodes, assignments={e.anchor_at: "cluster-a" for e in episodes}, candidates=(candidate,))
+    artifact = _build(rows)
+    assert artifact.entries["cluster-a"].decision == "cash"
+    assert artifact.data_provenance_hash
 
 
 @pytest.mark.parametrize(
@@ -180,7 +302,7 @@ def test_globally_consecutive_weeks_may_be_assigned_to_alternating_clusters() ->
         (lambda rows: rows.append(dict(rows[0])), "duplicate"),
         (lambda rows: rows.pop(), "rectangular"),
         (lambda rows: rows[0].__setitem__("episode_end_at", "2026-01-13T00:00:00+00:00"), "seven days"),
-        (lambda rows: rows[0].__setitem__("data_hash", "mismatch"), "data hash"),
+        (lambda rows: rows[0].__setitem__("data_hash", "mismatch"), "data[_ ]hash"),
     ],
 )
 def test_malformed_or_nonrectangular_evidence_is_rejected(mutation, message: str) -> None:

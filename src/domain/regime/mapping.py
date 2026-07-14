@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+import hashlib
+import json
+import re
 from types import MappingProxyType
 from typing import Literal, Mapping
 
@@ -22,6 +25,15 @@ MAPPING_METRIC_NAMES = (
     "top_1_episode_pnl_share",
     "return_without_best_episode",
 )
+MAPPING_REJECTION_ORDER = (
+    "minimum_weekly_episodes",
+    "minimum_distinct_months",
+    "minimum_trade_count",
+    "insufficient_consecutive_blocks",
+    "non_positive_corrected_lower_bound",
+    "cash_dominance",
+)
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 def _text(value: object, field: str) -> str:
@@ -57,6 +69,24 @@ def _utc(value: object, field: str) -> datetime:
     return result
 
 
+def _hash_text(value: object, field: str) -> str:
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise ValueError(f"{field} must be a lowercase SHA256 hash")
+    return value
+
+
+def _freeze_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) or not key for key in value):
+            raise ValueError("feature_provenance keys must be nonempty strings")
+        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json(item) for item in value)
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    raise ValueError("feature_provenance must contain canonical JSON values")
+
+
 @dataclass(frozen=True)
 class WeeklyTradeEvidence:
     net_pnl: Decimal
@@ -79,11 +109,49 @@ class WeeklyStrategyEvidence:
     final_equity: Decimal
     net_pnl: Decimal
     return_ratio: Decimal
+    trade_count: int
     trades: tuple[WeeklyTradeEvidence, ...]
     candidate_hash: str
     market_context_hash: str
     data_hash: str
-    feature_config_hash: str
+    feature_cache_hash: str | None
+    feature_provenance: Mapping[str, object]
+    feature_config_hash: str | None
+
+    def __post_init__(self) -> None:
+        _text(self.cluster_fingerprint, "cluster_fingerprint")
+        _text(self.candidate_id, "candidate_id")
+        if self.episode_start_at.tzinfo is not timezone.utc or self.episode_start_at.weekday() != 0 or self.episode_start_at.time() != datetime.min.time():
+            raise ValueError("episode_start_at must be canonical Monday 00:00 UTC")
+        if self.episode_end_at.tzinfo is not timezone.utc or self.episode_end_at != self.episode_start_at + timedelta(days=7):
+            raise ValueError("weekly evidence must span exactly seven days in canonical UTC")
+        for field in ("initial_equity", "final_equity", "net_pnl", "return_ratio"):
+            value = getattr(self, field)
+            if not isinstance(value, Decimal) or not value.is_finite():
+                raise ValueError(f"{field} must be a finite Decimal")
+        if self.initial_equity <= 0 or self.final_equity != self.initial_equity + self.net_pnl or self.return_ratio != self.net_pnl / self.initial_equity:
+            raise ValueError("weekly evidence equity, net_pnl, and return_ratio are inconsistent")
+        trades = tuple(self.trades)
+        if any(not isinstance(item, WeeklyTradeEvidence) for item in trades):
+            raise ValueError("trades must contain WeeklyTradeEvidence")
+        object.__setattr__(self, "trades", trades)
+        if not isinstance(self.trade_count, int) or isinstance(self.trade_count, bool) or self.trade_count < 0 or self.trade_count != len(trades):
+            raise ValueError("trade_count must be nonnegative and match trades")
+        if abs(sum((item.net_pnl for item in trades), Decimal(0)) - self.net_pnl) > Decimal("1e-24"):
+            raise ValueError("weekly evidence trade net_pnl does not reconcile")
+        if sum(item.holding_bars for item in trades) > 10080:
+            raise ValueError("weekly evidence holding bars exceed one-position episode capacity")
+        for field in ("candidate_hash", "market_context_hash", "data_hash"):
+            _hash_text(getattr(self, field), field)
+        provenance = _freeze_json(dict(self.feature_provenance))
+        object.__setattr__(self, "feature_provenance", provenance)
+        null_identity = self.feature_cache_hash is None and self.feature_config_hash is None and not provenance
+        present_identity = self.feature_cache_hash is not None and self.feature_config_hash is not None and bool(provenance)
+        if not (null_identity or present_identity):
+            raise ValueError("feature identity must be consistently all-null or all-present")
+        if present_identity:
+            _hash_text(self.feature_cache_hash, "feature_cache_hash")
+            _hash_text(self.feature_config_hash, "feature_config_hash")
 
     @classmethod
     def from_row(cls, row: Mapping[str, object]) -> "WeeklyStrategyEvidence":
@@ -99,18 +167,10 @@ class WeeklyStrategyEvidence:
             raise ValueError(f"weekly evidence missing required fields: {', '.join(missing)}")
         start = _utc(row["episode_start_at"], "episode_start_at")
         end = _utc(row["episode_end_at"], "episode_end_at")
-        if start.weekday() != 0 or start.time() != datetime.min.time():
-            raise ValueError("weekly evidence must start Monday 00:00 UTC")
-        if end != start + timedelta(days=7):
-            raise ValueError("weekly evidence must span exactly seven days")
         initial = _decimal(row["initial_equity"], "initial_equity")
         final = _decimal(row["final_equity"], "final_equity")
         net = _decimal(row["net_pnl"], "net_pnl")
         ratio = _decimal(row["return_ratio"], "return_ratio")
-        if initial <= 0:
-            raise ValueError("initial_equity must be positive")
-        if final != initial + net or ratio != net / initial:
-            raise ValueError("weekly evidence equity, net_pnl, and return_ratio are inconsistent")
         raw_trades = row["trades"]
         trade_count = row["trade_count"]
         if not isinstance(raw_trades, list) or not isinstance(trade_count, int) or isinstance(trade_count, bool):
@@ -123,10 +183,6 @@ class WeeklyStrategyEvidence:
                 net_pnl=_decimal(item.get("net_pnl"), f"trade {index} net_pnl"),
                 holding_bars=item.get("holding_bars"),
             ))
-        if trade_count != len(trades):
-            raise ValueError("weekly evidence trade_count does not match trades")
-        if abs(sum((item.net_pnl for item in trades), Decimal(0)) - net) > Decimal("1e-24"):
-            raise ValueError("weekly evidence trade net_pnl does not reconcile")
         return cls(
             cluster_fingerprint=_text(row["cluster_fingerprint"], "cluster_fingerprint"),
             candidate_id=_text(row["candidate_id"], "candidate_id"),
@@ -136,11 +192,27 @@ class WeeklyStrategyEvidence:
             final_equity=final,
             net_pnl=net,
             return_ratio=ratio,
+            trade_count=trade_count,
             trades=tuple(trades),
-            candidate_hash=_text(row["candidate_hash"], "candidate_hash"),
-            market_context_hash=_text(row["market_context_hash"], "market_context_hash"),
-            data_hash=_text(row["data_hash"], "data_hash"),
-            feature_config_hash=_text(row["feature_config_hash"], "feature_config_hash"),
+            candidate_hash=row["candidate_hash"],
+            market_context_hash=row["market_context_hash"],
+            data_hash=row["data_hash"],
+            feature_cache_hash=row.get("feature_cache_hash"),
+            feature_provenance=row.get("feature_provenance", {}),
+            feature_config_hash=row["feature_config_hash"],
+        )
+
+    def validated_copy(self) -> "WeeklyStrategyEvidence":
+        return type(self)(
+            cluster_fingerprint=self.cluster_fingerprint, candidate_id=self.candidate_id,
+            episode_start_at=self.episode_start_at, episode_end_at=self.episode_end_at,
+            initial_equity=self.initial_equity, final_equity=self.final_equity,
+            net_pnl=self.net_pnl, return_ratio=self.return_ratio, trade_count=self.trade_count,
+            trades=tuple(self.trades), candidate_hash=self.candidate_hash,
+            market_context_hash=self.market_context_hash, data_hash=self.data_hash,
+            feature_cache_hash=self.feature_cache_hash,
+            feature_provenance=dict(self.feature_provenance),
+            feature_config_hash=self.feature_config_hash,
         )
 
 
@@ -199,6 +271,7 @@ def _freeze_metrics(metrics: Mapping[str, Decimal]) -> Mapping[str, Decimal]:
 class CandidateMappingAssessment:
     cluster_fingerprint: str
     candidate_id: str
+    candidate_hash: str
     weekly_episode_count: int
     distinct_month_count: int
     closed_trade_count: int
@@ -211,12 +284,16 @@ class CandidateMappingAssessment:
     def __post_init__(self) -> None:
         _text(self.cluster_fingerprint, "cluster_fingerprint")
         _text(self.candidate_id, "candidate_id")
+        _hash_text(self.candidate_hash, "candidate_hash")
         if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in (self.weekly_episode_count, self.distinct_month_count, self.closed_trade_count)):
             raise ValueError("assessment counts must be nonnegative integers")
         if not self.observed_mean.is_finite() or not self.corrected_lower_bound.is_finite():
             raise ValueError("assessment returns must be finite")
         if self.eligible == bool(self.rejection_reasons):
             raise ValueError("assessment eligibility and rejection reasons are inconsistent")
+        expected_order = tuple(reason for reason in MAPPING_REJECTION_ORDER if reason in self.rejection_reasons)
+        if self.rejection_reasons != expected_order:
+            raise ValueError("assessment rejection reasons must be unique, known, and ordered")
         object.__setattr__(self, "metrics", _freeze_metrics(self.metrics))
 
 
@@ -236,6 +313,8 @@ class StrategyMappingEntry:
         _text(self.cluster_fingerprint, "cluster_fingerprint")
         if self.decision == "strategy":
             _text(self.strategy_profile_id, "strategy_profile_id")
+            if self.rejection_reasons:
+                raise ValueError("strategy mapping cannot have rejection reasons")
         elif self.decision == "cash":
             if self.strategy_profile_id is not None:
                 raise ValueError("cash mapping cannot have a strategy profile")
@@ -255,6 +334,7 @@ class StrategyMappingArtifact:
     regime_model_fingerprint_hash: str
     candidate_definition_hash: str
     candidate_universe_hash: str
+    candidate_hashes: Mapping[str, str]
     data_provenance_hash: str
     cluster_fingerprints: tuple[str, ...]
     entries: Mapping[str, StrategyMappingEntry]
@@ -277,10 +357,61 @@ class StrategyMappingArtifact:
         expected = set(self.cluster_fingerprints)
         if set(entries) != expected or set(assessments) != expected:
             raise ValueError("mapping artifact cluster coverage is inconsistent")
+        if any(not isinstance(item, StrategyMappingEntry) for item in entries.values()):
+            raise ValueError("mapping entries must contain StrategyMappingEntry values")
+        candidate_hashes = dict(self.candidate_hashes)
+        if not candidate_hashes or any(not isinstance(key, str) or not key for key in candidate_hashes):
+            raise ValueError("candidate hashes must cover a nonempty candidate universe")
+        for value in candidate_hashes.values():
+            _hash_text(value, "candidate_hash")
+        if self.candidate_universe_hash != _canonical_hash({"candidate_ids": tuple(sorted(candidate_hashes))}):
+            raise ValueError("candidate universe hash is inconsistent")
+        if self.candidate_definition_hash != _canonical_hash({"candidate_hashes": dict(sorted(candidate_hashes.items()))}):
+            raise ValueError("candidate definition hash is inconsistent")
         for cluster in self.cluster_fingerprints:
             if entries[cluster].cluster_fingerprint != cluster or not assessments[cluster]:
                 raise ValueError("mapping artifact cluster keys are inconsistent")
+            if any(not isinstance(item, CandidateMappingAssessment) for item in assessments[cluster].values()):
+                raise ValueError("candidate assessments contain an invalid value")
             if any(item.cluster_fingerprint != cluster or key != item.candidate_id for key, item in assessments[cluster].items()):
                 raise ValueError("candidate assessment keys are inconsistent")
+            if set(assessments[cluster]) != set(candidate_hashes):
+                raise ValueError("candidate universe must be identical across clusters")
+            if any(item.candidate_hash != candidate_hashes[key] for key, item in assessments[cluster].items()):
+                raise ValueError("candidate assessment hash is inconsistent")
+            counts = {(item.weekly_episode_count, item.distinct_month_count) for item in assessments[cluster].values()}
+            if len(counts) != 1:
+                raise ValueError("candidate assessment episode counts are inconsistent")
+            eligible = [item for item in assessments[cluster].values() if item.eligible]
+            entry = entries[cluster]
+            if eligible:
+                winner = min(eligible, key=lambda item: (-item.corrected_lower_bound, -item.metrics["median_weekly_return"], -item.metrics["mean_weekly_return"], item.candidate_id))
+                if not (
+                    entry.decision == "strategy" and entry.strategy_profile_id == winner.candidate_id
+                    and entry.weekly_episode_count == winner.weekly_episode_count
+                    and entry.distinct_month_count == winner.distinct_month_count
+                    and entry.closed_trade_count == winner.closed_trade_count
+                    and entry.corrected_lower_bound == winner.corrected_lower_bound
+                    and entry.metrics == winner.metrics and not entry.rejection_reasons
+                ):
+                    raise ValueError("strategy entry does not match the deterministic eligible winner")
+            else:
+                first = next(iter(assessments[cluster].values()))
+                reasons = tuple(reason for reason in MAPPING_REJECTION_ORDER if any(reason in item.rejection_reasons for item in assessments[cluster].values()))
+                if not (
+                    entry.decision == "cash" and entry.strategy_profile_id is None
+                    and entry.weekly_episode_count == first.weekly_episode_count
+                    and entry.distinct_month_count == first.distinct_month_count
+                    and entry.closed_trade_count == 0 and entry.corrected_lower_bound == 0
+                    and entry.metrics == {name: Decimal(0) for name in MAPPING_METRIC_NAMES}
+                    and entry.rejection_reasons == reasons
+                ):
+                    raise ValueError("cash entry does not match audited candidate rejections")
         object.__setattr__(self, "entries", MappingProxyType(entries))
         object.__setattr__(self, "candidate_assessments", MappingProxyType(assessments))
+        object.__setattr__(self, "candidate_hashes", MappingProxyType(candidate_hashes))
+
+
+def _canonical_hash(value: object) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    return hashlib.sha256(encoded).hexdigest()
