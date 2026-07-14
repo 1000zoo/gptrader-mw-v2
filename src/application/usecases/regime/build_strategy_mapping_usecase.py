@@ -20,6 +20,7 @@ from src.domain.regime.mapping import (
     WeeklyStrategyEvidence,
     derive_mapping_rejection_reasons,
     episode_months_touched,
+    has_sufficient_calendar_block_coverage,
 )
 
 
@@ -71,9 +72,8 @@ class BuildStrategyMappingUseCase:
                 for candidate, rows in by_candidate.items()
             }
             sufficient_by_candidate = {
-                candidate: (
-                    bool(rows)
-                    and {index for start in valid_starts_by_candidate[candidate] for index in (start, start + 1)} == set(range(len(rows)))
+                candidate: has_sufficient_calendar_block_coverage(
+                    tuple(row.episode_start_at for row in rows)
                 )
                 for candidate, rows in by_candidate.items()
             }

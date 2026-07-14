@@ -22,6 +22,7 @@ from src.domain.regime.mapping import (
     WeeklyStrategyEvidence,
     derive_mapping_rejection_reasons,
     episode_months_touched,
+    has_sufficient_calendar_block_coverage,
 )
 
 __all__ = [
@@ -44,4 +45,5 @@ __all__ = [
     "WeeklyStrategyEvidence",
     "derive_mapping_rejection_reasons",
     "episode_months_touched",
+    "has_sufficient_calendar_block_coverage",
 ]

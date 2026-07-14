@@ -276,6 +276,16 @@ def episode_months_touched(starts: tuple[datetime, ...]) -> frozenset[tuple[int,
     return frozenset(months)
 
 
+def has_sufficient_calendar_block_coverage(starts: tuple[datetime, ...]) -> bool:
+    """Whether every persisted episode belongs to a true adjacent 14-day block."""
+    start_set = frozenset(starts)
+    week = timedelta(days=7)
+    return bool(start_set) and all(
+        start - week in start_set or start + week in start_set
+        for start in start_set
+    )
+
+
 def derive_mapping_rejection_reasons(
     *,
     thresholds: MappingThresholds,
@@ -360,6 +370,8 @@ class CandidateMappingAssessment:
             raise ValueError("assessment returns must be finite")
         if type(self.has_sufficient_consecutive_blocks) is not bool:
             raise ValueError("has_sufficient_consecutive_blocks must be a strict boolean")
+        if self.has_sufficient_consecutive_blocks != has_sufficient_calendar_block_coverage(starts):
+            raise ValueError("persisted consecutive block coverage does not match effective episodes")
         frozen_metrics = _freeze_metrics(self.metrics)
         if self.observed_mean != frozen_metrics["mean_weekly_return"]:
             raise ValueError("assessment observed mean must equal its mean weekly return metric")
@@ -457,6 +469,8 @@ class StrategyMappingArtifact:
             if any(item.candidate_hash != candidate_hashes[key] for key, item in assessments[cluster].items()):
                 raise ValueError("candidate assessment hash is inconsistent")
             for item in assessments[cluster].values():
+                if item.has_sufficient_consecutive_blocks != has_sufficient_calendar_block_coverage(item.effective_episode_starts):
+                    raise ValueError("candidate assessment block coverage is inconsistent")
                 derived_reasons = derive_mapping_rejection_reasons(
                     thresholds=self.thresholds,
                     weekly_episode_count=item.weekly_episode_count,

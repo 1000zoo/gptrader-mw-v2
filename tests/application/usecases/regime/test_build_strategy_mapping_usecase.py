@@ -11,7 +11,11 @@ from src.application.usecases.regime.build_strategy_mapping_usecase import (
     BuildStrategyMappingUseCase,
     corrected_lower_bound,
 )
-from src.domain.regime.mapping import WeeklyStrategyEvidence, episode_months_touched
+from src.domain.regime.mapping import (
+    WeeklyStrategyEvidence,
+    episode_months_touched,
+    has_sufficient_calendar_block_coverage,
+)
 
 
 UTC = timezone.utc
@@ -293,6 +297,29 @@ def test_multi_run_calendar_blocks_are_deterministic_without_gap_spanning() -> N
     assert "insufficient_consecutive_blocks" not in a.rejection_reasons
 
 
+def test_persisted_block_coverage_is_derived_for_isolated_and_multi_run_starts() -> None:
+    start = datetime(2026, 1, 5, tzinfo=UTC)
+    isolated = tuple(start + timedelta(days=14 * index) for index in range(8))
+    multi_run = (
+        start,
+        start + timedelta(days=7),
+        start + timedelta(days=28),
+        start + timedelta(days=35),
+    )
+    assert not has_sufficient_calendar_block_coverage(isolated)
+    assert has_sufficient_calendar_block_coverage(multi_run)
+
+    artifact = _build(_rows({"candidate": [".01"] * 8}, trades_per_week=4))
+    assessment = artifact.candidate_assessments["cluster-a"]["candidate"]
+    with pytest.raises(ValueError, match="block coverage"):
+        replace(
+            assessment,
+            effective_episode_starts=isolated,
+            distinct_month_count=len(episode_months_touched(isolated)),
+            has_sufficient_consecutive_blocks=True,
+        )
+
+
 def test_prebuilt_weekly_evidence_is_revalidated_on_execute() -> None:
     parsed = WeeklyStrategyEvidence.from_row(_rows({"candidate": [".01"] * 2})[0])
     object.__setattr__(parsed, "data_hash", "forged")
@@ -359,6 +386,7 @@ def test_artifact_rederives_eligibility_from_persisted_evidence_fields() -> None
         distinct_month_count=1,
         closed_trade_count=0,
         effective_episode_starts=(datetime(2026, 2, 2, tzinfo=UTC),),
+        has_sufficient_consecutive_blocks=False,
     )
     forged_entry = replace(
         artifact.entries[cluster],
@@ -387,9 +415,8 @@ def test_consecutive_block_flag_is_strict_and_bound_to_rejection_reason() -> Non
     assessment = artifact.candidate_assessments[cluster]["candidate"]
     with pytest.raises(ValueError, match="strict boolean"):
         replace(assessment, has_sufficient_consecutive_blocks=1)
-    forged = replace(assessment, has_sufficient_consecutive_blocks=False)
-    with pytest.raises(ValueError, match="derived eligibility"):
-        replace(artifact, candidate_assessments={cluster: {"candidate": forged}})
+    with pytest.raises(ValueError, match="block coverage"):
+        replace(assessment, has_sufficient_consecutive_blocks=False)
 
 
 def test_production_artifact_can_be_reconstructed_without_validation_drift() -> None:
