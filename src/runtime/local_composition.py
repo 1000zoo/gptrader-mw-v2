@@ -185,23 +185,23 @@ class LocalRuntime:
     def _compose_regime_selection(self, database_path: str) -> None:
         model_path = _regime_artifact_file(
             self.settings.regime_model_artifact_path,
-            expected_name="model.json",
             label="regime model artifact path",
         )
         mapping_path = _regime_artifact_file(
             self.settings.regime_mapping_artifact_path,
-            expected_name="mapping.json",
             label="regime mapping artifact path",
         )
         model_repository = JsonRegimeArtifactRepository(model_path.parent)
-        model = model_repository.load_model(
+        model = model_repository.load_model_file(
+            model_path,
             expected_symbol=self.settings.symbol,
             expected_schema=CHART_FEATURE_SCHEMA_VERSION,
         )
         model_hash = model_artifact_hash(model)
         fingerprint_hash = model_fingerprint_hash(model)
         mapping_repository = JsonRegimeArtifactRepository(mapping_path.parent)
-        mapping = mapping_repository.load_mapping(
+        mapping = mapping_repository.load_mapping_file(
+            mapping_path,
             expected_candidate_definition_hash=(
                 self.settings.regime_candidate_definition_hash
             ),
@@ -213,6 +213,7 @@ class LocalRuntime:
             ),
             expected_model_artifact_hash=model_hash,
             expected_model_fingerprint_hash=fingerprint_hash,
+            linked_model_path=model_path,
         )
         validate_model_mapping_artifact_pair(model, mapping)
         snapshot = SelectionArtifactSnapshot.from_mapping_artifact(
@@ -658,14 +659,11 @@ def _runtime_status(settings: RuntimeSettings) -> RuntimeStatus:
 def _regime_artifact_file(
     value: str | None,
     *,
-    expected_name: str,
     label: str,
 ) -> Path:
     if value is None:
         raise ValueError(f"{label} is required")
     path = Path(value).expanduser().resolve()
-    if path.name != expected_name:
-        raise ValueError(f"{label} must point to {expected_name}")
     if not path.is_file():
         raise ValueError(f"{label} must point to an existing file")
     return path

@@ -1,5 +1,6 @@
 from dataclasses import replace
 from decimal import Decimal
+import json
 
 import pytest
 
@@ -99,6 +100,74 @@ def test_enabled_regime_selection_loads_frozen_artifacts_without_changing_trade_
     )
     assert first.succeeded and retry.succeeded
     assert retry.result == first.result
+
+
+def _custom_artifact_settings(tmp_path, model_path, mapping_path, mapping):
+    return RuntimeSettings(
+        database_url=str(tmp_path / "state.sqlite3"),
+        trading_strategy_id="chart-pattern",
+        regime_selection_enabled=True,
+        regime_model_artifact_path=str(model_path),
+        regime_mapping_artifact_path=str(mapping_path),
+        regime_candidate_definition_hash=mapping.candidate_definition_hash,
+        regime_candidate_universe_hash=mapping.candidate_universe_hash,
+        regime_data_provenance_hash=mapping.data_provenance_hash,
+    )
+
+
+def _custom_artifact_pair(tmp_path):
+    model = _model()
+    mapping = _mapping(model)
+    artifacts = JsonRegimeArtifactRepository(tmp_path)
+    artifacts.save_model(model)
+    artifacts.save_mapping(mapping)
+    model_path = tmp_path / "btc-week-27-model.json"
+    mapping_path = tmp_path / "btc-week-27-mapping.json"
+    (tmp_path / "model.json").rename(model_path)
+    (tmp_path / "mapping.json").rename(mapping_path)
+    return model, mapping, model_path, mapping_path
+
+
+def test_enabled_regime_selection_loads_cli_named_artifact_files(tmp_path) -> None:
+    model, mapping, model_path, mapping_path = _custom_artifact_pair(tmp_path)
+
+    runtime = create_local_runtime(
+        _custom_artifact_settings(tmp_path, model_path, mapping_path, mapping)
+    )
+
+    assert runtime.regime_model_artifact == model
+    assert runtime.regime_mapping_artifact == mapping
+    assert runtime.status_details()["active_strategy_id"] == "chart-pattern"
+
+
+def test_cli_named_artifact_files_reject_wrong_kind_and_hash(tmp_path) -> None:
+    _model_artifact, mapping, model_path, mapping_path = _custom_artifact_pair(tmp_path)
+    with pytest.raises(ValueError, match="kind"):
+        create_local_runtime(
+            _custom_artifact_settings(tmp_path, mapping_path, model_path, mapping)
+        )
+
+    envelope = json.loads(model_path.read_text(encoding="utf-8"))
+    envelope["artifact_hash"] = "0" * 64
+    model_path.write_text(json.dumps(envelope), encoding="utf-8")
+    with pytest.raises(ValueError, match="artifact hash"):
+        create_local_runtime(
+            _custom_artifact_settings(tmp_path, model_path, mapping_path, mapping)
+        )
+
+
+def test_cli_named_artifact_files_reject_wrong_model_link(tmp_path) -> None:
+    _model_artifact, mapping, _model_path, mapping_path = _custom_artifact_pair(tmp_path)
+    other_dir = tmp_path / "other"
+    other_model = _model("diag")
+    JsonRegimeArtifactRepository(other_dir).save_model(other_model)
+    other_model_path = other_dir / "other-model.json"
+    (other_dir / "model.json").rename(other_model_path)
+
+    with pytest.raises(ValueError, match="model artifact hash"):
+        create_local_runtime(
+            _custom_artifact_settings(tmp_path, other_model_path, mapping_path, mapping)
+        )
 
 
 def test_enabled_regime_selection_supports_standalone_mapping_directory(tmp_path) -> None:

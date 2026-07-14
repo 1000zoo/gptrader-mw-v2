@@ -251,7 +251,24 @@ class JsonRegimeArtifactRepository:
         expected_artifact_hash: str | None = None,
         expected_fingerprint_hash: str | None = None,
     ) -> RegimeModelArtifact:
-        payload, artifact_hash = self._read_envelope(self._directory / _MODEL_FILE, "regime_model")
+        return self.load_model_file(
+            self._directory / _MODEL_FILE,
+            expected_symbol=expected_symbol,
+            expected_schema=expected_schema,
+            expected_artifact_hash=expected_artifact_hash,
+            expected_fingerprint_hash=expected_fingerprint_hash,
+        )
+
+    def load_model_file(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        expected_symbol: str,
+        expected_schema: str,
+        expected_artifact_hash: str | None = None,
+        expected_fingerprint_hash: str | None = None,
+    ) -> RegimeModelArtifact:
+        payload, artifact_hash = self._read_envelope(Path(path), "regime_model")
         artifact = _decode_model(payload)
         if artifact.symbol != expected_symbol:
             raise ValueError("model symbol does not match expected symbol")
@@ -293,6 +310,28 @@ class JsonRegimeArtifactRepository:
         expected_model_fingerprint_hash: str | None = None,
         expected_artifact_hash: str | None = None,
     ) -> StrategyMappingArtifact:
+        return self.load_mapping_file(
+            self._directory / _MAPPING_FILE,
+            expected_candidate_definition_hash=expected_candidate_definition_hash,
+            expected_candidate_universe_hash=expected_candidate_universe_hash,
+            expected_data_provenance_hash=expected_data_provenance_hash,
+            expected_model_artifact_hash=expected_model_artifact_hash,
+            expected_model_fingerprint_hash=expected_model_fingerprint_hash,
+            expected_artifact_hash=expected_artifact_hash,
+        )
+
+    def load_mapping_file(
+        self,
+        path: str | os.PathLike[str],
+        *,
+        expected_candidate_definition_hash: str,
+        expected_candidate_universe_hash: str,
+        expected_data_provenance_hash: str,
+        expected_model_artifact_hash: str | None = None,
+        expected_model_fingerprint_hash: str | None = None,
+        expected_artifact_hash: str | None = None,
+        linked_model_path: str | os.PathLike[str] | None = None,
+    ) -> StrategyMappingArtifact:
         expected_candidate_definition_hash = _expected_sha256(
             expected_candidate_definition_hash, "candidate definition hash"
         )
@@ -302,7 +341,7 @@ class JsonRegimeArtifactRepository:
         expected_data_provenance_hash = _expected_sha256(
             expected_data_provenance_hash, "data provenance hash"
         )
-        payload, artifact_hash = self._read_envelope(self._directory / _MAPPING_FILE, "strategy_mapping")
+        payload, artifact_hash = self._read_envelope(Path(path), "strategy_mapping")
         artifact = _decode_mapping(payload)
         if expected_artifact_hash is not None and artifact_hash != expected_artifact_hash:
             raise ValueError("mapping artifact hash does not match expected mapping artifact hash")
@@ -318,6 +357,7 @@ class JsonRegimeArtifactRepository:
             artifact,
             expected_model_artifact_hash=expected_model_artifact_hash,
             expected_model_fingerprint_hash=expected_model_fingerprint_hash,
+            linked_model_path=linked_model_path,
         )
         return artifact
 
@@ -327,6 +367,7 @@ class JsonRegimeArtifactRepository:
         *,
         expected_model_artifact_hash: str | None,
         expected_model_fingerprint_hash: str | None,
+        linked_model_path: str | os.PathLike[str] | None = None,
     ) -> None:
         if (
             expected_model_artifact_hash is not None
@@ -339,8 +380,14 @@ class JsonRegimeArtifactRepository:
         ):
             raise ValueError("model fingerprint hash does not match expected model fingerprint hash")
 
-        model_path = self._directory / _MODEL_FILE
-        if model_path.exists():
+        model_path = (
+            Path(linked_model_path)
+            if linked_model_path is not None
+            else self._directory / _MODEL_FILE
+        )
+        linked_model_required = linked_model_path is not None
+        linked_model_loaded = linked_model_required or model_path.exists()
+        if linked_model_loaded:
             payload, linked_hash = self._read_envelope(model_path, "regime_model")
             model = _decode_model(payload)
             linked_fingerprint_hash = model_fingerprint_hash(model)
@@ -360,7 +407,7 @@ class JsonRegimeArtifactRepository:
             and mapping.cluster_fingerprints != linked_cluster_fingerprints
         ):
             raise ValueError("mapping cluster fingerprints do not match linked model cluster fingerprints")
-        if model_path.exists():
+        if linked_model_loaded:
             if mapping.selection_confidence_thresholds.model_type != model.config.model_type:
                 raise ValueError("selection confidence policy model type does not match linked model")
             if model.config.model_type == "kmeans":

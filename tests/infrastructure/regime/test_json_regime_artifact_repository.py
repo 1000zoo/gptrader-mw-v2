@@ -295,6 +295,42 @@ def test_mapping_round_trip_preserves_strategy_cash_zero_evidence_and_infinity(t
     assert loaded.candidate_assessments[model.fingerprints[0]]["alpha"].metrics["profit_factor"] == Decimal("Infinity")
 
 
+def test_explicit_file_loaders_require_and_validate_the_linked_model_path(tmp_path) -> None:
+    model = _model()
+    mapping = _mapping(model)
+    repo = JsonRegimeArtifactRepository(tmp_path)
+    repo.save_model(model)
+    repo.save_mapping(mapping)
+    model_path = tmp_path / "custom-model.json"
+    mapping_path = tmp_path / "custom-mapping.json"
+    (tmp_path / "model.json").rename(model_path)
+    (tmp_path / "mapping.json").rename(mapping_path)
+
+    loaded_model = repo.load_model_file(
+        model_path,
+        expected_symbol="BTCUSDT",
+        expected_schema=CHART_FEATURE_SCHEMA_VERSION,
+    )
+    loaded_mapping = repo.load_mapping_file(
+        mapping_path,
+        **_mapping_expectations(mapping),
+        expected_model_artifact_hash=model_artifact_hash(loaded_model),
+        expected_model_fingerprint_hash=model_fingerprint_hash(loaded_model),
+        linked_model_path=model_path,
+    )
+    assert loaded_model == model
+    assert loaded_mapping == mapping
+
+    with pytest.raises(ValueError, match="cannot read artifact JSON"):
+        repo.load_mapping_file(
+            mapping_path,
+            **_mapping_expectations(mapping),
+            expected_model_artifact_hash=model_artifact_hash(model),
+            expected_model_fingerprint_hash=model_fingerprint_hash(model),
+            linked_model_path=tmp_path / "missing-model.json",
+        )
+
+
 def test_snapshot_factory_derives_policy_only_from_mapping_artifact() -> None:
     model = _model()
     mapping = _mapping(model)

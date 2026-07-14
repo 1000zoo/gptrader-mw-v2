@@ -1514,6 +1514,29 @@ def _default_build_mappings(
     }
 
 
+def _validation_replay_metrics(
+    replay: Mapping[str, object],
+) -> tuple[Decimal, Decimal, Decimal]:
+    values = []
+    for field, nonnegative in (
+        ("return_ratio", False),
+        ("portfolio_max_drawdown_ratio", True),
+        ("actual_turnover_notional", True),
+    ):
+        if field not in replay:
+            raise ValueError(f"validation replay is missing required field {field}")
+        try:
+            value = Decimal(str(replay[field]))
+        except (InvalidOperation, ValueError) as error:
+            raise ValueError(f"validation replay field {field} must be a Decimal") from error
+        if not value.is_finite():
+            raise ValueError(f"validation replay field {field} must be finite")
+        if nonnegative and value < 0:
+            raise ValueError(f"validation replay field {field} must be nonnegative")
+        values.append(value)
+    return values[0], values[1], values[2]
+
+
 def _default_validate(
     context: Mapping[str, object], prepared: Mapping[str, object], features: Mapping[str, object],
     models: Mapping[str, object], mappings: Mapping[str, object],
@@ -1574,16 +1597,14 @@ def _default_validate(
                     mapping_artifact=candidate_mapping, market_feature_provider=provider,
                     include_deferred=bool(context["include_deferred"]),
                 )
-                continuous_return = Decimal(str(replay.get("return_ratio", "0")))
-                drawdown = Decimal(str(replay.get("max_drawdown_ratio", "0")))
-                turnover = Decimal(str(replay.get("turnover", replay.get("strategy_turnover", "0"))))
+                continuous_return, drawdown, turnover = _validation_replay_metrics(replay)
                 record = {
                     "family": family, "config_id": config_id,
                     "mapping_config_id": mapping_config_id,
                     "policy_config_id": policy_config_id,
                     "return_ratio": _decimal_text(continuous_return),
-                    "max_drawdown_ratio": _decimal_text(drawdown),
-                    "turnover": _decimal_text(turnover),
+                    "portfolio_max_drawdown_ratio": _decimal_text(drawdown),
+                    "actual_turnover_notional": _decimal_text(turnover),
                     "mapping_artifact_hash": mapping_artifact_hash(candidate_mapping),
                     "_artifact": candidate_mapping,
                     "_model_artifact": candidate_model,
@@ -1593,20 +1614,25 @@ def _default_validate(
         winner = min(
             family_scores,
             key=lambda item: (
-                -Decimal(item["return_ratio"]), Decimal(item["max_drawdown_ratio"]),
-                Decimal(item["turnover"]), item["config_id"],
+                -Decimal(item["return_ratio"]), Decimal(item["portfolio_max_drawdown_ratio"]),
+                Decimal(item["actual_turnover_notional"]), item["config_id"],
             ),
         )
         selected_by_family[family] = winner["_artifact"]
         selected_models[family] = winner["_model_artifact"]
     overall = min(
         (item for item in scored if selected_by_family[item["family"]] is item["_artifact"]),
-        key=lambda item: (-Decimal(item["return_ratio"]), Decimal(item["max_drawdown_ratio"]), Decimal(item["turnover"]), item["config_id"]),
+        key=lambda item: (
+            -Decimal(item["return_ratio"]),
+            Decimal(item["portfolio_max_drawdown_ratio"]),
+            Decimal(item["actual_turnover_notional"]),
+            item["config_id"],
+        ),
     )
     return {
         "status": "selected", "selected_family": overall["family"],
         "selected_config_id": overall["config_id"],
-        "score_order": "net_return_desc,max_drawdown_asc,turnover_asc,config_id_asc",
+        "score_order": "return_ratio_desc,portfolio_max_drawdown_ratio_asc,actual_turnover_notional_asc,config_id_asc",
         "candidates": [{key: value for key, value in item.items() if not key.startswith("_artifact") and key != "_model_artifact"} for item in scored],
         "_mapping_artifacts": selected_by_family,
         "_model_artifacts": selected_models,
@@ -2169,7 +2195,7 @@ def run_chart_regime_walk_forward(
         "fold": _fold_payload(fold),
         "configuration_grid": _grid_payload(grid),
         "gate_thresholds": {"model": MODEL_GATE_THRESHOLDS, "mapping": MAPPING_GATE_THRESHOLDS},
-        "selection_score": "net_return_desc,max_drawdown_asc,turnover_asc,config_id_asc",
+        "selection_score": "return_ratio_desc,portfolio_max_drawdown_ratio_asc,actual_turnover_notional_asc,config_id_asc",
         "feature_schema_version": CHART_FEATURE_SCHEMA_VERSION,
         "candidate_ids": [item.candidate_id for item in selected_candidates],
         "candidate_behavior_hash_algorithm": "sha256(canonical-json-sort-keys,compact-separators,decimal-tag:$decimal)",

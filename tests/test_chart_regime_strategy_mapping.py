@@ -552,6 +552,27 @@ def test_cash_and_unavailable_diagnostic_availability_is_explicit() -> None:
         assert item["reason"]
 
 
+def test_validation_replay_metrics_require_canonical_finite_schema() -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    assert module._validation_replay_metrics({
+        "return_ratio": "-0.1",
+        "portfolio_max_drawdown_ratio": "0.2",
+        "actual_turnover_notional": "300",
+    }) == (Decimal("-0.1"), Decimal("0.2"), Decimal("300"))
+
+    invalid = (
+        ({"return_ratio": "0", "portfolio_max_drawdown_ratio": "0"}, "actual_turnover_notional"),
+        ({"return_ratio": "0", "max_drawdown_ratio": "0", "turnover": "0"}, "portfolio_max_drawdown_ratio"),
+        ({"return_ratio": "NaN", "portfolio_max_drawdown_ratio": "0", "actual_turnover_notional": "0"}, "return_ratio"),
+        ({"return_ratio": "0", "portfolio_max_drawdown_ratio": "-0.1", "actual_turnover_notional": "0"}, "portfolio_max_drawdown_ratio"),
+        ({"return_ratio": "0", "portfolio_max_drawdown_ratio": "0", "actual_turnover_notional": "-1"}, "actual_turnover_notional"),
+    )
+    for replay, field in invalid:
+        with pytest.raises(ValueError, match=field):
+            module._validation_replay_metrics(replay)
+
+
 def test_manual_router_is_a_distinct_public_factory_candidate() -> None:
     from scripts.scheduler_driven_scalping_backtest import default_candidate
 
@@ -1176,7 +1197,12 @@ def test_default_model_mapping_and_replay_stages_execute_end_to_end(monkeypatch,
             Decimal(str(policy.gmm_probability_min + policy.gmm_margin_min))
             if policy.model_type == "gmm" else Decimal("0")
         )
-        return {"return_ratio": str(score), "max_drawdown_ratio": "0", "trade_count": 0, "turnover": "0"}
+        return {
+            "return_ratio": str(score),
+            "portfolio_max_drawdown_ratio": "0",
+            "actual_turnover_notional": "0",
+            "trade_count": 0,
+        }
 
     from src.infrastructure.regime.json_regime_artifact_repository import mapping_artifact_hash
     monkeypatch.setattr(module, "run_scheduler_driven_regime_backtest", replay)
@@ -1221,6 +1247,11 @@ def test_default_model_mapping_and_replay_stages_execute_end_to_end(monkeypatch,
     assert set(payload["mapping_artifacts"]) == {"kmeans", "gmm"}
     assert payload["mapping_metrics"]["evidence_rows"] == 26
     assert len(payload["validation"]["candidates"]) == 48
+    assert payload["selection_score"] == payload["validation"]["score_order"]
+    assert all(
+        "portfolio_max_drawdown_ratio" in row and "actual_turnover_notional" in row
+        for row in payload["validation"]["candidates"]
+    )
     assert payload["comparisons"]["kmeans_dynamic"]["status"] == "ok"
     assert payload["validation"]["selected_config_id"].endswith("gmm:p0.75:m0.2")
     selected_hash = next(

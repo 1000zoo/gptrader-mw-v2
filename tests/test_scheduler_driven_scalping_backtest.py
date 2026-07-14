@@ -43,6 +43,7 @@ from src.domain.strategy.implementations.microstructure_alpha_strategy import (
     OpenInterestImpulseStrategy,
     PositioningCrowdingReversalStrategy,
 )
+from scripts.chart_regime_strategy_mapping import _validation_replay_metrics
 from src.domain.strategy import StrategyResult
 from src.domain.signal import Signal
 from src.domain.regime.model import ClusterAssignment
@@ -279,6 +280,12 @@ def test_regime_replay_terminal_equity_and_drawdown_include_end_candle(
         market, start_at=start, end_at=end, candidates=(_regime_candidate(),),
         model=_ScriptedAssignments({start: "cluster-a"}),
         mapping=_selection_snapshot({"cluster-a": "strategy-x"}),
+    )
+
+    assert _validation_replay_metrics(result) == (
+        Decimal(result["return_ratio"]),
+        Decimal(result["portfolio_max_drawdown_ratio"]),
+        Decimal(result["actual_turnover_notional"]),
     )
 
     assert result["trades"][0]["exit_reason"] == (
