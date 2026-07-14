@@ -1,11 +1,12 @@
 from dataclasses import dataclass
 import math
-from types import MappingProxyType
-from typing import Literal, Mapping
+from datetime import datetime
+from typing import Literal
 
 from src.domain.regime.model import ClusterAssignment
 from src.domain.regime.selection import (
     RegimeSelectionState,
+    SelectionArtifactSnapshot,
     SelectStrategyResult,
     SelectionEventType,
 )
@@ -75,18 +76,18 @@ class SelectionConfidenceThresholds:
 class SelectStrategyCommand:
     previous_state: RegimeSelectionState | None
     symbol: str
-    boundary_at: object
-    target_artifact_version: str
+    boundary_at: datetime
+    artifact_snapshot: SelectionArtifactSnapshot
     model_type: ModelType
     confidence_thresholds: SelectionConfidenceThresholds
     assignment: ClusterAssignment
-    cluster_strategy_mapping: Mapping[str, str | None]
 
     def __post_init__(self) -> None:
         symbol = _canonical(self.symbol, "symbol")
         if symbol != symbol.upper():
             raise ValueError("symbol must be canonical uppercase")
-        _canonical(self.target_artifact_version, "target_artifact_version")
+        if not isinstance(self.artifact_snapshot, SelectionArtifactSnapshot):
+            raise ValueError("artifact_snapshot must be a SelectionArtifactSnapshot")
         if self.model_type not in {"gmm", "kmeans"}:
             raise ValueError("model type must be gmm or kmeans")
         if not isinstance(self.confidence_thresholds, SelectionConfidenceThresholds):
@@ -95,7 +96,7 @@ class SelectStrategyCommand:
             raise ValueError("confidence threshold model type must match command model type")
         if not isinstance(self.assignment, ClusterAssignment):
             raise ValueError("assignment must be a ClusterAssignment")
-        if not is_regime_boundary(self.boundary_at):
+        if not isinstance(self.boundary_at, datetime) or not is_regime_boundary(self.boundary_at):
             raise ValueError("boundary_at must be a four-hour UTC boundary")
         if self.previous_state is not None:
             if not isinstance(self.previous_state, RegimeSelectionState):
@@ -105,23 +106,16 @@ class SelectStrategyCommand:
             if self.boundary_at <= self.previous_state.last_boundary_at:
                 raise ValueError("boundary_at must be strictly after the previous boundary")
 
-        mapping = dict(self.cluster_strategy_mapping)
-        if not mapping:
-            raise ValueError("cluster strategy mapping cannot be empty")
-        for fingerprint, strategy in mapping.items():
-            _canonical(fingerprint, "mapping fingerprint")
-            if strategy is not None:
-                _canonical(strategy, "strategy profile id")
+        mapping = self.artifact_snapshot.cluster_strategy_mapping
         if self.assignment.fingerprint not in mapping:
             raise ValueError("assignment fingerprint must exist in the mapping")
         if (
             self.previous_state is not None
-            and self.target_artifact_version == self.previous_state.artifact_version
+            and self.artifact_snapshot.artifact_identity == self.previous_state.artifact_version
             and self.previous_state.current_cluster_fingerprint is not None
             and self.previous_state.current_cluster_fingerprint not in mapping
         ):
             raise ValueError("committed artifact mapping must contain the current cluster")
-        object.__setattr__(self, "cluster_strategy_mapping", MappingProxyType(mapping))
 
 
 class SelectStrategyUseCase:
@@ -136,7 +130,7 @@ class SelectStrategyUseCase:
 
         if previous is None:
             state, events = _initial_transition(command, high_confidence)
-        elif command.target_artifact_version != previous.artifact_version:
+        elif command.artifact_snapshot.artifact_identity != previous.artifact_version:
             state, events = _replacement_transition(command, high_confidence)
         elif high_confidence:
             state, events = _confident_transition(command)
@@ -197,7 +191,7 @@ def _initial_transition(command: SelectStrategyCommand, high: bool):
         return (
             _make_state(
                 command,
-                artifact=command.target_artifact_version,
+                artifact=command.artifact_snapshot.artifact_identity,
                 current=None,
                 active=None,
                 low_count=1,
@@ -205,11 +199,11 @@ def _initial_transition(command: SelectStrategyCommand, high: bool):
             (SelectionEventType.CLASSIFICATION,),
         )
     fingerprint = command.assignment.fingerprint
-    strategy = command.cluster_strategy_mapping[fingerprint]
+    strategy = command.artifact_snapshot.cluster_strategy_mapping[fingerprint]
     return (
         _make_state(
             command,
-            artifact=command.target_artifact_version,
+            artifact=command.artifact_snapshot.artifact_identity,
             current=fingerprint,
             active=strategy,
             entries=strategy is not None,
@@ -222,7 +216,7 @@ def _confident_transition(command: SelectStrategyCommand):
     previous = command.previous_state
     fingerprint = command.assignment.fingerprint
     if fingerprint == previous.current_cluster_fingerprint:
-        strategy = command.cluster_strategy_mapping[fingerprint]
+        strategy = command.artifact_snapshot.cluster_strategy_mapping[fingerprint]
         events = _strategy_events(previous.active_strategy_profile_id, strategy)
         return (
             _make_state(
@@ -254,7 +248,7 @@ def _confident_transition(command: SelectStrategyCommand):
             (SelectionEventType.CLASSIFICATION,),
         )
 
-    strategy = command.cluster_strategy_mapping[fingerprint]
+    strategy = command.artifact_snapshot.cluster_strategy_mapping[fingerprint]
     events = (SelectionEventType.CLUSTER_TRANSITION,) + _strategy_events(
         previous.active_strategy_profile_id, strategy
     )
@@ -307,7 +301,7 @@ def _replacement_transition(command: SelectStrategyCommand, high: bool):
 
     fingerprint = command.assignment.fingerprint
     confirms = (
-        previous.pending_artifact_version == command.target_artifact_version
+        previous.pending_artifact_version == command.artifact_snapshot.artifact_identity
         and previous.pending_cluster_fingerprint == fingerprint
         and previous.pending_confirmation_count == 1
     )
@@ -320,13 +314,17 @@ def _replacement_transition(command: SelectStrategyCommand, high: bool):
                 active=previous.active_strategy_profile_id,
                 pending_cluster=fingerprint,
                 pending_count=1,
-                pending_artifact=command.target_artifact_version,
+                pending_artifact=command.artifact_snapshot.artifact_identity,
                 entries=False,
             ),
-            (SelectionEventType.ENTRY_SUSPENDED,),
+            (
+                (SelectionEventType.ENTRY_SUSPENDED,)
+                if previous.new_entries_enabled
+                else (SelectionEventType.CLASSIFICATION,)
+            ),
         )
 
-    strategy = command.cluster_strategy_mapping[fingerprint]
+    strategy = command.artifact_snapshot.cluster_strategy_mapping[fingerprint]
     events = [SelectionEventType.ARTIFACT_REPLACED]
     if previous.current_cluster_fingerprint != fingerprint:
         events.append(SelectionEventType.CLUSTER_TRANSITION)
@@ -334,7 +332,7 @@ def _replacement_transition(command: SelectStrategyCommand, high: bool):
     return (
         _make_state(
             command,
-            artifact=command.target_artifact_version,
+            artifact=command.artifact_snapshot.artifact_identity,
             current=fingerprint,
             active=strategy,
             entries=strategy is not None,

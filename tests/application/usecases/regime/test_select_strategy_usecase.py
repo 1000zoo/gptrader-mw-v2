@@ -8,12 +8,33 @@ from src.application.usecases.regime.select_strategy_usecase import (
     SelectionConfidenceThresholds,
 )
 from src.domain.regime.model import ClusterAssignment
-from src.domain.regime.selection import RegimeSelectionState, SelectionEventType
+from src.domain.regime.selection import (
+    RegimeSelectionState,
+    SelectionArtifactSnapshot,
+    SelectionEventType,
+)
 
 
 UTC = timezone.utc
 START = datetime(2026, 7, 13, 0, tzinfo=UTC)
 MAPPING = {"a": "strategy-x", "b": "strategy-y"}
+MODEL_HASH = "a" * 64
+MAPPING_HASH = "b" * 64
+
+
+def _snapshot(
+    label: str = "artifact-v1",
+    mapping: dict[str, str | None] | None = None,
+    *,
+    identity: str | None = None,
+) -> SelectionArtifactSnapshot:
+    discriminator = label.encode().hex()[-1]
+    return SelectionArtifactSnapshot(
+        model_artifact_hash=discriminator * 64,
+        mapping_artifact_hash=MAPPING_HASH,
+        cluster_strategy_mapping=MAPPING if mapping is None else mapping,
+        artifact_identity=identity,
+    )
 
 
 def _assignment(
@@ -49,6 +70,8 @@ def _state(
     pending_artifact: str | None = None,
     low_count: int = 0,
 ) -> RegimeSelectionState:
+    if len(artifact) != 64:
+        artifact = _snapshot(artifact).artifact_identity
     return RegimeSelectionState(
         symbol="BTCUSDT",
         artifact_version=artifact,
@@ -70,6 +93,7 @@ def _select(
     assignment: ClusterAssignment | None = None,
     mapping: dict[str, str | None] | None = None,
     artifact: str = "artifact-v1",
+    snapshot: SelectionArtifactSnapshot | None = None,
     model_type: str = "gmm",
     boundary: datetime | None = None,
 ):
@@ -77,16 +101,17 @@ def _select(
         assignment = _assignment()
     if boundary is None:
         boundary = START if previous is None else previous.last_boundary_at + timedelta(hours=4)
+    selected_mapping = MAPPING if mapping is None else mapping
+    artifact_snapshot = snapshot or _snapshot(artifact, selected_mapping)
     return SelectStrategyUseCase().execute(
         SelectStrategyCommand(
             previous_state=previous,
             symbol="BTCUSDT",
             boundary_at=boundary,
-            target_artifact_version=artifact,
+            artifact_snapshot=artifact_snapshot,
             model_type=model_type,
             confidence_thresholds=_thresholds(model_type),
             assignment=assignment,
-            cluster_strategy_mapping=MAPPING if mapping is None else mapping,
         )
     )
 
@@ -164,7 +189,8 @@ def test_high_confidence_return_to_current_cluster_reenables_entries():
 
 def test_cluster_change_to_same_strategy_is_not_strategy_switch():
     mapping = {"a": "strategy-x", "b": "strategy-x"}
-    first = _select(previous=_state(), assignment=_assignment("b"), mapping=mapping)
+    previous = _state(artifact=_snapshot(mapping=mapping).artifact_identity)
+    first = _select(previous=previous, assignment=_assignment("b"), mapping=mapping)
 
     result = _select(previous=first.state, assignment=_assignment("b"), mapping=mapping)
 
@@ -173,7 +199,8 @@ def test_cluster_change_to_same_strategy_is_not_strategy_switch():
 
 def test_confirmed_cluster_cash_mapping_has_separate_cluster_and_cash_events():
     mapping = {"a": "strategy-x", "b": None}
-    first = _select(previous=_state(), assignment=_assignment("b"), mapping=mapping)
+    previous = _state(artifact=_snapshot(mapping=mapping).artifact_identity)
+    first = _select(previous=previous, assignment=_assignment("b"), mapping=mapping)
 
     result = _select(previous=first.state, assignment=_assignment("b"), mapping=mapping)
 
@@ -187,8 +214,8 @@ def test_confirmed_cluster_cash_mapping_has_separate_cluster_and_cash_events():
 def test_artifact_change_requires_two_new_confirmations():
     result = _select(previous=_state(), artifact="artifact-v2")
 
-    assert result.state.artifact_version == "artifact-v1"
-    assert result.state.pending_artifact_version == "artifact-v2"
+    assert result.state.artifact_version == _snapshot("artifact-v1").artifact_identity
+    assert result.state.pending_artifact_version == _snapshot("artifact-v2").artifact_identity
     assert not result.state.new_entries_enabled
     assert result.state.pending_confirmation_count == 1
     assert result.events == (SelectionEventType.ENTRY_SUSPENDED,)
@@ -199,7 +226,7 @@ def test_second_matching_artifact_confirmation_commits_replacement():
 
     result = _select(previous=first.state, artifact="artifact-v2")
 
-    assert result.state.artifact_version == "artifact-v2"
+    assert result.state.artifact_version == _snapshot("artifact-v2").artifact_identity
     assert result.state.pending_artifact_version is None
     assert result.state.new_entries_enabled
     assert result.events == (SelectionEventType.ARTIFACT_REPLACED,)
@@ -227,7 +254,7 @@ def test_low_between_artifact_confirmations_resets_candidate():
 
     assert low.state.pending_artifact_version is None
     assert low.state.pending_confirmation_count == 0
-    assert low.state.artifact_version == "artifact-v1"
+    assert low.state.artifact_version == _snapshot("artifact-v1").artifact_identity
 
     restarted = _select(previous=low.state, artifact="artifact-v2")
     assert restarted.state.pending_confirmation_count == 1
@@ -238,9 +265,9 @@ def test_different_target_artifact_resets_candidate_even_for_same_cluster():
 
     result = _select(previous=first.state, artifact="artifact-v3")
 
-    assert result.state.pending_artifact_version == "artifact-v3"
+    assert result.state.pending_artifact_version == _snapshot("artifact-v3").artifact_identity
     assert result.state.pending_confirmation_count == 1
-    assert result.state.artifact_version == "artifact-v1"
+    assert result.state.artifact_version == _snapshot("artifact-v1").artifact_identity
 
 
 def test_kmeans_confidence_uses_distance_only():
@@ -287,11 +314,10 @@ def test_rejects_model_threshold_mismatch_and_missing_kmeans_distance():
                 previous_state=None,
                 symbol="BTCUSDT",
                 boundary_at=START,
-                target_artifact_version="artifact-v1",
+                artifact_snapshot=_snapshot(),
                 model_type="gmm",
                 confidence_thresholds=_thresholds("kmeans"),
                 assignment=_assignment(),
-                cluster_strategy_mapping=MAPPING,
             )
         )
 
@@ -313,7 +339,7 @@ def test_rejects_model_threshold_mismatch_and_missing_kmeans_distance():
 def test_selection_state_rejects_invalid_invariants(kwargs):
     values = dict(
         symbol="BTCUSDT",
-        artifact_version="artifact-v1",
+        artifact_version=_snapshot().artifact_identity,
         current_cluster_fingerprint="a",
         active_strategy_profile_id="strategy-x",
         pending_cluster_fingerprint=None,
@@ -328,3 +354,131 @@ def test_selection_state_rejects_invalid_invariants(kwargs):
 
     with pytest.raises(ValueError):
         RegimeSelectionState(**values)
+
+
+def test_changed_mapping_content_forces_artifact_replacement_confirmation():
+    old_snapshot = SelectionArtifactSnapshot(
+        model_artifact_hash=MODEL_HASH,
+        mapping_artifact_hash=MAPPING_HASH,
+        cluster_strategy_mapping={"a": "strategy-x", "b": "strategy-y"},
+    )
+    changed_snapshot = SelectionArtifactSnapshot(
+        model_artifact_hash=MODEL_HASH,
+        mapping_artifact_hash=MAPPING_HASH,
+        cluster_strategy_mapping={"a": "strategy-z", "b": "strategy-y"},
+    )
+    previous = _state(artifact=old_snapshot.artifact_identity)
+
+    first = _select(previous=previous, snapshot=changed_snapshot)
+
+    assert old_snapshot.artifact_identity != changed_snapshot.artifact_identity
+    assert first.state.artifact_version == old_snapshot.artifact_identity
+    assert first.state.pending_artifact_version == changed_snapshot.artifact_identity
+    assert first.state.active_strategy_profile_id == "strategy-x"
+
+    second = _select(previous=first.state, snapshot=changed_snapshot)
+    assert second.state.artifact_version == changed_snapshot.artifact_identity
+    assert second.state.active_strategy_profile_id == "strategy-z"
+
+
+def test_forged_artifact_snapshot_identity_is_rejected():
+    with pytest.raises(ValueError, match="artifact identity"):
+        SelectionArtifactSnapshot(
+            model_artifact_hash=MODEL_HASH,
+            mapping_artifact_hash=MAPPING_HASH,
+            cluster_strategy_mapping=MAPPING,
+            artifact_identity="f" * 64,
+        )
+
+
+def test_artifact_snapshot_defensively_freezes_canonical_mapping():
+    source = {"b": "strategy-y", "a": "strategy-x"}
+    snapshot = SelectionArtifactSnapshot(
+        model_artifact_hash=MODEL_HASH,
+        mapping_artifact_hash=MAPPING_HASH,
+        cluster_strategy_mapping=source,
+    )
+
+    source["a"] = "forged"
+
+    assert tuple(snapshot.cluster_strategy_mapping) == ("a", "b")
+    assert snapshot.cluster_strategy_mapping["a"] == "strategy-x"
+    with pytest.raises(TypeError):
+        snapshot.cluster_strategy_mapping["a"] = "forged"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"pending_artifact_version": "c" * 64, "new_entries_enabled": True},
+        {"consecutive_low_confidence_count": 3, "new_entries_enabled": False},
+        {"consecutive_low_confidence_count": 1, "new_entries_enabled": True},
+        {
+            "consecutive_low_confidence_count": 2,
+            "new_entries_enabled": False,
+            "active_strategy_profile_id": "strategy-x",
+        },
+    ],
+)
+def test_selection_state_rejects_stricter_transition_invariants(kwargs):
+    values = dict(
+        symbol="BTCUSDT",
+        artifact_version=_snapshot().artifact_identity,
+        current_cluster_fingerprint="a",
+        active_strategy_profile_id="strategy-x",
+        pending_cluster_fingerprint=None,
+        pending_confirmation_count=0,
+        consecutive_low_confidence_count=0,
+        new_entries_enabled=True,
+        last_boundary_at=START,
+        state_version=1,
+        pending_artifact_version=None,
+    )
+    if kwargs.get("pending_artifact_version") is not None:
+        values.update(pending_cluster_fingerprint="a", pending_confirmation_count=1)
+    values.update(kwargs)
+    with pytest.raises(ValueError):
+        RegimeSelectionState(**values)
+
+
+def test_artifact_observation_does_not_repeat_suspension_when_already_suspended():
+    previous = _state(entries=False, low_count=1)
+
+    result = _select(previous=previous, artifact="artifact-v2")
+
+    assert result.events == (SelectionEventType.CLASSIFICATION,)
+
+
+def test_artifact_observation_from_cash_does_not_emit_suspension():
+    previous = _state(strategy=None, entries=False)
+
+    result = _select(previous=previous, artifact="artifact-v2")
+
+    assert result.events == (SelectionEventType.CLASSIFICATION,)
+
+
+def test_artifact_target_reset_does_not_repeat_suspension_while_pending():
+    first = _select(previous=_state(), artifact="artifact-v2")
+
+    result = _select(previous=first.state, artifact="artifact-v3")
+
+    assert result.events == (SelectionEventType.CLASSIFICATION,)
+
+
+@pytest.mark.parametrize("boundary", ["2026-07-13T00:00:00Z", 123])
+def test_invalid_boundary_type_fails_with_value_error(boundary):
+    with pytest.raises(ValueError, match="four-hour UTC boundary"):
+        _select(boundary=boundary)
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        (True, 0.1, None),
+        (0.9, False, None),
+        (0.9, 0.1, True),
+    ],
+)
+def test_cluster_assignment_rejects_boolean_numerics(values):
+    with pytest.raises(ValueError):
+        ClusterAssignment("a", *values)

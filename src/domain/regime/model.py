@@ -53,11 +53,22 @@ class ClusterAssignment:
         if not self.fingerprint:
             raise ValueError("assignment fingerprint is required")
         probabilities = (self.dominant_probability, self.second_probability)
-        if any(not math.isfinite(value) or not 0 <= value <= 1 for value in probabilities):
+        if any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            or not 0 <= value <= 1
+            for value in probabilities
+        ):
             raise ValueError("assignment probabilities must be finite and between zero and one")
         if self.second_probability > self.dominant_probability:
             raise ValueError("second probability cannot exceed dominant probability")
-        if self.distance is not None and (not math.isfinite(self.distance) or self.distance < 0):
+        if self.distance is not None and (
+            not isinstance(self.distance, (int, float))
+            or isinstance(self.distance, bool)
+            or not math.isfinite(self.distance)
+            or self.distance < 0
+        ):
             raise ValueError("assignment distance must be finite and nonnegative")
 
 

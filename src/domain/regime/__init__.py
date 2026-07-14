@@ -26,6 +26,7 @@ from src.domain.regime.mapping import (
 )
 from src.domain.regime.selection import (
     RegimeSelectionState,
+    SelectionArtifactSnapshot,
     SelectStrategyResult,
     SelectionEventType,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "episode_months_touched",
     "has_sufficient_calendar_block_coverage",
     "RegimeSelectionState",
+    "SelectionArtifactSnapshot",
     "SelectStrategyResult",
     "SelectionEventType",
 ]

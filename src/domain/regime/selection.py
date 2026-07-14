@@ -1,6 +1,11 @@
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+import hashlib
+import json
+import re
+from types import MappingProxyType
+from typing import Mapping
 
 from src.domain.regime.temporal import is_regime_boundary
 
@@ -12,6 +17,9 @@ class SelectionEventType(Enum):
     STRATEGY_TRANSITION = "strategy_transition"
     CASH_TRANSITION = "cash_transition"
     ARTIFACT_REPLACED = "artifact_replaced"
+
+
+_SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 def _canonical_text(value: object, field: str) -> str:
@@ -32,8 +40,85 @@ def _nonnegative_integer(value: object, field: str) -> int:
     return value
 
 
+def _sha256(value: object, field: str) -> str:
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise ValueError(f"{field} must be a lowercase SHA256 hash")
+    return value
+
+
+@dataclass(frozen=True)
+class SelectionArtifactSnapshot:
+    """Content-bound model/mapping bundle used for one selection decision."""
+
+    model_artifact_hash: str
+    mapping_artifact_hash: str
+    cluster_strategy_mapping: Mapping[str, str | None]
+    artifact_identity: str | None = None
+
+    def __post_init__(self) -> None:
+        _sha256(self.model_artifact_hash, "model_artifact_hash")
+        _sha256(self.mapping_artifact_hash, "mapping_artifact_hash")
+        mapping = dict(self.cluster_strategy_mapping)
+        if not mapping:
+            raise ValueError("cluster strategy mapping cannot be empty")
+        for fingerprint, strategy in mapping.items():
+            _canonical_text(fingerprint, "mapping fingerprint")
+            if strategy is not None:
+                _canonical_text(strategy, "strategy profile id")
+        canonical_mapping = dict(sorted(mapping.items()))
+        payload = {
+            "model_artifact_hash": self.model_artifact_hash,
+            "mapping_artifact_hash": self.mapping_artifact_hash,
+            "cluster_strategy_mapping": canonical_mapping,
+        }
+        computed = hashlib.sha256(
+            json.dumps(
+                payload,
+                allow_nan=False,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        if self.artifact_identity is not None:
+            _sha256(self.artifact_identity, "artifact_identity")
+            if self.artifact_identity != computed:
+                raise ValueError("artifact identity does not match snapshot content")
+        object.__setattr__(
+            self, "cluster_strategy_mapping", MappingProxyType(canonical_mapping)
+        )
+        object.__setattr__(self, "artifact_identity", computed)
+
+    @classmethod
+    def from_mapping_artifact(
+        cls,
+        artifact: object,
+        *,
+        mapping_artifact_hash: str,
+        artifact_identity: str | None = None,
+    ) -> "SelectionArtifactSnapshot":
+        """Build a snapshot from a mapping artifact without infrastructure coupling."""
+        try:
+            model_hash = artifact.regime_model_artifact_hash
+            entries = artifact.entries
+            mapping = {
+                fingerprint: entry.strategy_profile_id
+                for fingerprint, entry in entries.items()
+            }
+        except (AttributeError, TypeError) as error:
+            raise ValueError("mapping artifact is incompatible with selection") from error
+        return cls(
+            model_artifact_hash=model_hash,
+            mapping_artifact_hash=mapping_artifact_hash,
+            cluster_strategy_mapping=mapping,
+            artifact_identity=artifact_identity,
+        )
+
+
 @dataclass(frozen=True)
 class RegimeSelectionState:
+    """Persisted selector state; artifact_version is a bundle content identity."""
+
     symbol: str
     artifact_version: str
     current_cluster_fingerprint: str | None
@@ -50,11 +135,12 @@ class RegimeSelectionState:
         symbol = _canonical_text(self.symbol, "symbol")
         if symbol != symbol.upper():
             raise ValueError("symbol must be canonical uppercase")
-        _canonical_text(self.artifact_version, "artifact_version")
+        _sha256(self.artifact_version, "artifact_version")
         _optional_text(self.current_cluster_fingerprint, "current_cluster_fingerprint")
         _optional_text(self.active_strategy_profile_id, "active_strategy_profile_id")
         _optional_text(self.pending_cluster_fingerprint, "pending_cluster_fingerprint")
-        _optional_text(self.pending_artifact_version, "pending_artifact_version")
+        if self.pending_artifact_version is not None:
+            _sha256(self.pending_artifact_version, "pending_artifact_version")
         _nonnegative_integer(self.pending_confirmation_count, "pending_confirmation_count")
         _nonnegative_integer(
             self.consecutive_low_confidence_count,
@@ -78,8 +164,19 @@ class RegimeSelectionState:
             raise ValueError("pending artifact must differ from the committed artifact")
         if self.pending_artifact_version is not None and not has_pending:
             raise ValueError("pending artifact requires a pending confirmation")
+        if self.pending_artifact_version is not None and self.new_entries_enabled:
+            raise ValueError("pending artifact replacement must suspend new entries")
         if self.consecutive_low_confidence_count and has_pending:
             raise ValueError("low confidence and pending confirmation cannot coexist")
+        if self.consecutive_low_confidence_count > 2:
+            raise ValueError("low confidence count cannot exceed two")
+        if self.consecutive_low_confidence_count and self.new_entries_enabled:
+            raise ValueError("low confidence must suspend new entries")
+        if (
+            self.consecutive_low_confidence_count == 2
+            and self.active_strategy_profile_id is not None
+        ):
+            raise ValueError("two low-confidence observations must commit cash")
         if self.current_cluster_fingerprint is None and (
             self.active_strategy_profile_id is not None or self.new_entries_enabled
         ):
@@ -129,6 +226,7 @@ class SelectStrategyResult:
 
 __all__ = [
     "RegimeSelectionState",
+    "SelectionArtifactSnapshot",
     "SelectStrategyResult",
     "SelectionEventType",
 ]
