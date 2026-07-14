@@ -28,6 +28,8 @@ from scripts.chart_regime_strategy_mapping import _manual_router_candidate
 from scripts.chart_regime_strategy_mapping import _mapping_feature_coverage
 from scripts.chart_regime_strategy_mapping import _project_centroids_to_primary_coordinates
 from scripts.chart_regime_strategy_mapping import _run_mapping_coverage_filtered_evidence
+from scripts.chart_regime_strategy_mapping import _manual_router_for_replay
+from scripts.chart_regime_strategy_mapping import _default_replay_test
 from scripts.scheduler_driven_scalping_backtest import (
     FEE_RATE,
     SchedulerBacktestCandidate,
@@ -73,6 +75,38 @@ def test_manual_router_is_a_distinct_public_factory_candidate() -> None:
     assert manual.candidate_id == "range-first-p2-tp0060-sl0045-e0035-l3-guard-a"
     assert [spec.kind for spec in manual.strategies] == ["regime_router"]
     assert manual != default_candidate()
+    unavailable, reason = _manual_router_for_replay(include_deferred=False)
+    opted_in, opted_in_reason = _manual_router_for_replay(include_deferred=True)
+    assert unavailable is None and "deferred" in reason
+    assert opted_in == manual and opted_in_reason is None
+
+
+def test_manual_router_without_deferred_opt_in_is_reported_unavailable(monkeypatch) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    calls = []
+    monkeypatch.setattr(
+        module,
+        "run_scheduler_driven_backtest",
+        lambda *args, **kwargs: calls.append(kwargs) or {
+            "return_ratio": "0", "max_drawdown_ratio": "0", "trade_count": 0
+        },
+    )
+    result = _default_replay_test(
+        {
+            "test": BTCUSDT_FIRST_FOLD.test,
+            "candidates": (_candidate("candidate-a"),),
+            "include_deferred": False,
+        },
+        {"market": _minute_market(BTCUSDT_FIRST_FOLD.mapping_fit.start_at, 1), "provider": None},
+        {}, {"_artifacts": {}}, {"_artifacts": {}}, {},
+    )
+    assert result["manual_regime_router"]["status"] == "unavailable"
+    assert "deferred" in result["manual_regime_router"]["rejection_reasons"][0]
+    assert all(
+        call["candidate"].candidate_id != "range-first-p2-tp0060-sl0045-e0035-l3-guard-a"
+        for call in calls
+    )
 
 
 def test_mapping_feature_coverage_rejects_partial_point_in_time_episode() -> None:
@@ -480,6 +514,7 @@ def test_default_model_mapping_and_replay_stages_execute_end_to_end(monkeypatch,
     payload = run_chart_regime_walk_forward(
         BTCUSDT_FIRST_FOLD,
         candidates=(candidate,),
+        include_deferred=True,
         inputs=inputs,
         fixture_grid=grid,
         output_json=tmp_path / "result.json",
@@ -506,6 +541,11 @@ def test_default_model_mapping_and_replay_stages_execute_end_to_end(monkeypatch,
     assert payload["mapping_artifacts"]["gmm"]["candidate_assessments"]
     assert "cash_contribution" in payload["continuous_diagnostics"]["gmm_dynamic"]
     assert all(call["include_trade_details"] is True for call in fixed_calls)
+    manual_calls = [
+        call for call in fixed_calls
+        if call["candidate"].candidate_id == "range-first-p2-tp0060-sl0045-e0035-l3-guard-a"
+    ]
+    assert len(manual_calls) == 1 and manual_calls[0]["include_deferred"] is True
     assert payload["continuous_diagnostics"]["adopted_fixed"]["concentration"]["top_5_positive_trade_pnl_share"] == "1"
     assert all((tmp_path / name).is_file() for name in (
         "result.json", "result.md", "result-model.json", "result-mapping.json"

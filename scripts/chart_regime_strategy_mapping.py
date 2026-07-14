@@ -764,6 +764,19 @@ def _manual_router_candidate() -> SchedulerBacktestCandidate:
     return matches[0]
 
 
+def _manual_router_for_replay(
+    *, include_deferred: bool,
+) -> tuple[SchedulerBacktestCandidate | None, str | None]:
+    candidate = _manual_router_candidate()
+    try:
+        ensure_candidate_ids_allowed(
+            (candidate.candidate_id,), include_deferred=include_deferred
+        )
+    except ValueError as error:
+        return None, str(error)
+    return candidate, None
+
+
 def _utc(value: str) -> datetime:
     return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
 
@@ -1644,22 +1657,33 @@ def _default_replay_test(
         }
     else:
         results["train_selected_fixed"] = _cash_comparison("mapping-fit statistical gate selected cash")
-    manual_router = _manual_router_candidate()
-    manual_result = run_scheduler_driven_backtest(
-        market,
-        context_start_at=test.start_at - timedelta(
-            minutes=required_warmup_candles((manual_router,), provider)
-        ),
-        start_at=test.start_at, end_at=test.end_at, candidate=manual_router,
-        market_feature_provider=provider, include_trade_details=True,
-        force_close_at_end=True,
+    manual_router, manual_unavailable = _manual_router_for_replay(
+        include_deferred=bool(context["include_deferred"])
     )
-    results["manual_regime_router"] = {
-        "status": "ok",
-        "router_rule": "existing_hand_authored_regime_router",
-        "candidate_id": manual_router.candidate_id,
-        "continuous_metrics": manual_result,
-    }
+    if manual_router is None:
+        results["manual_regime_router"] = _cash_comparison(manual_unavailable)
+        results["manual_regime_router"]["status"] = "unavailable"
+        results["manual_regime_router"]["router_rule"] = (
+            "existing_hand_authored_regime_router"
+        )
+    else:
+        manual_result = run_scheduler_driven_backtest(
+            market,
+            context_start_at=test.start_at - timedelta(
+                minutes=required_warmup_candles((manual_router,), provider)
+            ),
+            start_at=test.start_at, end_at=test.end_at, candidate=manual_router,
+            market_feature_provider=provider,
+            include_deferred=bool(context["include_deferred"]),
+            include_trade_details=True,
+            force_close_at_end=True,
+        )
+        results["manual_regime_router"] = {
+            "status": "ok",
+            "router_rule": "existing_hand_authored_regime_router",
+            "candidate_id": manual_router.candidate_id,
+            "continuous_metrics": manual_result,
+        }
     for family in ("kmeans", "gmm"):
         if family not in mapping_objects or family not in model_objects:
             results[f"{family}_dynamic"] = _cash_comparison("no frozen eligible artifact")
