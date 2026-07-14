@@ -2,6 +2,7 @@ from src.domain.ports.account_port import AccountPort, AccountSnapshot, AssetBal
 from src.domain.ports.market_data_port import MarketDataPort
 from src.domain.ports.market_feature_provider_port import MarketFeatureProviderPort
 from src.domain.ports.order_execution_port import OrderExecutionPort
+from src.domain.ports.regime_model_port import RegimeModelPort
 from src.domain.ports.signal_log_repository_port import (
     SignalLogEntry,
     SignalLogRepositoryPort,
@@ -15,6 +16,7 @@ __all__ = [
     "MarketDataPort",
     "MarketFeatureProviderPort",
     "OrderExecutionPort",
+    "RegimeModelPort",
     "SignalLogEntry",
     "SignalLogRepositoryPort",
     "StrategyRepositoryPort",
