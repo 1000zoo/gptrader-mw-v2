@@ -79,6 +79,16 @@ def test_feature_registry_freezes_interval_path_formula_metadata():
     assert {name: actual_formulas[name] for name in expected_formulas} == expected_formulas
 
 
+def test_candle_shape_registry_documents_zero_range_hour_convention():
+    formulas = {spec.name: spec.formula for spec in CHART_FEATURE_REGISTRY_V1}
+    for name in (
+        "mean_body_ratio_7d",
+        "mean_upper_wick_ratio_7d",
+        "mean_lower_wick_ratio_7d",
+    ):
+        assert "zero-range hour contributes 0" in formulas[name]
+
+
 def test_feature_vector_requires_registry_order_and_freezes_values():
     values = {name: float(index) for index, name in enumerate(EXPECTED_NAMES)}
     vector = ChartFeatureVector(

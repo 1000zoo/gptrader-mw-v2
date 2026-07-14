@@ -177,6 +177,47 @@ def test_extractor_calculates_targeted_return_and_shape_formulas(complete_candle
     assert all(math.isfinite(value) for value in vector.values.values())
 
 
+def test_zero_volume_carried_price_hour_has_zero_body_and_wick_ratios(complete_candles):
+    """Matches Binance BTCUSDT 2024-10-28 20:00-20:59 UTC maintenance rows."""
+    flat_start = len(complete_candles) - 4 * 60
+    carried_price = complete_candles[flat_start].open_price
+    flat_hour = tuple(
+        replace(
+            candle,
+            open_price=carried_price,
+            high_price=carried_price,
+            low_price=carried_price,
+            close_price=carried_price,
+            volume=Decimal("0"),
+        )
+        for candle in complete_candles[flat_start : flat_start + 60]
+    )
+    candles = complete_candles[:flat_start] + flat_hour + complete_candles[flat_start + 60 :]
+
+    vector = extract_chart_feature_vector(candles, ANCHOR)
+    bars = aggregate_closed_candles(candles, minutes=60)
+    nonflat_body_ratios = [
+        abs(bar.close_price - bar.open_price) / (bar.high_price - bar.low_price)
+        for bar in bars if bar.high_price != bar.low_price
+    ]
+    nonflat_upper_ratios = [
+        (bar.high_price - max(bar.open_price, bar.close_price)) / (bar.high_price - bar.low_price)
+        for bar in bars if bar.high_price != bar.low_price
+    ]
+    nonflat_lower_ratios = [
+        (min(bar.open_price, bar.close_price) - bar.low_price) / (bar.high_price - bar.low_price)
+        for bar in bars if bar.high_price != bar.low_price
+    ]
+    expected_body_mean = sum(nonflat_body_ratios, Decimal("0")) / len(bars)
+    expected_upper_mean = sum(nonflat_upper_ratios, Decimal("0")) / len(bars)
+    expected_lower_mean = sum(nonflat_lower_ratios, Decimal("0")) / len(bars)
+
+    assert vector.values["mean_body_ratio_7d"] == pytest.approx(float(expected_body_mean))
+    assert vector.values["mean_upper_wick_ratio_7d"] == pytest.approx(float(expected_upper_mean))
+    assert vector.values["mean_lower_wick_ratio_7d"] == pytest.approx(float(expected_lower_mean))
+    assert all(math.isfinite(value) for value in vector.values.values())
+
+
 def test_period_features_cover_every_interval_in_the_named_lookback(complete_candles):
     first_recent_index = len(complete_candles) - 24 * 60
     first_recent = complete_candles[first_recent_index]

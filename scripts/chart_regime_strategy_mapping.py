@@ -2322,6 +2322,8 @@ class _IndexedJsonlShard:
         required_start: datetime,
         required_end: datetime,
         verify_full_file: bool,
+        progress: Callable[[str], None] | None,
+        progress_label: str,
     ) -> None:
         self.plan = plan
         self._stream = plan.cache_path.open("rb")
@@ -2339,13 +2341,16 @@ class _IndexedJsonlShard:
                 required_start=required_start,
                 required_end=required_end,
                 verify_full_file=verify_full_file,
+                progress=progress,
+                progress_label=progress_label,
             )
         except BaseException:
             self.close()
             raise
 
     def _build_index(
-        self, *, required_start: datetime, required_end: datetime, verify_full_file: bool
+        self, *, required_start: datetime, required_end: datetime, verify_full_file: bool,
+        progress: Callable[[str], None] | None, progress_label: str,
     ) -> None:
         indexed_end = min(required_end, self.plan.end_at)
         target_count = (
@@ -2355,6 +2360,8 @@ class _IndexedJsonlShard:
         )
         if target_count < 1 or target_count > self.plan.row_count:
             raise ValueError("feature cache indexed coverage is invalid")
+        if progress is not None:
+            progress(f"feature_cache_index_started:{progress_label}:{target_count}")
         raw_hasher = hashlib.sha256()
         slice_hasher = hashlib.sha256()
         cursor = 0
@@ -2428,6 +2435,8 @@ class _IndexedJsonlShard:
                     if source in unavailable:
                         self.source_unavailable_counts[source] += 1
             cursor = newline + 1
+            if progress is not None and ((index + 1) % 50_000 == 0 or index + 1 == target_count):
+                progress(f"feature_cache_index_progress:{progress_label}:{index + 1}/{target_count}")
         self.indexed_row_count = target_count
         self.indexed_byte_count = cursor
         self.slice_hash = slice_hasher.hexdigest()
@@ -2437,6 +2446,8 @@ class _IndexedJsonlShard:
             if raw_hasher.hexdigest() != self.plan.output_hash:
                 raise ValueError("feature cache output hash mismatch")
             self.full_file_verified = True
+        if progress is not None:
+            progress(f"feature_cache_index_completed:{progress_label}:{target_count}")
 
     def row_at(self, as_of: datetime) -> Mapping[str, object] | None:
         index = int((as_of - self.plan.start_at).total_seconds() // 60) - 1
@@ -2465,14 +2476,17 @@ class _IndexedJsonlShard:
 class IndexedCompositeFeatureProvider:
     required_warmup_candles = 0
 
-    def __init__(self, plan: FeatureCachePlan) -> None:
+    def __init__(
+        self, plan: FeatureCachePlan, *, progress: Callable[[str], None] | None = None
+    ) -> None:
         self._plan = plan
         built = []
         try:
-            for item in plan.shards:
+            for index, item in enumerate(plan.shards):
                 built.append(_IndexedJsonlShard(
                     item, required_start=plan.required_start, required_end=plan.required_end,
                     verify_full_file=plan.verify_full_file,
+                    progress=progress, progress_label=f"shard_{index:02d}",
                 ))
         except BaseException:
             for shard in built:
@@ -2593,6 +2607,7 @@ class IndexedCompositeFeatureProvider:
 def _select_feature_cache(
     root: Path | None, *, required_start: datetime, required_end: datetime,
     verify_full_file: bool = False,
+    progress: Callable[[str], None] | None = None,
 ):
     plan = plan_feature_caches(
         root, required_start=required_start, required_end=required_end,
@@ -2600,7 +2615,7 @@ def _select_feature_cache(
     )
     if plan is None:
         return None, {"selection_rule": "no covering manifest plan", "selected_shards": []}
-    provider = IndexedCompositeFeatureProvider(plan)
+    provider = IndexedCompositeFeatureProvider(plan, progress=progress)
     return provider, {
         "selection_rule": "manifest plan with access-bounded verified slice index",
         "slice_hash": provider.feature_cache_hash,
@@ -2618,6 +2633,7 @@ def load_walk_forward_inputs(
     candidates: Sequence[SchedulerBacktestCandidate],
     raw_kline_root: Path,
     feature_cache_root: Path | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> WalkForwardInputs:
     if symbol != "BTCUSDT":
         raise ValueError("archive loader supports BTCUSDT only")
@@ -2633,6 +2649,8 @@ def load_walk_forward_inputs(
     expected = start_at
     extractor = ChartFeatureExtractor()
     for month in _month_starts(start_at, end_at):
+        if progress is not None:
+            progress(f"archive_scan_started:{month.year}-{month.month:02d}")
         url = _archive_url(symbol, month)
         path = raw_kline_root / symbol / Path(url).name
         sha256, expected_sha256, checksum_url = _ensure_archive(path, url)
@@ -2661,12 +2679,15 @@ def load_walk_forward_inputs(
                     target = "validation"
                 if target:
                     vectors[target].append(extractor.extract(tuple(window), anchor))
+        if progress is not None:
+            progress(f"archive_scan_completed:{month.year}-{month.month:02d}")
     if expected != end_at:
         raise ValueError(f"OHLCV coverage ends at {expected.isoformat()}, expected {end_at.isoformat()}")
     provider, cache_provenance = _select_feature_cache(
         feature_cache_root,
         required_start=fold.mapping_fit.start_at,
         required_end=fold.validation.end_at,
+        progress=progress,
     )
     provenance = {
         "archives": archives,
@@ -2692,6 +2713,7 @@ def load_test_replay_inputs(
     symbol: str,
     raw_kline_root: Path,
     feature_cache_root: Path | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> TestReplayInputs:
     """Load the seven-day classifier context and Test candles after freeze."""
     if symbol != "BTCUSDT":
@@ -2702,6 +2724,8 @@ def load_test_replay_inputs(
     archives = []
     expected = start_at
     for month in _month_starts(start_at, end_at):
+        if progress is not None:
+            progress(f"test_archive_scan_started:{month.year}-{month.month:02d}")
         url = _archive_url(symbol, month)
         path = raw_kline_root / symbol / Path(url).name
         sha256, expected_sha256, checksum_url = _ensure_archive(path, url)
@@ -2717,11 +2741,14 @@ def load_test_replay_inputs(
                 raise ValueError(f"{kind} OHLCV at {candle.opened_at.isoformat()}")
             expected = candle.closed_at
             candles.append(candle)
+        if progress is not None:
+            progress(f"test_archive_scan_completed:{month.year}-{month.month:02d}")
     if expected != end_at:
         raise ValueError(f"OHLCV coverage ends at {expected.isoformat()}, expected {end_at.isoformat()}")
     provider, cache_provenance = _select_feature_cache(
         feature_cache_root, required_start=start_at, required_end=end_at,
         verify_full_file=True,
+        progress=progress,
     )
     provenance = {
         "archives": archives,
@@ -2773,6 +2800,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         fold = BTCUSDT_FIRST_FOLD
     else:
         fold = RegimeWalkForwardFold(*(UtcInterval(supplied[index], supplied[index + 1]) for index in range(0, 8, 2)))
+    def report_progress(event: str) -> None:
+        print(event, flush=True)
+
     inputs = None
     try:
         resolved, _ = _resolve_walk_forward_candidates(
@@ -2786,6 +2816,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             candidates=resolved,
             raw_kline_root=args.raw_kline_root,
             feature_cache_root=args.feature_cache_root,
+            progress=report_progress,
         )
         payload = run_chart_regime_walk_forward(
             fold,
@@ -2798,8 +2829,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 symbol=args.symbol,
                 raw_kline_root=args.raw_kline_root,
                 feature_cache_root=args.feature_cache_root,
+                progress=report_progress,
             ),
-            progress=lambda event: print(event, flush=True),
+            progress=report_progress,
             output_json=args.output_json,
             output_markdown=args.output_markdown,
             output_model=args.output_model,

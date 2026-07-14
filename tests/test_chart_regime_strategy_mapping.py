@@ -367,6 +367,22 @@ def test_feature_provider_keeps_complete_weekly_episode_hot(tmp_path) -> None:
     provider.close()
 
 
+def test_feature_index_reports_bounded_progress(tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    _write_multi_feature_shard(tmp_path, ["1", "2", "3"])
+    plan = module.plan_feature_caches(
+        tmp_path,
+        required_start=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+        required_end=datetime(2026, 1, 1, 0, 3, tzinfo=timezone.utc),
+    )
+    events = []
+    provider = module.IndexedCompositeFeatureProvider(plan, progress=events.append)
+    assert events[0].startswith("feature_cache_index_started:shard_00:")
+    assert events[-1].startswith("feature_cache_index_completed:shard_00:")
+    provider.close()
+
+
 def test_complementary_feature_caches_merge_identical_overlap(tmp_path) -> None:
     import scripts.chart_regime_strategy_mapping as module
 

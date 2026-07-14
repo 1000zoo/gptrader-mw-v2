@@ -375,6 +375,12 @@ def _candle_ratios(bar: Candle) -> tuple[float, float, float]:
     opened = float(bar.open_price)
     closed = float(bar.close_price)
     width = high - low
+    # Binance can publish a complete carried-price maintenance hour with zero
+    # volume.  Such a candle has no body or wicks; treating all three shape
+    # contributions as zero completes the ratio domain without masking a
+    # wholly degenerate seven-day window (other path/volatility gates reject it).
+    if width == 0:
+        return 0.0, 0.0, 0.0
     return (
         _divide(abs(closed - opened), width),
         _divide(high - max(opened, closed), width),
