@@ -34,6 +34,7 @@ from src.infrastructure.regime.json_regime_artifact_repository import (
     mapping_artifact_hash,
     model_artifact_hash,
     model_fingerprint_hash,
+    validate_model_mapping_artifact_pair,
 )
 
 
@@ -199,6 +200,56 @@ def _mapping_expectations(mapping: StrategyMappingArtifact) -> dict[str, str]:
         "expected_candidate_universe_hash": mapping.candidate_universe_hash,
         "expected_data_provenance_hash": mapping.data_provenance_hash,
     }
+
+
+def test_model_mapping_pair_validator_rejects_forged_fingerprint_hash() -> None:
+    model = _model()
+    mapping = replace(_mapping(model), regime_model_fingerprint_hash=_sha("forged"))
+
+    with pytest.raises(ValueError, match="fingerprint hash"):
+        validate_model_mapping_artifact_pair(model, mapping)
+
+
+def test_model_mapping_pair_validator_rejects_different_cluster_tuple() -> None:
+    model = _model()
+    foreign = _mapping(_model("diag"))
+    mapping = replace(
+        foreign,
+        regime_model_artifact_hash=model_artifact_hash(model),
+        regime_model_fingerprint_hash=model_fingerprint_hash(model),
+    )
+
+    with pytest.raises(ValueError, match="cluster fingerprints"):
+        validate_model_mapping_artifact_pair(model, mapping)
+
+
+def test_model_mapping_pair_validator_rejects_model_type_policy_mismatch() -> None:
+    model = _model()
+    mapping = replace(
+        _mapping(model),
+        selection_confidence_thresholds=SelectionConfidenceThresholds(
+            model_type="gmm", gmm_probability_min=0.7, gmm_margin_min=0.2
+        ),
+    )
+
+    with pytest.raises(ValueError, match="model type"):
+        validate_model_mapping_artifact_pair(model, mapping)
+
+
+def test_model_mapping_pair_validator_rejects_kmeans_threshold_mismatch() -> None:
+    model = _model()
+    thresholds = dict(zip(model.fingerprints, model.distance_thresholds))
+    thresholds[model.fingerprints[0]] += 0.1
+    mapping = replace(
+        _mapping(model),
+        selection_confidence_thresholds=SelectionConfidenceThresholds(
+            model_type="kmeans",
+            kmeans_max_standardized_distances=thresholds,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="KMeans selection policy"):
+        validate_model_mapping_artifact_pair(model, mapping)
 
 
 @pytest.mark.parametrize("covariance_type", [None, "diag", "tied"])

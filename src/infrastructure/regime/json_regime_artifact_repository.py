@@ -104,6 +104,30 @@ def mapping_artifact_hash(artifact: StrategyMappingArtifact) -> str:
     return canonical_artifact_hash(_mapping_payload(artifact))
 
 
+def validate_model_mapping_artifact_pair(
+    model: RegimeModelArtifact,
+    mapping: StrategyMappingArtifact,
+) -> None:
+    """Validate all cross-artifact identities and assignment policy invariants."""
+    if not isinstance(model, RegimeModelArtifact) or not isinstance(
+        mapping, StrategyMappingArtifact
+    ):
+        raise ValueError("model and mapping artifacts have invalid types")
+    if model_artifact_hash(model) != mapping.regime_model_artifact_hash:
+        raise ValueError("mapping regime model artifact hash mismatch")
+    if model_fingerprint_hash(model) != mapping.regime_model_fingerprint_hash:
+        raise ValueError("mapping regime model fingerprint hash mismatch")
+    if mapping.cluster_fingerprints != model.fingerprints:
+        raise ValueError("mapping cluster fingerprints do not match model")
+    policy = mapping.selection_confidence_thresholds
+    if policy.model_type != model.config.model_type:
+        raise ValueError("mapping selection policy model type does not match model")
+    if model.config.model_type == "kmeans" and dict(
+        policy.kmeans_max_standardized_distances
+    ) != dict(zip(model.fingerprints, model.distance_thresholds)):
+        raise ValueError("mapping KMeans selection policy does not match model")
+
+
 def _decimal_text(value: Decimal) -> str:
     if value == Decimal("Infinity"):
         return "Infinity"
@@ -751,4 +775,5 @@ __all__ = [
     "model_artifact_hash",
     "mapping_artifact_hash",
     "model_fingerprint_hash",
+    "validate_model_mapping_artifact_pair",
 ]

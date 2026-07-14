@@ -49,6 +49,7 @@ from src.infrastructure.regime import (
     mapping_artifact_hash,
     model_artifact_hash,
     model_fingerprint_hash,
+    validate_model_mapping_artifact_pair,
 )
 from src.interfaces.api import create_app
 from src.interfaces.api.trade_controller import create_trade_router
@@ -213,17 +214,7 @@ class LocalRuntime:
             expected_model_artifact_hash=model_hash,
             expected_model_fingerprint_hash=fingerprint_hash,
         )
-        if mapping.cluster_fingerprints != model.fingerprints:
-            raise ValueError(
-                "mapping cluster fingerprints do not match model cluster fingerprints"
-            )
-        thresholds = mapping.selection_confidence_thresholds
-        if thresholds.model_type != model.config.model_type:
-            raise ValueError("mapping selection policy model type does not match model")
-        if model.config.model_type == "kmeans" and dict(
-            thresholds.kmeans_max_standardized_distances
-        ) != dict(zip(model.fingerprints, model.distance_thresholds)):
-            raise ValueError("mapping KMeans selection policy does not match model")
+        validate_model_mapping_artifact_pair(model, mapping)
         snapshot = SelectionArtifactSnapshot.from_mapping_artifact(
             mapping,
             mapping_artifact_hash=mapping_artifact_hash(mapping),

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import sys
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -49,6 +50,7 @@ from src.domain.regime.selection import (
     SelectionArtifactSnapshot,
     SelectionConfidenceThresholds,
 )
+from src.infrastructure.market_feature import EmptyMarketFeatureProvider
 
 
 class _ScriptedAssignments:
@@ -79,17 +81,22 @@ def _selection_snapshot(mapping):
     )
 
 
-def _regime_market(start, hours=9, *, profit_at=None):
+def _regime_market(
+    start, hours=9, *, profit_at=None, context_minutes=1, close_at=None, vary=False
+):
     candles = []
-    for index in range(-1, hours * 60):
+    for index in range(-context_minutes, hours * 60):
         opened = start + timedelta(minutes=index)
         profit = profit_at is not None and opened == profit_at
+        base = Decimal("100") + (Decimal(index % 60) / Decimal("100") if vary else Decimal("0"))
+        final_close = close_at if close_at is not None and index == hours * 60 - 1 else base
         candles.append(Candle(
             symbol=Symbol("BTC", "USDT"), timeframe=Timeframe(1, "m"),
             opened_at=opened, closed_at=opened + timedelta(minutes=1),
-            open_price=Decimal("100"),
-            high_price=Decimal("102") if profit else Decimal("100"),
-            low_price=Decimal("100"), close_price=Decimal("100"), volume=Decimal("1"),
+            open_price=base,
+            high_price=Decimal("102") if profit else max(base, final_close) + (Decimal("0.01") if vary else Decimal("0")),
+            low_price=min(base, final_close) - (Decimal("0.01") if vary else Decimal("0")),
+            close_price=final_close, volume=Decimal("1") + Decimal(index % 17) / Decimal("10") if vary else Decimal("1"),
         ))
     return MarketSnapshot(tuple(candles))
 
@@ -101,6 +108,43 @@ def _regime_candidate(candidate_id="strategy-x"):
         take_profit_ratio=Decimal("0.01"), stop_loss_ratio=Decimal("0.5"),
         equity_ratio=Decimal("0.1"), leverage=Decimal("2"), candle_limit=1,
     )
+
+
+def _actual_artifact_pair(candidates):
+    import scripts.scheduler_driven_scalping_backtest as module
+    from tests.infrastructure.regime.test_json_regime_artifact_repository import (
+        _canonical_hash,
+        _mapping,
+        _model,
+    )
+
+    model = replace(_model(), distance_thresholds=(100.0, 100.0, 100.0))
+    mapping = _mapping(model)
+    hashes = {
+        candidate.candidate_id: module._audited_candidate_hash(
+            candidate, symbol=Symbol("BTC", "USDT"), initial_equity=Decimal("10000")
+        )
+        for candidate in candidates
+    }
+    assessments = {
+        cluster: {
+            candidate_id: replace(item, candidate_hash=hashes[candidate_id])
+            for candidate_id, item in rows.items()
+        }
+        for cluster, rows in mapping.candidate_assessments.items()
+    }
+    mapping = replace(
+        mapping,
+        candidate_hashes=hashes,
+        candidate_universe_hash=_canonical_hash(
+            {"candidate_ids": tuple(sorted(hashes))}
+        ),
+        candidate_definition_hash=_canonical_hash(
+            {"candidate_hashes": dict(sorted(hashes.items()))}
+        ),
+        candidate_assessments=assessments,
+    )
+    return model, mapping
 
 
 def test_regime_replay_confirms_cluster_before_switching_strategy(monkeypatch) -> None:
@@ -154,6 +198,7 @@ def test_regime_replay_cash_blocks_entries_but_owner_position_still_exits(monkey
 
     assert result["entries_while_cash"] == 0
     assert result["trade_count"] == 1
+    assert result["trades"][0]["entry_at"] == start.isoformat()
     assert result["trades"][0]["exit_reason"] == "take_profit"
     assert result["trades"][0]["owner_strategy_profile_id"] == "strategy-x"
     assert result["transition_counts"]["cash"] == 1
@@ -187,6 +232,176 @@ def test_regime_replay_same_strategy_cluster_transition_reuses_bundle(monkeypatc
     assert builds == ["strategy-x"]
     assert result["transition_counts"]["cluster"] == 1
     assert result["transition_counts"]["strategy"] == 0
+
+
+def test_regime_replay_requires_start_on_four_hour_boundary() -> None:
+    start = datetime(2026, 1, 5, 1, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="four-hour"):
+        run_scheduler_driven_regime_backtest(
+            _regime_market(start), start_at=start, end_at=start + timedelta(hours=1),
+            candidates=(_regime_candidate(),),
+            model=_ScriptedAssignments({}),
+            mapping=_selection_snapshot({"cluster-a": "strategy-x"}),
+        )
+
+
+@pytest.mark.parametrize("terminal_kind", ("take_profit", "losing_force_close"))
+def test_regime_replay_terminal_equity_and_drawdown_include_end_candle(
+    monkeypatch, terminal_kind
+) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    class AlwaysLong:
+        def evaluate(self, context):
+            return StrategyResult("long", Signal(SignalDirection.LONG, Decimal("1")))
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysLong(),))
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    end = start + timedelta(hours=1)
+    market = _regime_market(
+        start,
+        hours=1,
+        profit_at=end - timedelta(minutes=1) if terminal_kind == "take_profit" else None,
+        close_at=Decimal("90") if terminal_kind == "losing_force_close" else None,
+    )
+    result = run_scheduler_driven_regime_backtest(
+        market, start_at=start, end_at=end, candidates=(_regime_candidate(),),
+        model=_ScriptedAssignments({start: "cluster-a"}),
+        mapping=_selection_snapshot({"cluster-a": "strategy-x"}),
+    )
+
+    assert result["trades"][0]["exit_reason"] == (
+        "take_profit" if terminal_kind == "take_profit" else "end_of_data"
+    )
+    assert result["equity_curve"][-1] == {
+        "timestamp": end.isoformat(), "equity": result["final_equity"]
+    }
+    assert sum(row["timestamp"] == end.isoformat() for row in result["equity_curve"]) == 1
+    if terminal_kind == "losing_force_close":
+        assert Decimal(result["portfolio_max_drawdown_ratio"]) > 0
+
+
+def test_regime_replay_uses_provider_warmup_and_reports_provenance(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    class AlwaysWait:
+        def evaluate(self, context):
+            return StrategyResult("wait", Signal.wait())
+
+    class Provider(EmptyMarketFeatureProvider):
+        required_warmup_candles = 5
+        feature_cache_hash = "cache-hash"
+        feature_config_hash = "config-hash"
+        feature_source_coverage = {"source": 10}
+        feature_unavailable_counts = {"source": 0}
+        feature_provenance = {"provider": "fixture"}
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysWait(),))
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    result = run_scheduler_driven_regime_backtest(
+        _regime_market(start, hours=1, context_minutes=5),
+        start_at=start, end_at=start + timedelta(hours=1),
+        candidates=(_regime_candidate(),),
+        model=_ScriptedAssignments({start: "cluster-a"}),
+        mapping=_selection_snapshot({"cluster-a": "strategy-x"}),
+        market_feature_provider=Provider(),
+    )
+
+    assert result["required_warmup_candles"] == 5
+    assert result["feature_cache_hash"] == "cache-hash"
+    assert result["feature_source_coverage"] == {"source": 10}
+    assert result["feature_unavailable_counts"] == {"source": 0}
+    assert result["feature_provenance"] == {"provider": "fixture"}
+    assert len(result["feature_config_hash"]) == 64
+    assert result["assignment_source"] == "scripted"
+
+
+def test_regime_replay_actual_artifacts_extract_exact_prior_week_and_assign(
+    monkeypatch,
+) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    class AlwaysWait:
+        def evaluate(self, context):
+            return StrategyResult("wait", Signal.wait())
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysWait(),))
+    candidates = (_regime_candidate("alpha"), _regime_candidate("beta"))
+    model, mapping = _actual_artifact_pair(candidates)
+    start = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    extracted = []
+    assigned = []
+    original_extract = module.ChartFeatureExtractor.extract
+    original_assign = module.SklearnRegimeModel.assign
+
+    def spy_extract(self, candles, anchor_at):
+        candles = tuple(candles)
+        extracted.append((len(candles), candles[0].opened_at, candles[-1].closed_at, anchor_at))
+        return original_extract(self, candles, anchor_at)
+
+    def spy_assign(self, artifact, vectors):
+        assigned.append((artifact, vectors))
+        return original_assign(self, artifact, vectors)
+
+    monkeypatch.setattr(module.ChartFeatureExtractor, "extract", spy_extract)
+    monkeypatch.setattr(module.SklearnRegimeModel, "assign", spy_assign)
+    result = run_scheduler_driven_regime_backtest(
+        _regime_market(start, hours=1, context_minutes=7 * 24 * 60, vary=True),
+        start_at=start, end_at=start + timedelta(hours=1), candidates=candidates,
+        model=model, mapping=mapping,
+    )
+
+    assert extracted == [(10080, start - timedelta(days=7), start, start)]
+    assert len(assigned) == 1
+    assert result["assignment_source"] == "artifact"
+    assert result["selection_events"][0]["boundary_at"] == start.isoformat()
+    assert result["candidate_definition_hashes"] == dict(mapping.candidate_hashes)
+
+
+def test_regime_replay_rejects_future_fitted_model() -> None:
+    candidates = (_regime_candidate("alpha"), _regime_candidate("beta"))
+    model, _ = _actual_artifact_pair(candidates)
+    start = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    model = replace(model, training_end_at=start + timedelta(days=1))
+    from tests.infrastructure.regime.test_json_regime_artifact_repository import _mapping
+    mapping = _mapping(model)
+
+    with pytest.raises(ValueError, match="training_end_at"):
+        run_scheduler_driven_regime_backtest(
+            _regime_market(start, hours=1), start_at=start,
+            end_at=start + timedelta(hours=1), candidates=candidates,
+            model=model, mapping=mapping,
+        )
+
+
+def test_regime_replay_rejects_mapping_episode_overlapping_start() -> None:
+    from tests.infrastructure.regime.test_json_regime_artifact_repository import _mapping, _model
+
+    start = datetime(2026, 1, 12, tzinfo=timezone.utc)
+    model = _model()
+    mapping = _mapping(model)
+    candidates = (_regime_candidate("alpha"), _regime_candidate("beta"))
+
+    with pytest.raises(ValueError, match="evidence episode"):
+        run_scheduler_driven_regime_backtest(
+            _regime_market(start, hours=1), start_at=start,
+            end_at=start + timedelta(hours=1), candidates=candidates,
+            model=model, mapping=mapping,
+        )
+
+
+def test_regime_replay_rejects_candidate_hash_mismatch() -> None:
+    candidates = (_regime_candidate("alpha"), _regime_candidate("beta"))
+    model, mapping = _actual_artifact_pair(candidates)
+    changed = replace(candidates[0], take_profit_ratio=Decimal("0.02"))
+    start = datetime(2026, 7, 6, tzinfo=timezone.utc)
+
+    with pytest.raises(ValueError, match="candidate definition hash"):
+        run_scheduler_driven_regime_backtest(
+            _regime_market(start, hours=1), start_at=start,
+            end_at=start + timedelta(hours=1), candidates=(changed, candidates[1]),
+            model=model, mapping=mapping,
+        )
 
 
 def test_deferred_strategy_registry_is_complete_and_evidence_exists() -> None:

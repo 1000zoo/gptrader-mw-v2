@@ -78,11 +78,12 @@ from src.application.usecases.regime import SelectStrategyCommand, SelectStrateg
 from src.domain.ports.regime_selection_state_repository_port import ConcurrentSelectionStateError  # noqa: E402
 from src.domain.regime.model import ClusterAssignment, RegimeModelArtifact  # noqa: E402
 from src.domain.regime.selection import SelectionArtifactSnapshot  # noqa: E402
+from src.domain.regime.temporal import is_regime_boundary  # noqa: E402
 from src.domain.regime.mapping import StrategyMappingArtifact  # noqa: E402
 from src.infrastructure.regime import SklearnRegimeModel  # noqa: E402
 from src.infrastructure.regime.json_regime_artifact_repository import (  # noqa: E402
     mapping_artifact_hash,
-    model_artifact_hash,
+    validate_model_mapping_artifact_pair,
 )
 from src.interfaces.scheduler import RegimeSelectionScheduler  # noqa: E402
 
@@ -1129,6 +1130,8 @@ def run_scheduler_driven_regime_backtest(
             raise ValueError(f"{name} must use canonical UTC")
     if end_at <= start_at:
         raise ValueError("end_at must be after start_at")
+    if not is_regime_boundary(start_at):
+        raise ValueError("start_at must be an exact four-hour UTC regime boundary")
     if market.symbol != symbol:
         raise ValueError("symbol must match the execution market symbol")
     if market.timeframe != TIMEFRAME:
@@ -1150,6 +1153,27 @@ def run_scheduler_driven_regime_backtest(
                 raise ValueError("a scripted model requires a SelectionArtifactSnapshot mapping")
             artifact_snapshot = mapping
 
+    actual_mode = model_artifact is not None or mapping_artifact is not None
+    if actual_mode:
+        if model_artifact is None or mapping_artifact is None or assignment_provider is not None or artifact_snapshot is not None:
+            raise ValueError("actual artifact mode requires exactly model_artifact and mapping_artifact")
+        validate_model_mapping_artifact_pair(model_artifact, mapping_artifact)
+        if model_artifact.training_end_at > start_at:
+            raise ValueError("regime model training_end_at cannot follow replay start_at")
+        if any(
+            episode_start + timedelta(days=7) > start_at
+            for cluster_assessments in mapping_artifact.candidate_assessments.values()
+            for assessment in cluster_assessments.values()
+            for episode_start in assessment.effective_episode_starts
+        ):
+            raise ValueError("mapping evidence episode overlaps replay start_at")
+        artifact_snapshot = SelectionArtifactSnapshot.from_mapping_artifact(
+            mapping_artifact,
+            mapping_artifact_hash=mapping_artifact_hash(mapping_artifact),
+        )
+    else:
+        if assignment_provider is None or artifact_snapshot is None:
+            raise ValueError("scripted mode requires assignment_provider and artifact_snapshot")
     resolved = validate_unique_candidate_ids(candidates)
     if not resolved:
         raise ValueError("at least one candidate is required")
@@ -1157,17 +1181,7 @@ def run_scheduler_driven_regime_backtest(
         tuple(item.candidate_id for item in resolved), include_deferred=include_deferred
     )
     by_id = {item.candidate_id: item for item in resolved}
-    actual_mode = model_artifact is not None or mapping_artifact is not None
     if actual_mode:
-        if model_artifact is None or mapping_artifact is None or assignment_provider is not None or artifact_snapshot is not None:
-            raise ValueError("actual artifact mode requires exactly model_artifact and mapping_artifact")
-        model_hash = model_artifact_hash(model_artifact)
-        if model_hash != mapping_artifact.regime_model_artifact_hash:
-            raise ValueError("mapping regime model artifact hash mismatch")
-        artifact_snapshot = SelectionArtifactSnapshot.from_mapping_artifact(
-            mapping_artifact,
-            mapping_artifact_hash=mapping_artifact_hash(mapping_artifact),
-        )
         if set(by_id) != set(mapping_artifact.candidate_hashes):
             raise ValueError("candidates must exactly match the audited mapping universe")
         for candidate_id, candidate in by_id.items():
@@ -1175,22 +1189,27 @@ def run_scheduler_driven_regime_backtest(
                 candidate, symbol=symbol, initial_equity=initial_equity
             ):
                 raise ValueError(f"candidate definition hash mismatch: {candidate_id}")
-    else:
-        if assignment_provider is None or artifact_snapshot is None:
-            raise ValueError("scripted mode requires assignment_provider and artifact_snapshot")
     assert artifact_snapshot is not None
     mapped = {item for item in artifact_snapshot.cluster_strategy_mapping.values() if item is not None}
     if not mapped.issubset(by_id):
         raise ValueError("every mapped strategy must have exactly one candidate")
 
-    required_context = max(item.candle_limit for item in resolved)
-    context_start = start_at - timedelta(
-        days=7 if actual_mode else 0, minutes=required_context
-    )
+    required_context = required_warmup_candles(resolved, market_feature_provider)
+    context_minutes = max(required_context, 7 * 24 * 60 if actual_mode else 0)
+    context_start = start_at - timedelta(minutes=context_minutes)
     selected_candles = _candles_between(market.candles, context_start, end_at)
     selected = BacktestMarketSnapshot(selected_candles)
     if selected.candles[0].opened_at != context_start:
         raise ValueError("market does not contain enough classification and warmup context")
+    if selected.candles[-1].closed_at != end_at:
+        raise ValueError("market does not cover replay end_at")
+    one_minute = timedelta(minutes=1)
+    if any(
+        candle.closed_at - candle.opened_at != one_minute
+        or (index and candle.opened_at != selected.candles[index - 1].closed_at)
+        for index, candle in enumerate(selected.candles)
+    ):
+        raise ValueError("market context must be contiguous one-minute candles")
     market_data = CursorMarketData(selected)
     feature_provider = market_feature_provider or EmptyMarketFeatureProvider()
     signal_log = InMemorySignalLogRepository()
@@ -1381,6 +1400,11 @@ def run_scheduler_driven_regime_backtest(
             index=len(selected.candles) - 1, closed_trade=closed, equity=equity
         )
 
+    peak, max_drawdown = _update_drawdown(
+        equity=equity, peak=peak, max_drawdown=max_drawdown
+    )
+    equity_curve.append({"timestamp": end_at.isoformat(), "equity": str(equity)})
+
     gross = sum((item.gross_pnl for item in trades), Decimal("0"))
     net = sum((item.net_pnl for item in trades), Decimal("0"))
     fees = sum((item.fee_paid for item in trades), Decimal("0"))
@@ -1424,7 +1448,12 @@ def run_scheduler_driven_regime_backtest(
         "mapping_artifact_hash": artifact_snapshot.mapping_artifact_hash,
         "selection_artifact_identity": artifact_snapshot.artifact_identity,
         "feature_cache_hash": getattr(feature_provider, "feature_cache_hash", None),
+        "feature_config_hash": feature_provider_config_hash(market_feature_provider),
+        "feature_source_coverage": getattr(feature_provider, "feature_source_coverage", {}),
+        "feature_unavailable_counts": getattr(feature_provider, "feature_unavailable_counts", {}),
         "feature_provenance": getattr(feature_provider, "feature_provenance", {}),
+        "required_warmup_candles": required_context,
+        "assignment_source": "artifact" if actual_mode else "scripted",
         "signal_discontinuity_count": 0,
     }
 
@@ -3331,6 +3360,25 @@ def validate_unique_candidate_ids(
     if duplicates:
         raise ValueError(f"duplicate candidate_id definitions: {', '.join(sorted(duplicates))}")
     return normalized
+
+
+def required_warmup_candles(
+    candidates: tuple[SchedulerBacktestCandidate, ...] | list[SchedulerBacktestCandidate],
+    market_feature_provider=None,
+) -> int:
+    normalized = validate_unique_candidate_ids(candidates)
+    if not normalized:
+        raise ValueError("at least one candidate is required")
+    provider_warmup = getattr(market_feature_provider, "required_warmup_candles", 0)
+    if (
+        not isinstance(provider_warmup, int)
+        or isinstance(provider_warmup, bool)
+        or provider_warmup < 0
+    ):
+        raise ValueError(
+            "provider required_warmup_candles must be a nonnegative integer"
+        )
+    return max(max(candidate.candle_limit for candidate in normalized), provider_warmup)
 
 
 def write_candidate_manifest(

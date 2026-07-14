@@ -29,6 +29,7 @@ from scripts.scheduler_driven_scalping_backtest import (
     multi_frequency_candidates,
     run_scheduler_driven_backtest,
     run_scheduler_driven_regime_backtest,
+    required_warmup_candles,
     validate_unique_candidate_ids,
 )
 from src.domain.market import MarketSnapshot, Symbol
@@ -101,17 +102,7 @@ def run_mapping_episodes(
     if market.timeframe != TIMEFRAME:
         raise ValueError("execution market timeframe must be exactly 1m")
 
-    provider_warmup = getattr(market_feature_provider, "required_warmup_candles", 0)
-    if (
-        not isinstance(provider_warmup, int)
-        or isinstance(provider_warmup, bool)
-        or provider_warmup < 0
-    ):
-        raise ValueError("provider required_warmup_candles must be a nonnegative integer")
-    warmup_candles = max(
-        max(candidate.candle_limit for candidate in resolved),
-        provider_warmup,
-    )
+    warmup_candles = required_warmup_candles(resolved, market_feature_provider)
     candidate_hashes = {
         candidate.candidate_id: _canonical_hash(
             {
