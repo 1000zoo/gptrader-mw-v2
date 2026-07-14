@@ -72,6 +72,7 @@ from src.infrastructure.regime.json_regime_artifact_repository import (
 from src.infrastructure.regime.sklearn_regime_model import SklearnRegimeModel
 from src.application.services.chart_feature_extractor import ChartFeatureExtractor
 from src.domain.market import Candle, Timeframe
+from src.domain.market_feature import MarketFeatureSet, MarketFeatureValue
 from src.domain.market import MarketSnapshot, Symbol
 from src.domain.regime import (
     CHART_FEATURE_REGISTRY_V1,
@@ -809,6 +810,15 @@ class WalkForwardInputs:
     cluster_fit_vectors: tuple[object, ...]
     mapping_vectors: tuple[object, ...]
     validation_vectors: tuple[object, ...]
+    data_provenance: Mapping[str, object]
+    market_feature_provider: object | None = None
+
+
+@dataclass(frozen=True)
+class TestReplayInputs:
+    """Test-only inputs whose loader may not run before artifact freeze."""
+
+    market: MarketSnapshot
     data_provenance: Mapping[str, object]
     market_feature_provider: object | None = None
 
@@ -1797,6 +1807,7 @@ def run_chart_regime_walk_forward(
     candidates: Sequence[SchedulerBacktestCandidate] | None = None,
     dependencies: WalkForwardDependencies = DEFAULT_WALK_FORWARD_DEPENDENCIES,
     inputs: WalkForwardInputs | None = None,
+    test_input_loader: Callable[[], TestReplayInputs] | None = None,
     progress: Callable[[str], None] | None = None,
     fixture_grid: WalkForwardGrid | None = None,
     output_json: Path | None = None,
@@ -1888,11 +1899,18 @@ def run_chart_regime_walk_forward(
 
     if any(item["interval"] == "test" for item in access_audit):
         raise RuntimeError("Test interval was accessed before artifacts were frozen")
+    test_inputs = test_input_loader() if test_input_loader is not None else None
+    if test_inputs is not None:
+        access_audit.append({"interval": "test", "stage": "test_data_loaded"})
+        emit("test_data_prepared")
     emit("first_test_classification")
     access_audit.append({"interval": "test", "stage": "test_result"})
     test_context = {**context, "test": fold.test}
     test_prepared = dict(prepared)
-    if inputs is not None:
+    if test_inputs is not None:
+        test_prepared["market"] = test_inputs.market
+        test_prepared["provider"] = test_inputs.market_feature_provider
+    elif inputs is not None:
         test_prepared["market"] = inputs.market
     raw_comparisons = dict(
         dependencies.replay_test(test_context, test_prepared, features, models, mappings, validation)
@@ -1912,7 +1930,10 @@ def run_chart_regime_walk_forward(
         item for item in models.get("candidates", ())
         if not item.get("eligible", False)
     ]
-    data_provenance = prepared.get("provenance", {})
+    data_provenance = {
+        "pretest": prepared.get("provenance", {}),
+        "test": test_inputs.data_provenance if test_inputs is not None else {},
+    }
     payload = {
         "report_schema_version": 1,
         "artifact_schema_versions": {"feature": CHART_FEATURE_SCHEMA_VERSION},
@@ -1956,18 +1977,32 @@ def run_chart_regime_walk_forward(
         family = validation.get("selected_family")
         model_objects = dict(models.get("_artifacts", {}))
         mapping_objects = dict(mappings.get("_artifacts", {}))
-        if family not in model_objects or family not in mapping_objects:
-            raise ValueError("no validation-frozen model/mapping pair is available for output")
-        with tempfile.TemporaryDirectory(prefix="regime-artifacts-") as directory:
-            repository = JsonRegimeArtifactRepository(directory)
-            repository.save_model(model_objects[family])
-            repository.save_mapping(
-                mapping_objects[family],
-                expected_model_artifact_hash=model_artifact_hash(model_objects[family]),
-                expected_model_fingerprint_hash=model_fingerprint_hash(model_objects[family]),
-            )
-            _atomic_write(Path(output_model), (Path(directory) / "model.json").read_bytes())
-            _atomic_write(Path(output_mapping), (Path(directory) / "mapping.json").read_bytes())
+        if family in model_objects and family in mapping_objects:
+            with tempfile.TemporaryDirectory(prefix="regime-artifacts-") as directory:
+                repository = JsonRegimeArtifactRepository(directory)
+                repository.save_model(model_objects[family])
+                repository.save_mapping(
+                    mapping_objects[family],
+                    expected_model_artifact_hash=model_artifact_hash(model_objects[family]),
+                    expected_model_fingerprint_hash=model_fingerprint_hash(model_objects[family]),
+                )
+                _atomic_write(Path(output_model), (Path(directory) / "model.json").read_bytes())
+                _atomic_write(Path(output_mapping), (Path(directory) / "mapping.json").read_bytes())
+            payload["artifact_outputs"] = {"status": "written", "selected_family": family}
+        else:
+            reason = "no validation-frozen eligible model/mapping pair"
+            for kind, destination in (("model", output_model), ("mapping", output_mapping)):
+                body = {
+                    "schema_version": 1, "kind": "cash_only", "artifact_type": kind,
+                    "symbol": symbol, "timeframe": timeframe, "reason": reason,
+                    "frozen_artifact_hashes": {"model": model_frozen, "mapping": mapping_frozen},
+                }
+                envelope = {**body, "artifact_hash": _canonical_hash(body)}
+                _atomic_write(
+                    Path(destination),
+                    (json.dumps(envelope, sort_keys=True, indent=2) + "\n").encode("utf-8"),
+                )
+            payload["artifact_outputs"] = {"status": "cash_only", "reason": reason}
         emit("reports_written")
         normalized = _canonicalize_report(payload)
         write_walk_forward_reports(normalized, Path(output_json), Path(output_markdown))
@@ -2129,7 +2164,13 @@ def _ensure_archive(path: Path, url: str) -> tuple[str, str, str]:
     return actual, expected, checksum_url
 
 
-def _archive_candles(path: Path, symbol: str):
+def _archive_candles(
+    path: Path,
+    symbol: str,
+    *,
+    start_at: datetime | None = None,
+    end_at: datetime | None = None,
+):
     parsed_symbol = Symbol("BTC", "USDT")
     try:
         with zipfile.ZipFile(path) as archive:
@@ -2144,6 +2185,10 @@ def _archive_candles(path: Path, symbol: str):
                     if len(row) < 6:
                         raise ValueError(f"malformed kline row in {path.name}")
                     opened_at = datetime.fromtimestamp(int(row[0]) / 1000, tz=timezone.utc)
+                    if end_at is not None and opened_at >= end_at:
+                        break
+                    if start_at is not None and opened_at < start_at:
+                        continue
                     yield Candle(
                         symbol=parsed_symbol,
                         timeframe=TIMEFRAME,
@@ -2157,37 +2202,235 @@ def _archive_candles(path: Path, symbol: str):
         raise ValueError(f"invalid Binance archive {path.name}: {error}") from error
 
 
-def _select_feature_cache(root: Path | None, *, required_start: datetime, required_end: datetime):
+@dataclass(frozen=True)
+class FeatureCacheShardPlan:
+    cache_path: Path
+    manifest_path: Path
+    start_at: datetime
+    end_at: datetime
+    row_count: int
+    output_hash: str
+    manifest_hash: str
+    cache_identity_hash: str
+    input_hashes: Mapping[str, object]
+    raw_hashes: Mapping[str, object]
+    sources: tuple[str, ...]
+    source_coverage: Mapping[str, object]
+    provenance: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class FeatureCachePlan:
+    shards: tuple[FeatureCacheShardPlan, ...]
+    required_start: datetime
+    required_end: datetime
+
+    @property
+    def combined_hash(self) -> str:
+        return _canonical_hash({
+            shard.cache_path.as_posix(): shard.output_hash for shard in self.shards
+        })
+
+
+def _parse_cache_manifest(manifest_path: Path) -> FeatureCacheShardPlan:
+    try:
+        manifest_bytes = manifest_path.read_bytes()
+        payload = json.loads(manifest_bytes.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid feature cache manifest: {manifest_path.name}") from error
+    identity = payload.get("cache_identity")
+    if not isinstance(identity, Mapping) or identity.get("schema_version") != "binance-usdm-market-features-v1":
+        raise ValueError("feature cache manifest schema mismatch")
+    if payload.get("symbol") != "BTCUSDT" or payload.get("timeframe") != "1m":
+        raise ValueError("feature cache manifest identity mismatch")
+    start_at = _parse_canonical_utc(identity.get("start"), "cache start")
+    end_at = _parse_canonical_utc(identity.get("end"), "cache end")
+    sources = tuple(identity.get("sources", ()))
+    coverage = payload.get("source_coverage")
+    output_hash = payload.get("output_hash")
+    cache_identity_hash = payload.get("cache_identity_hash")
+    input_hashes = payload.get("input_hashes", {})
+    raw_hashes = payload.get("raw_hashes", {})
+    provenance = payload.get("provenance", {})
+    row_count = payload.get("row_count")
+    if (
+        not sources or len(set(sources)) != len(sources)
+        or not isinstance(coverage, Mapping) or set(coverage) != set(sources)
+        or not isinstance(output_hash, str) or len(output_hash) != 64
+        or any(character not in "0123456789abcdef" for character in output_hash)
+        or not isinstance(cache_identity_hash, str) or len(cache_identity_hash) != 64
+        or not isinstance(input_hashes, Mapping) or not isinstance(raw_hashes, Mapping)
+        or not isinstance(provenance, Mapping)
+        or any(not isinstance(item, Mapping) for item in coverage.values())
+        or not isinstance(row_count, int) or isinstance(row_count, bool) or row_count < 1
+        or row_count != int((end_at - start_at).total_seconds() // 60)
+    ):
+        raise ValueError("feature cache manifest metadata is inconsistent")
+    cache_path = manifest_path.with_name(
+        manifest_path.name.removesuffix(".manifest.json") + ".jsonl"
+    )
+    if not cache_path.is_file():
+        raise ValueError("feature cache data file is missing")
+    return FeatureCacheShardPlan(
+        cache_path=cache_path, manifest_path=manifest_path,
+        start_at=start_at, end_at=end_at, row_count=row_count,
+        output_hash=output_hash, manifest_hash=hashlib.sha256(manifest_bytes).hexdigest(),
+        cache_identity_hash=cache_identity_hash,
+        input_hashes=dict(input_hashes), raw_hashes=dict(raw_hashes),
+        sources=tuple(sorted(sources)),
+        source_coverage=dict(coverage), provenance=dict(provenance),
+    )
+
+
+def plan_feature_caches(
+    root: Path | None, *, required_start: datetime, required_end: datetime
+) -> FeatureCachePlan | None:
     if root is None:
-        return None, {"selection_rule": "no feature cache configured", "candidates": []}
-    valid = []
-    for cache in sorted(root.rglob("*.jsonl"), key=lambda path: path.as_posix()):
+        return None
+    candidates = []
+    for manifest in sorted(root.rglob("*.manifest.json"), key=lambda path: path.as_posix()):
         try:
-            loaded = load_market_feature_cache(cache)
+            shard = _parse_cache_manifest(manifest)
         except ValueError:
             continue
-        rows = [
-            measured_at
-            for values in loaded.provider._rows_by_key.values()
-            for measured_at, _ in values
-        ]
-        if rows and min(rows) <= required_start and max(rows) >= required_end - timedelta(minutes=1):
-            valid.append((cache, loaded, min(rows), max(rows)))
-    if not valid:
-        return None, {"selection_rule": "no valid cache/manifest pair", "candidates": []}
-    valid.sort(key=lambda item: (-(item[3] - item[2]).total_seconds(), item[0].as_posix(), item[1].cache_hash))
-    widest = (valid[0][2], valid[0][3])
-    exact_winners = [item for item in valid if (item[2], item[3]) == widest]
-    if len({item[1].cache_hash for item in exact_winners}) > 1:
-        raise ValueError("multiple incompatible exact feature-cache winners")
-    cache, loaded, coverage_start, coverage_end = valid[0]
-    return loaded.provider, {
-        "selection_rule": "canonical path among valid cache/manifest pairs",
-        "selected": cache.as_posix(),
-        "cache_hash": loaded.cache_hash,
-        "coverage": {"start_at": coverage_start.isoformat(), "end_at": coverage_end.isoformat()},
-        "candidates": [path.as_posix() for path, *_ in valid],
-        "provider_provenance": loaded.provenance,
+        if shard.start_at <= required_start and shard.end_at >= required_end:
+            candidates.append(shard)
+    if not candidates:
+        return None
+    widest_start = min(item.start_at for item in candidates)
+    widest_end = max(
+        item.end_at for item in candidates if item.start_at == widest_start
+    )
+    exact = tuple(
+        item for item in candidates
+        if item.start_at == widest_start and item.end_at == widest_end
+    )
+    # Same-coverage shards are intentionally complementary.  Deterministic
+    # path/hash ordering makes the merge plan independent of mtime.
+    selected = tuple(sorted(exact, key=lambda item: (item.cache_path.as_posix(), item.output_hash)))
+    return FeatureCachePlan(selected, required_start, required_end)
+
+
+class _IndexedJsonlShard:
+    def __init__(self, plan: FeatureCacheShardPlan) -> None:
+        self.plan = plan
+        self._offsets: list[int] | None = None
+
+    def _ensure_offsets(self) -> None:
+        if self._offsets is not None:
+            return
+        offsets = []
+        with self.plan.cache_path.open("rb") as stream:
+            while True:
+                offset = stream.tell()
+                line = stream.readline()
+                if not line:
+                    break
+                if line.strip():
+                    offsets.append(offset)
+        if len(offsets) != self.plan.row_count:
+            raise ValueError("feature cache row count does not match manifest")
+        self._offsets = offsets
+
+    def row_at(self, as_of: datetime) -> Mapping[str, object] | None:
+        index = int((as_of - self.plan.start_at).total_seconds() // 60) - 1
+        if index < 0 or index >= self.plan.row_count:
+            return None
+        self._ensure_offsets()
+        with self.plan.cache_path.open("rb") as stream:
+            stream.seek(self._offsets[index])
+            row = json.loads(stream.readline())
+        measured_at = _parse_canonical_utc(row.get("measured_at"), "measured_at")
+        if measured_at > as_of:
+            raise ValueError("feature cache row is not point-in-time safe")
+        return row
+
+
+class IndexedCompositeFeatureProvider:
+    required_warmup_candles = 0
+
+    def __init__(self, plan: FeatureCachePlan) -> None:
+        self._plan = plan
+        self._shards = tuple(_IndexedJsonlShard(item) for item in plan.shards)
+        self.feature_cache_hash = plan.combined_hash
+        self.feature_config_hash = plan.combined_hash
+        self.feature_source_coverage = {
+            source: max(
+                int(shard.source_coverage.get(source, {}).get("available_rows", 0))
+                for shard in plan.shards
+            )
+            for source in sorted({source for shard in plan.shards for source in shard.sources})
+        }
+        self.feature_unavailable_counts = {}
+        self.feature_provenance = {
+            shard.cache_path.as_posix(): {
+                "output_hash": shard.output_hash,
+                "manifest_hash": shard.manifest_hash,
+                "cache_identity_hash": shard.cache_identity_hash,
+                "input_hashes": dict(shard.input_hashes),
+                "raw_hashes": dict(shard.raw_hashes),
+                "sources": list(shard.sources),
+                "provenance": dict(shard.provenance),
+                "provenance_hash": _canonical_hash(shard.provenance),
+            }
+            for shard in plan.shards
+        }
+
+    def load_features(self, symbol: Symbol, timeframe: Timeframe, as_of: datetime) -> MarketFeatureSet:
+        if as_of < self._plan.required_start or as_of > self._plan.required_end:
+            raise ValueError("feature request is outside the provider's frozen access boundary")
+        merged = {}
+        unavailable = set()
+        for shard in self._shards:
+            row = shard.row_at(as_of)
+            if row is None:
+                unavailable.update(shard.sources)
+                continue
+            for name, value in row.get("features", {}).items():
+                canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
+                if name in merged and merged[name][0] != canonical:
+                    raise ValueError(f"conflicting feature cache value: {name}")
+                merged[name] = (canonical, value)
+            unavailable.update(row.get("unavailable_sources", ()))
+        values = tuple(
+            MarketFeatureValue(
+                name=name, value=Decimal(str(item["value"])), source=item["source"],
+                observed_at=_parse_canonical_utc(item["observed_at"], "observed_at"),
+                available_at=_parse_canonical_utc(item["available_at"], "available_at"),
+            )
+            for name, (_, item) in sorted(merged.items())
+        )
+        available_sources = {item.source for item in values}
+        return MarketFeatureSet(
+            symbol=symbol, timeframe=timeframe, measured_at=as_of, values=values,
+            unavailable_sources=tuple(sorted(unavailable - available_sources)),
+        )
+
+
+def _select_feature_cache(root: Path | None, *, required_start: datetime, required_end: datetime):
+    plan = plan_feature_caches(root, required_start=required_start, required_end=required_end)
+    if plan is None:
+        return None, {"selection_rule": "no covering manifest plan", "selected_shards": []}
+    provider = IndexedCompositeFeatureProvider(plan)
+    return provider, {
+        "selection_rule": "metadata-only widest-coverage complementary shard merge",
+        "combined_hash": plan.combined_hash,
+        "coverage": {"start_at": required_start.isoformat(), "end_at": required_end.isoformat()},
+        "selected_shards": [
+            {
+                "path": shard.cache_path.as_posix(),
+                "manifest_path": shard.manifest_path.as_posix(),
+                "output_hash": shard.output_hash,
+                "manifest_hash": shard.manifest_hash,
+                "cache_identity_hash": shard.cache_identity_hash,
+                "input_hashes": dict(shard.input_hashes),
+                "raw_hashes": dict(shard.raw_hashes),
+                "sources": list(shard.sources),
+                "source_coverage": dict(shard.source_coverage),
+                "provenance": dict(shard.provenance),
+            }
+            for shard in plan.shards
+        ],
     }
 
 
@@ -2202,7 +2445,7 @@ def load_walk_forward_inputs(
     if symbol != "BTCUSDT":
         raise ValueError("archive loader supports BTCUSDT only")
     start_at = fold.cluster_fit.start_at - _WEEK
-    end_at = fold.test.end_at
+    end_at = fold.validation.end_at
     retention_start = fold.mapping_fit.start_at - max(
         _WEEK, timedelta(minutes=required_warmup_candles(tuple(candidates), None))
     )
@@ -2222,9 +2465,7 @@ def load_walk_forward_inputs(
             "checksum_url": checksum_url, "checksum_verification": "remote_CHECKSUM_match",
             "size": path.stat().st_size,
         })
-        for candle in _archive_candles(path, symbol):
-            if candle.opened_at < start_at or candle.opened_at >= end_at:
-                continue
+        for candle in _archive_candles(path, symbol, start_at=start_at, end_at=end_at):
             if candle.opened_at != expected:
                 kind = "duplicate/out-of-order" if candle.opened_at < expected else "gap"
                 raise ValueError(f"{kind} OHLCV at {candle.opened_at.isoformat()}")
@@ -2248,7 +2489,7 @@ def load_walk_forward_inputs(
     provider, cache_provenance = _select_feature_cache(
         feature_cache_root,
         required_start=fold.mapping_fit.start_at,
-        required_end=fold.test.end_at,
+        required_end=fold.validation.end_at,
     )
     provenance = {
         "archives": archives,
@@ -2268,6 +2509,57 @@ def load_walk_forward_inputs(
     )
 
 
+def load_test_replay_inputs(
+    fold: RegimeWalkForwardFold,
+    *,
+    symbol: str,
+    raw_kline_root: Path,
+    feature_cache_root: Path | None = None,
+) -> TestReplayInputs:
+    """Load the seven-day classifier context and Test candles after freeze."""
+    if symbol != "BTCUSDT":
+        raise ValueError("archive loader supports BTCUSDT only")
+    start_at = fold.test.start_at - _WEEK
+    end_at = fold.test.end_at
+    candles = []
+    archives = []
+    expected = start_at
+    for month in _month_starts(start_at, end_at):
+        url = _archive_url(symbol, month)
+        path = raw_kline_root / symbol / Path(url).name
+        sha256, expected_sha256, checksum_url = _ensure_archive(path, url)
+        archives.append({
+            "month": f"{month.year}-{month.month:02d}", "path": path.as_posix(),
+            "source_url": url, "sha256": sha256, "expected_sha256": expected_sha256,
+            "checksum_url": checksum_url, "checksum_verification": "remote_CHECKSUM_match",
+            "size": path.stat().st_size,
+        })
+        for candle in _archive_candles(path, symbol, start_at=start_at, end_at=end_at):
+            if candle.opened_at != expected:
+                kind = "duplicate/out-of-order" if candle.opened_at < expected else "gap"
+                raise ValueError(f"{kind} OHLCV at {candle.opened_at.isoformat()}")
+            expected = candle.closed_at
+            candles.append(candle)
+    if expected != end_at:
+        raise ValueError(f"OHLCV coverage ends at {expected.isoformat()}, expected {end_at.isoformat()}")
+    provider, cache_provenance = _select_feature_cache(
+        feature_cache_root, required_start=start_at, required_end=end_at,
+    )
+    provenance = {
+        "archives": archives,
+        "archive_set_hash": _canonical_hash(archives),
+        "coverage": {"start_at": start_at.isoformat(), "end_at": end_at.isoformat(), "gaps": []},
+        "feature_cache": cache_provenance,
+        "retained_candle_count": len(candles),
+        "classification_context_candles": 7 * 24 * 60,
+    }
+    return TestReplayInputs(
+        market=MarketSnapshot(tuple(candles)),
+        data_provenance=provenance,
+        market_feature_provider=provider,
+    )
+
+
 def parse_walk_forward_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Leakage-safe BTCUSDT regime walk-forward")
     parser.add_argument("--symbol", required=True)
@@ -2282,6 +2574,15 @@ def parse_walk_forward_args(argv: Sequence[str] | None = None) -> argparse.Names
     parser.add_argument("--output-model", type=Path)
     parser.add_argument("--output-mapping", type=Path)
     args = parser.parse_args(argv)
+    fold_dates = [
+        getattr(args, name)
+        for name in (
+            "cluster_fit_start", "cluster_fit_end", "mapping_fit_start", "mapping_fit_end",
+            "validation_start", "validation_end", "test_start", "test_end",
+        )
+    ]
+    if any(value is None for value in fold_dates) and not all(value is None for value in fold_dates):
+        parser.error("all eight fold date arguments must be supplied together")
     args.output_model = args.output_model or args.output_json.with_name(f"{args.output_json.stem}-model.json")
     args.output_mapping = args.output_mapping or args.output_json.with_name(f"{args.output_json.stem}-mapping.json")
     return args
@@ -2313,6 +2614,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             candidates=resolved,
             include_deferred=args.include_deferred,
             inputs=inputs,
+            test_input_loader=lambda: load_test_replay_inputs(
+                fold,
+                symbol=args.symbol,
+                raw_kline_root=args.raw_kline_root,
+                feature_cache_root=args.feature_cache_root,
+            ),
             progress=lambda event: print(event, flush=True),
             output_json=args.output_json,
             output_markdown=args.output_markdown,

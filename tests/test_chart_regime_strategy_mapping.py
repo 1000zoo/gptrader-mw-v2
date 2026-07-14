@@ -3,9 +3,11 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 import hashlib
+import json
 from io import BytesIO
 import subprocess
 import sys
+import zipfile
 
 import pytest
 
@@ -59,6 +61,139 @@ def test_chart_regime_cli_help_runs_as_a_direct_script() -> None:
     )
     assert completed.returncode == 0, completed.stderr
     assert "Leakage-safe BTCUSDT regime walk-forward" in completed.stdout
+
+
+def test_partial_walk_forward_fold_dates_are_rejected() -> None:
+    with pytest.raises(SystemExit) as error:
+        parse_walk_forward_args([
+            "--symbol", "BTCUSDT", "--cluster-fit-start", "2021-01-01",
+            "--output-json", "report.json", "--output-markdown", "report.md",
+        ])
+    assert error.value.code == 2
+
+
+def test_no_walk_forward_fold_dates_keeps_default_selection_available() -> None:
+    args = parse_walk_forward_args([
+        "--symbol", "BTCUSDT", "--output-json", "report.json",
+        "--output-markdown", "report.md",
+    ])
+    assert all(
+        getattr(args, name) is None
+        for name in (
+            "cluster_fit_start", "cluster_fit_end", "mapping_fit_start", "mapping_fit_end",
+            "validation_start", "validation_end", "test_start", "test_end",
+        )
+    )
+
+
+def test_all_eight_walk_forward_fold_dates_are_accepted() -> None:
+    args = parse_walk_forward_args([
+        "--symbol", "BTCUSDT",
+        "--cluster-fit-start", "2021-01-01", "--cluster-fit-end", "2025-06-30",
+        "--mapping-fit-start", "2025-07-07", "--mapping-fit-end", "2026-01-05",
+        "--validation-start", "2026-01-12", "--validation-end", "2026-03-30",
+        "--test-start", "2026-04-06", "--test-end", "2026-07-01",
+        "--output-json", "report.json", "--output-markdown", "report.md",
+    ])
+    assert args.test_end == datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+
+def test_real_feature_cache_selection_reads_manifests_only() -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    root = Path(__file__).resolve().parents[1] / ".research-data/binance-usdm/features/BTCUSDT/1m"
+    if not root.exists():
+        pytest.skip("workspace feature cache is not present")
+    plan = module.plan_feature_caches(
+        root,
+        required_start=datetime(2025, 7, 7, tzinfo=timezone.utc),
+        required_end=datetime(2026, 3, 30, tzinfo=timezone.utc),
+    )
+    assert plan is not None
+    assert {source for shard in plan.shards for source in shard.sources} >= {
+        "fundingRate", "metrics",
+    }
+    assert len(plan.shards) == 2
+
+
+def test_archive_parser_stops_before_parsing_rows_at_access_boundary(tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    boundary = datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc)
+    archive = tmp_path / "BTCUSDT-1m.zip"
+    first_ms = int(datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp() * 1000)
+    boundary_ms = int(boundary.timestamp() * 1000)
+    with zipfile.ZipFile(archive, "w") as stream:
+        stream.writestr(
+            "rows.csv",
+            f"{first_ms},1,1,1,1,1\n{boundary_ms},not-a-price,2,0,1,1\n",
+        )
+    rows = tuple(module._archive_candles(archive, "BTCUSDT", end_at=boundary))
+    assert len(rows) == 1
+
+
+def _write_feature_shard(root: Path, suffix: str, feature_value: str, extra_name: str) -> Path:
+    start = "2026-01-01T00:00:00+00:00"
+    end = "2026-01-01T00:01:00+00:00"
+    stem = f"tiny-{suffix}"
+    row = {
+        "symbol": "BTCUSDT", "timeframe": "1m", "measured_at": end,
+        "unavailable_sources": [],
+        "features": {
+            "close": {"value": feature_value, "source": "klines", "observed_at": end, "available_at": end},
+            extra_name: {"value": "2", "source": suffix, "observed_at": end, "available_at": end},
+        },
+    }
+    cache = root / f"{stem}.jsonl"
+    cache.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    manifest = {
+        "symbol": "BTCUSDT", "timeframe": "1m", "row_count": 1,
+        "output_hash": hashlib.sha256(cache.read_bytes()).hexdigest(),
+        "cache_identity_hash": hashlib.sha256(stem.encode()).hexdigest(),
+        "input_hashes": {}, "raw_hashes": {},
+        "cache_identity": {
+            "schema_version": "binance-usdm-market-features-v1",
+            "start": start, "end": end, "sources": ["klines", suffix],
+        },
+        "source_coverage": {"klines": {"available_rows": 1}, suffix: {"available_rows": 1}},
+        "provenance": {"fixture": suffix},
+    }
+    (root / f"{stem}.manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return cache
+
+
+def test_complementary_feature_caches_merge_identical_overlap(tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    _write_feature_shard(tmp_path, "metrics", "1", "open_interest")
+    _write_feature_shard(tmp_path, "fundingRate", "1", "funding_rate")
+    plan = module.plan_feature_caches(
+        tmp_path,
+        required_start=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        required_end=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+    )
+    result = module.IndexedCompositeFeatureProvider(plan).load_features(
+        Symbol("BTC", "USDT"), Timeframe(1, "m"),
+        datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+    )
+    assert {value.name for value in result.values} == {"close", "funding_rate", "open_interest"}
+
+
+def test_complementary_feature_caches_fail_closed_on_conflict(tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    _write_feature_shard(tmp_path, "metrics", "1", "open_interest")
+    _write_feature_shard(tmp_path, "fundingRate", "9", "funding_rate")
+    plan = module.plan_feature_caches(
+        tmp_path,
+        required_start=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        required_end=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+    )
+    with pytest.raises(ValueError, match="conflicting feature cache value"):
+        module.IndexedCompositeFeatureProvider(plan).load_features(
+            Symbol("BTC", "USDT"), Timeframe(1, "m"),
+            datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+        )
 
 
 def test_gmm_bic_counts_diag_and_tied_parameters_exactly() -> None:
@@ -262,6 +397,56 @@ def test_walk_forward_freezes_artifacts_before_test_and_has_required_baselines()
         for access in payload["data_access_audit"]
         if access["interval"] == "test"
     )
+
+
+def test_test_inputs_are_loaded_once_and_only_after_mapping_freeze() -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    events = []
+    calls = []
+
+    def load_test():
+        calls.append(tuple(events))
+        return module.TestReplayInputs(
+            market=_minute_market(BTCUSDT_FIRST_FOLD.test.start_at - timedelta(days=7), 8),
+            data_provenance={"fixture": "test-only"},
+        )
+
+    payload = run_chart_regime_walk_forward(
+        BTCUSDT_FIRST_FOLD,
+        candidates=(_candidate("candidate-a"),),
+        dependencies=_fixture_walk_forward_dependencies(),
+        progress=events.append,
+        test_input_loader=load_test,
+    )
+    assert len(calls) == 1
+    assert "mapping_frozen" in calls[0]
+    assert "first_test_classification" not in calls[0]
+    assert events.index("test_data_prepared") < events.index("first_test_classification")
+    assert {item["stage"] for item in payload["data_access_audit"] if item["interval"] == "test"} == {
+        "test_data_loaded", "test_result",
+    }
+
+
+def test_cash_only_run_writes_reports_and_explicit_artifact_envelopes(tmp_path) -> None:
+    paths = {
+        "output_json": tmp_path / "result.json",
+        "output_markdown": tmp_path / "result.md",
+        "output_model": tmp_path / "result-model.json",
+        "output_mapping": tmp_path / "result-mapping.json",
+    }
+    payload = run_chart_regime_walk_forward(
+        BTCUSDT_FIRST_FOLD,
+        candidates=(_candidate("candidate-a"),),
+        dependencies=_fixture_walk_forward_dependencies(),
+        **paths,
+    )
+    assert payload["artifact_outputs"]["status"] == "cash_only"
+    assert all(path.is_file() for path in paths.values())
+    for key in ("output_model", "output_mapping"):
+        envelope = json.loads(paths[key].read_text(encoding="utf-8"))
+        assert envelope["kind"] == "cash_only"
+        assert envelope["artifact_hash"]
 
 
 def test_walk_forward_report_records_grid_provenance_and_rejections() -> None:
