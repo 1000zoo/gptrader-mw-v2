@@ -279,6 +279,60 @@ def test_linked_model_is_required_and_incompatible_mapping_is_rejected(tmp_path)
         repo.save_mapping(mapping)
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"expected_model_artifact_hash": "wrong"}, "model artifact hash"),
+        ({"expected_model_fingerprint_hash": "wrong"}, "model fingerprint hash"),
+    ],
+)
+def test_save_checks_explicit_model_expectations_before_replacing_mapping(
+    tmp_path, kwargs, message
+) -> None:
+    model = _model()
+    mapping = _mapping(model)
+    repo = JsonRegimeArtifactRepository(tmp_path)
+    repo.save_model(model)
+    repo.save_mapping(mapping)
+    before = (tmp_path / "mapping.json").read_bytes()
+
+    with pytest.raises(ValueError, match=message):
+        repo.save_mapping(mapping, **kwargs)
+
+    assert (tmp_path / "mapping.json").read_bytes() == before
+
+
+def test_load_rejects_mapping_clusters_not_present_in_linked_model(tmp_path) -> None:
+    model = _model()
+    mapping = _mapping(model)
+    repo = JsonRegimeArtifactRepository(tmp_path)
+    repo.save_model(model)
+    repo.save_mapping(mapping)
+    path = tmp_path / "mapping.json"
+    envelope = json.loads(path.read_text(encoding="utf-8"))
+    payload = envelope["payload"]
+    renamed = {old: f"x-{old}" for old in payload["cluster_fingerprints"]}
+    payload["cluster_fingerprints"] = [renamed[old] for old in payload["cluster_fingerprints"]]
+    payload["entries"] = {
+        renamed[old]: {**entry, "cluster_fingerprint": renamed[old]}
+        for old, entry in payload["entries"].items()
+    }
+    payload["candidate_assessments"] = {
+        renamed[old]: {
+            candidate: {**assessment, "cluster_fingerprint": renamed[old]}
+            for candidate, assessment in items.items()
+        }
+        for old, items in payload["candidate_assessments"].items()
+    }
+    envelope["artifact_hash"] = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+    ).hexdigest()
+    path.write_text(json.dumps(envelope), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="cluster fingerprint"):
+        repo.load_mapping()
+
+
 def test_domain_validation_runs_after_validly_rehashed_forgery(tmp_path) -> None:
     model = _model("tied")
     repo = JsonRegimeArtifactRepository(tmp_path)

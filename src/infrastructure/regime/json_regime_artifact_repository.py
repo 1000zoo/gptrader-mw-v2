@@ -253,8 +253,6 @@ class JsonRegimeArtifactRepository:
             ("candidate definition hash", artifact.candidate_definition_hash, expected_candidate_definition_hash),
             ("candidate universe hash", artifact.candidate_universe_hash, expected_candidate_universe_hash),
             ("data provenance hash", artifact.data_provenance_hash, expected_data_provenance_hash),
-            ("model artifact hash", artifact.regime_model_artifact_hash, expected_model_artifact_hash),
-            ("model fingerprint hash", artifact.regime_model_fingerprint_hash, expected_model_fingerprint_hash),
         )
         for label, actual, expected in expectations:
             if expected is not None and actual != expected:
@@ -273,20 +271,38 @@ class JsonRegimeArtifactRepository:
         expected_model_artifact_hash: str | None,
         expected_model_fingerprint_hash: str | None,
     ) -> None:
+        if (
+            expected_model_artifact_hash is not None
+            and mapping.regime_model_artifact_hash != expected_model_artifact_hash
+        ):
+            raise ValueError("model artifact hash does not match expected model artifact hash")
+        if (
+            expected_model_fingerprint_hash is not None
+            and mapping.regime_model_fingerprint_hash != expected_model_fingerprint_hash
+        ):
+            raise ValueError("model fingerprint hash does not match expected model fingerprint hash")
+
         model_path = self._directory / _MODEL_FILE
         if model_path.exists():
             payload, linked_hash = self._read_envelope(model_path, "regime_model")
             model = _decode_model(payload)
             linked_fingerprint_hash = model_fingerprint_hash(model)
+            linked_cluster_fingerprints = model.fingerprints
         else:
             if expected_model_artifact_hash is None or expected_model_fingerprint_hash is None:
                 raise ValueError("standalone mapping requires expected model artifact and fingerprint hashes")
             linked_hash = expected_model_artifact_hash
             linked_fingerprint_hash = expected_model_fingerprint_hash
+            linked_cluster_fingerprints = None
         if mapping.regime_model_artifact_hash != linked_hash:
             raise ValueError("mapping model artifact hash does not match linked model artifact hash")
         if mapping.regime_model_fingerprint_hash != linked_fingerprint_hash:
             raise ValueError("mapping model fingerprint hash does not match linked model fingerprint hash")
+        if (
+            linked_cluster_fingerprints is not None
+            and mapping.cluster_fingerprints != linked_cluster_fingerprints
+        ):
+            raise ValueError("mapping cluster fingerprints do not match linked model cluster fingerprints")
 
     def _write_envelope(
         self,
