@@ -6,6 +6,7 @@ from src.application.usecases.regime.fit_regime_model_usecase import (
 from src.application.usecases.regime.select_regime_model_usecase import (
     RegimeModelCandidateDecision,
     RegimeModelEvidence,
+    RegimeModelFamilyWinner,
     RegimeModelGateThresholds,
     SelectRegimeModelCommand,
     SelectRegimeModelResult,
@@ -19,6 +20,7 @@ __all__ = [
     "FitRegimeModelUseCase",
     "RegimeModelCandidateDecision",
     "RegimeModelEvidence",
+    "RegimeModelFamilyWinner",
     "RegimeModelGateThresholds",
     "SelectRegimeModelCommand",
     "SelectRegimeModelResult",

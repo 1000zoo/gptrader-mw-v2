@@ -41,7 +41,7 @@ class RegimeModelEvidence:
             cluster_count,
             "distinct calendar month counts",
         )
-        _validate_bounded(self.seed_ari, "seed_ari", minimum=0.0, maximum=1.0)
+        _validate_bounded(self.seed_ari, "seed_ari", minimum=-1.0, maximum=1.0)
         _validate_bounded(self.seed_nmi, "seed_nmi", minimum=0.0, maximum=1.0)
         _validate_bounded(
             self.matched_centroid_distance,
@@ -59,6 +59,14 @@ class RegimeModelEvidence:
             _validate_bounded(self.silhouette, "silhouette", minimum=-1.0, maximum=1.0)
         if self.bic is not None:
             _validate_finite_number(self.bic, "bic")
+        if any(
+            months > episodes
+            for months, episodes in zip(
+                self.distinct_calendar_month_counts,
+                self.weekly_episode_counts,
+            )
+        ):
+            raise ValueError("distinct calendar months cannot exceed weekly episodes")
 
 
 @dataclass(frozen=True)
@@ -128,11 +136,38 @@ class RegimeModelCandidateDecision:
 
 
 @dataclass(frozen=True)
+class RegimeModelFamilyWinner:
+    model_family: str
+    artifact_id: str
+    metric_name: str
+    metric_value: float
+
+    def __post_init__(self) -> None:
+        if self.model_family not in _MODEL_TYPES:
+            raise ValueError(f"model_family must be one of {_MODEL_TYPES}")
+        if not isinstance(self.artifact_id, str) or not self.artifact_id.strip():
+            raise ValueError("artifact_id must be nonempty")
+        expected_metric = "silhouette" if self.model_family == "kmeans" else "bic"
+        if self.metric_name != expected_metric:
+            raise ValueError(f"{self.model_family} winner metric must be {expected_metric}")
+        if self.metric_name == "silhouette":
+            _validate_bounded(self.metric_value, "metric_value", minimum=-1.0, maximum=1.0)
+        else:
+            _validate_finite_number(self.metric_value, "metric_value")
+
+
+@dataclass(frozen=True)
 class SelectRegimeModelResult:
-    selected_artifact_id: str | None
+    winning_artifact_id: str | None
     decisions: tuple[RegimeModelCandidateDecision, ...]
-    family_winners: tuple[tuple[str, str], ...]
+    family_winners: tuple[RegimeModelFamilyWinner, ...]
     model_family_priority: tuple[str, ...]
+
+    @property
+    def selected_artifact_id(self) -> str | None:
+        """Backward-compatible name for the overall winning artifact."""
+
+        return self.winning_artifact_id
 
 
 class SelectRegimeModelUseCase:
@@ -146,7 +181,7 @@ class SelectRegimeModelUseCase:
         }
         candidates_by_id = {candidate.artifact_id: candidate for candidate in ordered_candidates}
 
-        family_winners: list[tuple[str, str]] = []
+        family_winners: list[RegimeModelFamilyWinner] = []
         for family in command.model_family_priority:
             family_candidates = [
                 candidates_by_id[artifact_id]
@@ -165,11 +200,22 @@ class SelectRegimeModelUseCase:
                     family_candidates,
                     key=lambda item: (_required_bic(item), item.artifact_id),
                 )
-            family_winners.append((family, winner.artifact_id))
+            metric_name = "silhouette" if family == "kmeans" else "bic"
+            metric_value = (
+                _required_silhouette(winner) if family == "kmeans" else _required_bic(winner)
+            )
+            family_winners.append(
+                RegimeModelFamilyWinner(
+                    model_family=family,
+                    artifact_id=winner.artifact_id,
+                    metric_name=metric_name,
+                    metric_value=metric_value,
+                )
+            )
 
-        selected_artifact_id = family_winners[0][1] if family_winners else None
+        winning_artifact_id = family_winners[0].artifact_id if family_winners else None
         return SelectRegimeModelResult(
-            selected_artifact_id=selected_artifact_id,
+            winning_artifact_id=winning_artifact_id,
             decisions=decisions,
             family_winners=tuple(family_winners),
             model_family_priority=command.model_family_priority,
@@ -217,8 +263,8 @@ def _apply_gates(
 
 def _has_valid_family_metric(candidate: RegimeModelEvidence) -> bool:
     if candidate.model_type == "kmeans":
-        return candidate.silhouette is not None and candidate.bic is None
-    return candidate.bic is not None and candidate.silhouette is None
+        return candidate.silhouette is not None
+    return candidate.bic is not None
 
 
 def _required_silhouette(candidate: RegimeModelEvidence) -> float:
@@ -266,6 +312,7 @@ def _validate_bounded(
 __all__ = [
     "RegimeModelCandidateDecision",
     "RegimeModelEvidence",
+    "RegimeModelFamilyWinner",
     "RegimeModelGateThresholds",
     "SelectRegimeModelCommand",
     "SelectRegimeModelResult",
