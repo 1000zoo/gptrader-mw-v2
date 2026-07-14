@@ -34,6 +34,7 @@ _RESULT_KEYS = {
     "expected_state_version",
     "state",
     "events",
+    "selection_input_hash",
 }
 
 
@@ -187,6 +188,29 @@ class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
         finally:
             connection.close()
 
+    def find_committed_result(
+        self,
+        symbol: str,
+        boundary_at: datetime,
+        evaluated_artifact_identity: str,
+    ) -> SelectStrategyResult | None:
+        symbol = _canonical_symbol(symbol)
+        boundary = _utc_iso(boundary_at)
+        artifact = _sha256_text(
+            evaluated_artifact_identity, "evaluated_artifact_identity"
+        )
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT symbol, boundary_at, artifact_version, expected_version,
+                       committed_version, result_json, decision_hash, events_json
+                FROM regime_selection_events
+                WHERE symbol = ? AND boundary_at = ? AND artifact_version = ?
+                """,
+                (symbol, boundary, artifact),
+            ).fetchone()
+        return None if row is None else _result_from_event_row(row)
+
     def list_events(self, symbol: str) -> tuple[SelectionEventType, ...]:
         symbol = _canonical_symbol(symbol)
         with closing(self._connect()) as connection:
@@ -296,6 +320,7 @@ def _encode_result(result: SelectStrategyResult) -> str:
             "events": [event.value for event in result.events],
             "expected_state_version": result.expected_state_version,
             "state": _state_to_payload(result.state),
+            "selection_input_hash": result.selection_input_hash,
         }
     )
 
@@ -344,6 +369,7 @@ def _decode_result(result_json: str) -> SelectStrategyResult:
             expected_state_version=payload["expected_state_version"],
             state=_decode_state(payload["state"]),
             events=events,
+            selection_input_hash=payload["selection_input_hash"],
         )
     except (TypeError, ValueError) as error:
         raise ValueError("selection decision payload is invalid") from error
@@ -447,6 +473,16 @@ def _utc_iso(value: datetime) -> str:
 
 def _sha256(payload: str) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _sha256_text(value: object, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{field} must be a lowercase SHA256 hash")
+    return value
 
 
 def _now() -> str:

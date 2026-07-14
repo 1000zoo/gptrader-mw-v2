@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from decimal import Decimal
 from datetime import datetime
+import hashlib
+import json
 
 from src.domain.regime.model import ClusterAssignment
 from src.domain.regime.selection import (
@@ -42,8 +44,8 @@ class SelectStrategyCommand:
                 raise ValueError("previous_state must be a RegimeSelectionState")
             if self.previous_state.symbol != self.symbol:
                 raise ValueError("previous state symbol must match command symbol")
-            if self.boundary_at <= self.previous_state.last_boundary_at:
-                raise ValueError("boundary_at must be strictly after the previous boundary")
+            if self.boundary_at < self.previous_state.last_boundary_at:
+                raise ValueError("boundary_at cannot precede the previous boundary")
 
         mapping = self.artifact_snapshot.cluster_strategy_mapping
         if self.assignment.fingerprint not in mapping:
@@ -59,6 +61,11 @@ class SelectStrategyCommand:
 
 class SelectStrategyUseCase:
     def execute(self, command: SelectStrategyCommand) -> SelectStrategyResult:
+        if (
+            command.previous_state is not None
+            and command.boundary_at == command.previous_state.last_boundary_at
+        ):
+            raise ValueError("equal boundary requires scheduler retry preflight")
         high_confidence = _is_high_confidence(
             command.artifact_snapshot.model_type,
             command.artifact_snapshot.confidence_thresholds,
@@ -81,7 +88,33 @@ class SelectStrategyUseCase:
             state=state,
             events=events,
             evaluated_artifact_identity=command.artifact_snapshot.artifact_identity,
+            selection_input_hash=selection_command_input_hash(command),
         )
+
+
+def selection_command_input_hash(command: SelectStrategyCommand) -> str:
+    if not isinstance(command, SelectStrategyCommand):
+        raise ValueError("command must be a SelectStrategyCommand")
+    assignment = command.assignment
+    payload = {
+        "symbol": command.symbol,
+        "boundary_at": command.boundary_at.isoformat(),
+        "artifact_identity": command.artifact_snapshot.artifact_identity,
+        "assignment": {
+            "fingerprint": assignment.fingerprint,
+            "dominant_probability": assignment.dominant_probability,
+            "second_probability": assignment.second_probability,
+            "distance": assignment.distance,
+        },
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _is_high_confidence(
@@ -99,7 +132,9 @@ def _is_high_confidence(
         )
     if assignment.distance is None:
         raise ValueError("KMeans assignment distance is required")
-    return assignment.distance <= thresholds.kmeans_max_standardized_distance
+    return assignment.distance <= thresholds.kmeans_max_standardized_distances[
+        assignment.fingerprint
+    ]
 
 
 def _make_state(
@@ -297,4 +332,5 @@ __all__ = [
     "SelectStrategyCommand",
     "SelectStrategyUseCase",
     "SelectionConfidenceThresholds",
+    "selection_command_input_hash",
 ]

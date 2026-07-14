@@ -21,6 +21,7 @@ from src.domain.regime.mapping import (
     StrategyMappingEntry,
 )
 from src.domain.regime.model import RegimeModelArtifact, RegimeModelConfig
+from src.domain.regime.selection import SelectionConfidenceThresholds
 
 
 _FORMAT = "gptrader-regime-artifact"
@@ -185,6 +186,22 @@ def _mapping_payload(artifact: StrategyMappingArtifact) -> dict[str, object]:
             "insufficient_evidence_lcb_policy": artifact.bootstrap.insufficient_evidence_lcb_policy,
         },
         "profit_factor_zero_loss_policy": artifact.profit_factor_zero_loss_policy,
+        "selection_confidence_thresholds": _selection_policy_payload(
+            artifact.selection_confidence_thresholds
+        ),
+    }
+
+
+def _selection_policy_payload(
+    policy: SelectionConfidenceThresholds,
+) -> dict[str, object]:
+    return {
+        "model_type": policy.model_type,
+        "gmm_probability_min": policy.gmm_probability_min,
+        "gmm_margin_min": policy.gmm_margin_min,
+        "kmeans_max_standardized_distances": dict(
+            policy.kmeans_max_standardized_distances
+        ),
     }
 
 
@@ -319,6 +336,15 @@ class JsonRegimeArtifactRepository:
             and mapping.cluster_fingerprints != linked_cluster_fingerprints
         ):
             raise ValueError("mapping cluster fingerprints do not match linked model cluster fingerprints")
+        if model_path.exists():
+            if mapping.selection_confidence_thresholds.model_type != model.config.model_type:
+                raise ValueError("selection confidence policy model type does not match linked model")
+            if model.config.model_type == "kmeans":
+                expected_distances = dict(zip(model.fingerprints, model.distance_thresholds))
+                if dict(
+                    mapping.selection_confidence_thresholds.kmeans_max_standardized_distances
+                ) != expected_distances:
+                    raise ValueError("KMeans selection confidence policy does not match linked model")
 
     def _write_envelope(
         self,
@@ -447,6 +473,10 @@ def _number(value: object, field: str) -> float:
     if not math.isfinite(result):
         raise ValueError(f"{field} must be finite")
     return result
+
+
+def _optional_number(value: object, field: str) -> float | None:
+    return None if value is None else _number(value, field)
 
 
 def _expected_sha256(value: object, field: str) -> str:
@@ -614,6 +644,7 @@ def _decode_mapping(payload: dict[str, object]) -> StrategyMappingArtifact:
         "candidate_definition_hash", "candidate_universe_hash", "candidate_hashes",
         "data_provenance_hash", "common_initial_equity", "cluster_fingerprints", "entries",
         "candidate_assessments", "thresholds", "bootstrap", "profit_factor_zero_loss_policy",
+        "selection_confidence_thresholds",
     }
     _exact_fields(payload, fields, "mapping payload")
     thresholds_data = _dict(payload["thresholds"], "mapping thresholds")
@@ -634,6 +665,24 @@ def _decode_mapping(payload: dict[str, object]) -> StrategyMappingArtifact:
     candidate_hashes = _dict(payload["candidate_hashes"], "candidate_hashes")
     entries_data = _dict(payload["entries"], "entries")
     assessments_data = _dict(payload["candidate_assessments"], "candidate_assessments")
+    policy_data = _dict(
+        payload["selection_confidence_thresholds"],
+        "selection_confidence_thresholds",
+    )
+    _exact_fields(
+        policy_data,
+        {
+            "model_type",
+            "gmm_probability_min",
+            "gmm_margin_min",
+            "kmeans_max_standardized_distances",
+        },
+        "selection_confidence_thresholds",
+    )
+    distances_data = _dict(
+        policy_data["kmeans_max_standardized_distances"],
+        "kmeans_max_standardized_distances",
+    )
     return StrategyMappingArtifact(
         artifact_version=_text(payload["artifact_version"], "artifact_version"),
         regime_model_artifact_hash=_text(payload["regime_model_artifact_hash"], "regime_model_artifact_hash"),
@@ -667,6 +716,19 @@ def _decode_mapping(payload: dict[str, object]) -> StrategyMappingArtifact:
             random_seed=_integer(bootstrap_data["random_seed"], "random_seed"),
             bootstrap_missingness_policy=_text(bootstrap_data["bootstrap_missingness_policy"], "bootstrap_missingness_policy"),
             insufficient_evidence_lcb_policy=_text(bootstrap_data["insufficient_evidence_lcb_policy"], "insufficient_evidence_lcb_policy"),
+        ),
+        selection_confidence_thresholds=SelectionConfidenceThresholds(
+            model_type=_text(policy_data["model_type"], "selection policy model_type"),
+            gmm_probability_min=_optional_number(
+                policy_data["gmm_probability_min"], "gmm_probability_min"
+            ),
+            gmm_margin_min=_optional_number(
+                policy_data["gmm_margin_min"], "gmm_margin_min"
+            ),
+            kmeans_max_standardized_distances={
+                key: _number(value, "KMeans maximum distance")
+                for key, value in distances_data.items()
+            },
         ),
         profit_factor_zero_loss_policy=_text(payload["profit_factor_zero_loss_policy"], "profit_factor_zero_loss_policy"),
     )

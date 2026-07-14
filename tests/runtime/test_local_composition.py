@@ -2,6 +2,9 @@ from decimal import Decimal
 
 import pytest
 
+from datetime import datetime, timezone
+from src.application.usecases.regime import SelectStrategyCommand
+from src.domain.regime.model import ClusterAssignment
 from src.infrastructure.persistence import SqliteRegimeSelectionStateRepository
 from src.infrastructure.regime import JsonRegimeArtifactRepository
 from src.infrastructure.exchange.binance.market_data import BinanceMarketDataAdapter
@@ -66,13 +69,31 @@ def test_enabled_regime_selection_loads_frozen_artifacts_without_changing_trade_
     assert runtime.regime_selection_scheduler is not None
     assert runtime.regime_selection_snapshot.model_type == "kmeans"
     assert (
-        runtime.regime_selection_snapshot.confidence_thresholds.kmeans_max_standardized_distance
-        == max(model.distance_thresholds)
+        dict(runtime.regime_selection_snapshot.confidence_thresholds.kmeans_max_standardized_distances)
+        == dict(zip(model.fingerprints, model.distance_thresholds))
     )
     assert runtime.regime_model_artifact == model
     assert runtime.regime_mapping_artifact == mapping
     assert runtime.status_details()["active_strategy_id"] == "chart-pattern"
     assert SqliteRegimeSelectionStateRepository(database_path).list_events("BTCUSDT") == ()
+
+    boundary = datetime(2026, 7, 13, 0, tzinfo=timezone.utc)
+    assignment = ClusterAssignment(model.fingerprints[0], 1.0, 0.0, 1.0)
+    factory = lambda previous: SelectStrategyCommand(
+        previous_state=previous,
+        symbol="BTCUSDT",
+        boundary_at=boundary,
+        artifact_snapshot=runtime.regime_selection_snapshot,
+        assignment=assignment,
+    )
+    first = runtime.regime_selection_scheduler.run_selection(
+        "btc-regime", "BTCUSDT", factory
+    )
+    retry = runtime.regime_selection_scheduler.run_selection(
+        "btc-regime", "BTCUSDT", factory
+    )
+    assert first.succeeded and retry.succeeded
+    assert retry.result == first.result
 
 
 def test_enabled_regime_selection_supports_standalone_mapping_directory(tmp_path) -> None:
@@ -94,16 +115,14 @@ def test_enabled_regime_selection_supports_standalone_mapping_directory(tmp_path
         regime_candidate_definition_hash=mapping.candidate_definition_hash,
         regime_candidate_universe_hash=mapping.candidate_universe_hash,
         regime_data_provenance_hash=mapping.data_provenance_hash,
-        regime_gmm_p_min=0.8,
-        regime_gmm_margin_min=0.3,
     )
 
     runtime = create_local_runtime(settings)
 
     thresholds = runtime.regime_selection_snapshot.confidence_thresholds
     assert thresholds.model_type == "gmm"
-    assert thresholds.gmm_probability_min == 0.8
-    assert thresholds.gmm_margin_min == 0.3
+    assert thresholds.gmm_probability_min == 0.7
+    assert thresholds.gmm_margin_min == 0.2
 
 
 def test_local_app_exposes_health_and_readiness_routes() -> None:

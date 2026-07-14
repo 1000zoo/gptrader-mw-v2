@@ -24,7 +24,6 @@ from src.application.usecases.regime import SelectStrategyUseCase
 from src.domain.regime import (
     CHART_FEATURE_SCHEMA_VERSION,
     SelectionArtifactSnapshot,
-    SelectionConfidenceThresholds,
 )
 from src.domain.execution import OrderRequest, OrderResult
 from src.domain.lifecycle import (
@@ -218,26 +217,13 @@ class LocalRuntime:
             raise ValueError(
                 "mapping cluster fingerprints do not match model cluster fingerprints"
             )
-        if model.config.model_type == "gmm":
-            thresholds = SelectionConfidenceThresholds(
-                model_type="gmm",
-                gmm_probability_min=self.settings.regime_gmm_p_min,
-                gmm_margin_min=self.settings.regime_gmm_margin_min,
-            )
-        else:
-            if not model.distance_thresholds:
-                raise ValueError("KMeans model distance thresholds are required")
-            # Task 8 currently accepts one global cutoff. The maximum persisted
-            # per-cluster threshold is the frozen, conservative global cutoff.
-            effective_distance = (
-                self.settings.regime_kmeans_max_distance
-                if self.settings.regime_kmeans_max_distance is not None
-                else max(model.distance_thresholds)
-            )
-            thresholds = SelectionConfidenceThresholds(
-                model_type="kmeans",
-                kmeans_max_standardized_distance=effective_distance,
-            )
+        thresholds = mapping.selection_confidence_thresholds
+        if thresholds.model_type != model.config.model_type:
+            raise ValueError("mapping selection policy model type does not match model")
+        if model.config.model_type == "kmeans" and dict(
+            thresholds.kmeans_max_standardized_distances
+        ) != dict(zip(model.fingerprints, model.distance_thresholds)):
+            raise ValueError("mapping KMeans selection policy does not match model")
         snapshot = SelectionArtifactSnapshot.from_mapping_artifact(
             mapping,
             mapping_artifact_hash=mapping_artifact_hash(mapping),

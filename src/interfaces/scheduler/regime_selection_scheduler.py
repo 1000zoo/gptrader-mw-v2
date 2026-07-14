@@ -5,11 +5,12 @@ from datetime import datetime, timezone
 from src.application.usecases.regime.select_strategy_usecase import (
     SelectStrategyCommand,
     SelectStrategyUseCase,
+    selection_command_input_hash,
 )
 from src.domain.ports.regime_selection_state_repository_port import (
     RegimeSelectionStateRepositoryPort,
 )
-from src.domain.regime.selection import SelectStrategyResult
+from src.domain.regime.selection import RegimeSelectionState, SelectStrategyResult
 from src.observability.logging import runtime_logger
 
 
@@ -63,7 +64,8 @@ class RegimeSelectionScheduler:
     def run_selection(
         self,
         schedule_name: str,
-        command_factory: Callable[[], SelectStrategyCommand],
+        symbol: str,
+        command_factory: Callable[[RegimeSelectionState | None], SelectStrategyCommand],
     ) -> ScheduledRegimeSelection:
         if (
             not isinstance(schedule_name, str)
@@ -76,12 +78,30 @@ class RegimeSelectionScheduler:
             "regime selection scheduler started", schedule_name=schedule_name
         )
         try:
-            command = command_factory()
-            proposed = self._usecase.execute(command)
-            result = self._repository.commit(
-                proposed.expected_state_version,
-                proposed,
+            previous_state = self._repository.load(symbol)
+            command = command_factory(previous_state)
+            if not isinstance(command, SelectStrategyCommand):
+                raise ValueError("command factory must return a SelectStrategyCommand")
+            if command.symbol != symbol:
+                raise ValueError("selection command symbol must match scheduler symbol")
+            input_hash = selection_command_input_hash(command)
+            existing = self._repository.find_committed_result(
+                symbol,
+                command.boundary_at,
+                command.artifact_snapshot.artifact_identity,
             )
+            if existing is not None:
+                if existing.selection_input_hash != input_hash:
+                    raise ValueError("conflicting boundary commit")
+                result = existing
+            else:
+                proposed = self._usecase.execute(command)
+                if proposed.selection_input_hash != input_hash:
+                    raise ValueError("selection result input hash does not match command")
+                result = self._repository.commit(
+                    proposed.expected_state_version,
+                    proposed,
+                )
         except Exception as exc:
             runtime_logger.exception(
                 "regime selection scheduler failed",

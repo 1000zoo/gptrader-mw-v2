@@ -25,6 +25,7 @@ from src.domain.regime.model import (
     RegimeModelConfig,
     component_fingerprint,
 )
+from src.domain.regime.selection import SelectionConfidenceThresholds
 from src.infrastructure.regime.json_regime_artifact_repository import (
     JsonRegimeArtifactRepository,
     mapping_artifact_hash,
@@ -172,6 +173,20 @@ def _mapping(model: RegimeModelArtifact) -> StrategyMappingArtifact:
         candidate_assessments=assessments,
         thresholds=MappingThresholds(),
         bootstrap=BootstrapConfig(resamples=123),
+        selection_confidence_thresholds=(
+            SelectionConfidenceThresholds(
+                model_type="kmeans",
+                kmeans_max_standardized_distances=dict(
+                    zip(model.fingerprints, model.distance_thresholds)
+                ),
+            )
+            if model.config.model_type == "kmeans"
+            else SelectionConfidenceThresholds(
+                model_type="gmm",
+                gmm_probability_min=0.7,
+                gmm_margin_min=0.2,
+            )
+        ),
     )
 
 
@@ -305,6 +320,20 @@ def test_linked_model_is_required_and_incompatible_mapping_is_rejected(tmp_path)
         repo.save_mapping(mapping)
 
 
+def test_linked_model_rejects_mapping_policy_model_type_mismatch(tmp_path) -> None:
+    model = _model()
+    mapping = replace(
+        _mapping(model),
+        selection_confidence_thresholds=SelectionConfidenceThresholds(
+            model_type="gmm", gmm_probability_min=0.7, gmm_margin_min=0.2
+        ),
+    )
+    repo = JsonRegimeArtifactRepository(tmp_path)
+    repo.save_model(model)
+    with pytest.raises(ValueError, match="policy model type"):
+        repo.save_mapping(mapping)
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -390,6 +419,31 @@ def test_mapping_domain_validation_runs_after_validly_rehashed_forgery(tmp_path)
     path.write_text(json.dumps(envelope), encoding="utf-8")
 
     with pytest.raises(ValueError, match="eligibility"):
+        repo.load_mapping(**_mapping_expectations(mapping))
+
+
+def test_linked_kmeans_policy_tamper_is_rejected_after_valid_rehash(tmp_path) -> None:
+    model = _model()
+    mapping = _mapping(model)
+    repo = JsonRegimeArtifactRepository(tmp_path)
+    repo.save_model(model)
+    repo.save_mapping(mapping)
+    path = tmp_path / "mapping.json"
+    envelope = json.loads(path.read_text(encoding="utf-8"))
+    policy = envelope["payload"]["selection_confidence_thresholds"]
+    policy["kmeans_max_standardized_distances"][model.fingerprints[0]] += 1.0
+    envelope["artifact_hash"] = hashlib.sha256(
+        json.dumps(
+            envelope["payload"],
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode()
+    ).hexdigest()
+    path.write_text(json.dumps(envelope), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="KMeans selection confidence policy"):
         repo.load_mapping(**_mapping_expectations(mapping))
 
 

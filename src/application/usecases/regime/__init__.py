@@ -23,6 +23,7 @@ from src.application.usecases.regime.select_strategy_usecase import (
     SelectStrategyCommand,
     SelectStrategyUseCase,
     SelectionConfidenceThresholds,
+    selection_command_input_hash,
 )
 
 __all__ = [
@@ -44,4 +45,5 @@ __all__ = [
     "SelectStrategyCommand",
     "SelectStrategyUseCase",
     "SelectionConfidenceThresholds",
+    "selection_command_input_hash",
 ]

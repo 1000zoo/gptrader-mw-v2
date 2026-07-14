@@ -16,6 +16,7 @@ from src.domain.regime.mapping import (
     episode_months_touched,
     has_sufficient_calendar_block_coverage,
 )
+from src.domain.regime.selection import SelectionConfidenceThresholds
 
 
 UTC = timezone.utc
@@ -72,6 +73,9 @@ def _build(rows: list[dict[str, object]], **overrides: object):
         evidence_rows=tuple(rows),
         regime_model_artifact_hash="model-artifact-hash",
         regime_model_fingerprint_hash="model-fingerprint-hash",
+        selection_confidence_thresholds=SelectionConfidenceThresholds(
+            model_type="gmm", gmm_probability_min=0.7, gmm_margin_min=0.2
+        ),
         random_seed=20260714,
         bootstrap_resamples=200,
         **overrides,

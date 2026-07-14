@@ -84,6 +84,9 @@ def _result(
         evaluated_artifact_identity=(
             artifact if evaluated_artifact is None else evaluated_artifact
         ),
+        selection_input_hash=hashlib.sha256(
+            f"{boundary.isoformat()}:{artifact}:{strategy}:{pending_artifact}".encode()
+        ).hexdigest(),
     )
 
 
@@ -97,6 +100,47 @@ def test_same_boundary_retry_returns_original_commit_once(tmp_path):
     assert retry == first
     assert repository.load("BTCUSDT") == decision.state
     assert repository.list_events("BTCUSDT") == decision.events
+
+
+def test_find_committed_result_returns_exact_result_or_none(tmp_path):
+    repository = SqliteRegimeSelectionStateRepository(tmp_path / "selection.sqlite3")
+    decision = _result()
+    assert repository.find_committed_result("BTCUSDT", START, ARTIFACT_1) is None
+    repository.commit(0, decision)
+    assert repository.find_committed_result("BTCUSDT", START, ARTIFACT_1) == decision
+    assert repository.find_committed_result("BTCUSDT", START, ARTIFACT_2) is None
+
+
+def test_find_committed_result_closes_connection_and_detects_tamper(tmp_path, monkeypatch):
+    path = tmp_path / "selection.sqlite3"
+    repository = SqliteRegimeSelectionStateRepository(path)
+    repository.commit(0, _result())
+    tracking = _track_next_connection(repository, monkeypatch)
+    assert repository.find_committed_result("BTCUSDT", START, ARTIFACT_1) is not None
+    assert tracking.close_calls == 1
+    monkeypatch.undo()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE regime_selection_events SET decision_hash = ?", ("0" * 64,)
+        )
+    with pytest.raises(ValueError, match="decision.*integrity"):
+        repository.find_committed_result("BTCUSDT", START, ARTIFACT_1)
+
+
+@pytest.mark.parametrize(
+    "symbol,boundary,artifact",
+    [
+        ("btcusdt", START, ARTIFACT_1),
+        ("BTCUSDT", START.replace(tzinfo=None), ARTIFACT_1),
+        ("BTCUSDT", START, "A" * 64),
+    ],
+)
+def test_find_committed_result_requires_canonical_coordinates(
+    tmp_path, symbol, boundary, artifact
+):
+    repository = SqliteRegimeSelectionStateRepository(tmp_path / "selection.sqlite3")
+    with pytest.raises(ValueError):
+        repository.find_committed_result(symbol, boundary, artifact)
 
 
 @pytest.mark.parametrize("operation", ["load", "list_events"])

@@ -22,6 +22,7 @@ from src.domain.regime.mapping import (
     episode_months_touched,
     has_sufficient_calendar_block_coverage,
 )
+from src.domain.regime.selection import SelectionConfidenceThresholds
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,7 @@ class BuildStrategyMappingCommand:
     evidence_rows: tuple[Mapping[str, object] | WeeklyStrategyEvidence, ...]
     regime_model_artifact_hash: str
     regime_model_fingerprint_hash: str
+    selection_confidence_thresholds: SelectionConfidenceThresholds
     candidate_definition_hash: str | None = None
     candidate_universe_hash: str | None = None
     data_provenance_hash: str | None = None
@@ -152,6 +154,7 @@ class BuildStrategyMappingUseCase:
             common_initial_equity=common_initial_equity,
             entries=entries, candidate_assessments=all_assessments,
             thresholds=thresholds, bootstrap=bootstrap,
+            selection_confidence_thresholds=command.selection_confidence_thresholds,
         )
         return BuildStrategyMappingResult(artifact)
 

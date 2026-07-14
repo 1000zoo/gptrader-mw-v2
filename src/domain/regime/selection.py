@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -75,7 +75,9 @@ class SelectionConfidenceThresholds:
     model_type: str
     gmm_probability_min: float | None = None
     gmm_margin_min: float | None = None
-    kmeans_max_standardized_distance: float | None = None
+    kmeans_max_standardized_distances: Mapping[str, float] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     def __post_init__(self) -> None:
         if self.model_type == "gmm":
@@ -83,17 +85,37 @@ class SelectionConfidenceThresholds:
                 raise ValueError("GMM confidence thresholds are required")
             _probability(self.gmm_probability_min, "gmm_probability_min")
             _probability(self.gmm_margin_min, "gmm_margin_min")
-            if self.kmeans_max_standardized_distance is not None:
-                raise ValueError("GMM thresholds cannot contain a KMeans distance")
-        elif self.model_type == "kmeans":
-            if self.kmeans_max_standardized_distance is None:
-                raise ValueError("KMeans maximum distance is required")
-            _distance(
-                self.kmeans_max_standardized_distance,
-                "kmeans_max_standardized_distance",
+            if self.kmeans_max_standardized_distances:
+                raise ValueError("GMM thresholds cannot contain KMeans distances")
+            object.__setattr__(
+                self,
+                "gmm_probability_min",
+                _probability(self.gmm_probability_min, "gmm_probability_min"),
             )
+            object.__setattr__(
+                self,
+                "gmm_margin_min",
+                _probability(self.gmm_margin_min, "gmm_margin_min"),
+            )
+            object.__setattr__(
+                self, "kmeans_max_standardized_distances", MappingProxyType({})
+            )
+        elif self.model_type == "kmeans":
+            distances = dict(self.kmeans_max_standardized_distances)
+            if not distances:
+                raise ValueError("KMeans maximum distances are required")
+            for fingerprint, distance in distances.items():
+                _canonical_text(fingerprint, "KMeans threshold fingerprint")
+                _distance(distance, "KMeans maximum distance")
+                if distance <= 0:
+                    raise ValueError("KMeans maximum distance must be positive")
             if self.gmm_probability_min is not None or self.gmm_margin_min is not None:
                 raise ValueError("KMeans thresholds cannot contain GMM probabilities")
+            object.__setattr__(
+                self,
+                "kmeans_max_standardized_distances",
+                MappingProxyType(dict(sorted(distances.items()))),
+            )
         else:
             raise ValueError("confidence threshold model type must be gmm or kmeans")
 
@@ -133,6 +155,12 @@ class SelectionArtifactSnapshot:
             if strategy is not None:
                 _canonical_text(strategy, "strategy profile id")
         canonical_mapping = dict(sorted(mapping.items()))
+        if (
+            self.model_type == "kmeans"
+            and set(self.confidence_thresholds.kmeans_max_standardized_distances)
+            != set(canonical_mapping)
+        ):
+            raise ValueError("KMeans threshold keys must match cluster mapping keys")
         payload = {
             "model_artifact_hash": self.model_artifact_hash,
             "mapping_artifact_hash": self.mapping_artifact_hash,
@@ -145,9 +173,10 @@ class SelectionArtifactSnapshot:
                 "gmm_margin_min": _canonical_float(
                     self.confidence_thresholds.gmm_margin_min
                 ),
-                "kmeans_max_standardized_distance": _canonical_float(
-                    self.confidence_thresholds.kmeans_max_standardized_distance
-                ),
+                "kmeans_max_standardized_distances": {
+                    key: _canonical_float(value)
+                    for key, value in self.confidence_thresholds.kmeans_max_standardized_distances.items()
+                },
             },
         }
         computed = hashlib.sha256(
@@ -276,12 +305,14 @@ class SelectStrategyResult:
     state: RegimeSelectionState
     events: tuple[SelectionEventType, ...]
     evaluated_artifact_identity: str
+    selection_input_hash: str
 
     def __post_init__(self) -> None:
         expected = _nonnegative_integer(
             self.expected_state_version, "expected_state_version"
         )
         _sha256(self.evaluated_artifact_identity, "evaluated_artifact_identity")
+        _sha256(self.selection_input_hash, "selection_input_hash")
         if self.state.state_version != expected + 1:
             raise ValueError("proposed state version must increment expected state version")
         events = tuple(self.events)

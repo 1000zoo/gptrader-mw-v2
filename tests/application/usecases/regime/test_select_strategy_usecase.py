@@ -6,6 +6,7 @@ import pytest
 from src.application.usecases.regime.select_strategy_usecase import (
     SelectStrategyCommand,
     SelectStrategyUseCase,
+    selection_command_input_hash,
 )
 from src.domain.regime.model import ClusterAssignment
 from src.domain.regime.selection import (
@@ -58,8 +59,25 @@ def _thresholds(model_type: str = "gmm") -> SelectionConfidenceThresholds:
             model_type="gmm", gmm_probability_min=0.7, gmm_margin_min=0.2
         )
     return SelectionConfidenceThresholds(
-        model_type="kmeans", kmeans_max_standardized_distance=1.5
+        model_type="kmeans",
+        kmeans_max_standardized_distances={"a": 1.5, "b": 2.5},
     )
+
+
+def test_kmeans_uses_fingerprint_specific_frozen_distance_bound():
+    snapshot = _snapshot(model_type="kmeans")
+    a = _select(
+        snapshot=snapshot,
+        model_type="kmeans",
+        assignment=_assignment("a", distance=2.0),
+    )
+    b = _select(
+        snapshot=snapshot,
+        model_type="kmeans",
+        assignment=_assignment("b", distance=2.0),
+    )
+    assert a.state.active_strategy_profile_id is None
+    assert b.state.active_strategy_profile_id == "strategy-y"
 
 
 def _state(
@@ -131,6 +149,19 @@ def test_initial_high_confidence_selects_mapped_strategy_immediately():
     assert result.state.new_entries_enabled
     assert result.state.state_version == 1
     assert result.events == (SelectionEventType.CLASSIFICATION,)
+
+
+def test_selection_input_hash_excludes_previous_state_but_binds_assignment():
+    snapshot = _snapshot()
+    first = SelectStrategyCommand(None, "BTCUSDT", START, snapshot, _assignment())
+    retry = SelectStrategyCommand(_state(), "BTCUSDT", START, snapshot, _assignment())
+    changed = SelectStrategyCommand(
+        _state(), "BTCUSDT", START, snapshot,
+        _assignment(dominant=0.8, second=0.2),
+    )
+    assert selection_command_input_hash(first) == selection_command_input_hash(retry)
+    assert selection_command_input_hash(changed) != selection_command_input_hash(first)
+    assert SelectStrategyUseCase().execute(first).selection_input_hash == selection_command_input_hash(first)
 
 
 def test_new_cluster_requires_two_consecutive_observations():
@@ -327,9 +358,22 @@ def test_rejects_noncanonical_boundary(boundary, message):
         _select(boundary=boundary)
 
 
-def test_rejects_equal_or_stale_boundary():
-    with pytest.raises(ValueError, match="strictly after"):
-        _select(previous=_state(), boundary=START)
+def test_equal_boundary_can_represent_retry_but_stale_boundary_is_rejected():
+    command = SelectStrategyCommand(
+        previous_state=_state(),
+        symbol="BTCUSDT",
+        boundary_at=START,
+        artifact_snapshot=_snapshot(),
+        assignment=_assignment(),
+    )
+    assert command.boundary_at == command.previous_state.last_boundary_at
+    with pytest.raises(ValueError, match="scheduler retry preflight"):
+        SelectStrategyUseCase().execute(command)
+    with pytest.raises(ValueError, match="cannot precede"):
+        _select(
+            previous=_state(boundary=START + timedelta(hours=4)),
+            boundary=START,
+        )
 
 
 def test_rejects_assignment_missing_from_mapping():

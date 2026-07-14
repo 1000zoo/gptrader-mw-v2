@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
-import math
 import re
 from typing import Mapping
 
@@ -37,11 +36,6 @@ def _optional_value(env: Mapping[str, str], name: str) -> str | None:
     return value or None
 
 
-def _optional_float(env: Mapping[str, str], name: str) -> float | None:
-    value = _optional_value(env, name)
-    return None if value is None else float(value)
-
-
 @dataclass(frozen=True)
 class RuntimeSettings:
     mode: RuntimeMode = RuntimeMode.LOCAL
@@ -72,9 +66,6 @@ class RuntimeSettings:
     regime_candidate_definition_hash: str | None = None
     regime_candidate_universe_hash: str | None = None
     regime_data_provenance_hash: str | None = None
-    regime_gmm_p_min: float = 0.70
-    regime_gmm_margin_min: float = 0.20
-    regime_kmeans_max_distance: float | None = None
 
     def __post_init__(self) -> None:
         if type(self.regime_selection_enabled) is not bool:
@@ -138,28 +129,6 @@ class RuntimeSettings:
                 not isinstance(value, str) or _SHA256.fullmatch(value) is None
             ):
                 raise ValueError(f"{field} must be a canonical lowercase SHA256 hash")
-        for field in ("regime_gmm_p_min", "regime_gmm_margin_min"):
-            value = getattr(self, field)
-            if (
-                not isinstance(value, (int, float))
-                or isinstance(value, bool)
-                or not math.isfinite(value)
-                or not 0 <= value <= 1
-            ):
-                raise ValueError(f"{field} must be a finite regime probability")
-            object.__setattr__(self, field, float(value))
-        distance = self.regime_kmeans_max_distance
-        if distance is not None:
-            if (
-                not isinstance(distance, (int, float))
-                or isinstance(distance, bool)
-                or not math.isfinite(distance)
-                or distance <= 0
-            ):
-                raise ValueError(
-                    "regime_kmeans_max_distance must be finite and positive"
-                )
-            object.__setattr__(self, "regime_kmeans_max_distance", float(distance))
         if self.regime_selection_enabled:
             if (
                 self.regime_model_artifact_path is None
@@ -261,15 +230,6 @@ class RuntimeSettings:
             ),
             regime_data_provenance_hash=_optional_value(
                 env, "GPTRADER_REGIME_DATA_PROVENANCE_HASH"
-            ),
-            regime_gmm_p_min=float(
-                _value(env, "GPTRADER_REGIME_GMM_P_MIN", "0.70")
-            ),
-            regime_gmm_margin_min=float(
-                _value(env, "GPTRADER_REGIME_GMM_MARGIN_MIN", "0.20")
-            ),
-            regime_kmeans_max_distance=_optional_float(
-                env, "GPTRADER_REGIME_KMEANS_MAX_DISTANCE"
             ),
         )
 

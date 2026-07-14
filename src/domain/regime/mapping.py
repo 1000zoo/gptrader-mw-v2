@@ -9,8 +9,10 @@ import re
 from types import MappingProxyType
 from typing import Literal, Mapping
 
+from src.domain.regime.selection import SelectionConfidenceThresholds
 
-STRATEGY_MAPPING_ARTIFACT_VERSION = "strategy-mapping-v1"
+
+STRATEGY_MAPPING_ARTIFACT_VERSION = "strategy-mapping-v2"
 MAPPING_METRIC_NAMES = (
     "mean_weekly_return",
     "median_weekly_return",
@@ -428,11 +430,16 @@ class StrategyMappingArtifact:
     candidate_assessments: Mapping[str, Mapping[str, CandidateMappingAssessment]]
     thresholds: MappingThresholds
     bootstrap: BootstrapConfig
+    selection_confidence_thresholds: SelectionConfidenceThresholds
     profit_factor_zero_loss_policy: str = "positive_infinity_when_profit_positive_else_zero"
 
     def __post_init__(self) -> None:
         if self.artifact_version != STRATEGY_MAPPING_ARTIFACT_VERSION:
             raise ValueError("unsupported strategy mapping artifact version")
+        if not isinstance(
+            self.selection_confidence_thresholds, SelectionConfidenceThresholds
+        ):
+            raise ValueError("selection confidence thresholds are required")
         for field in ("regime_model_artifact_hash", "regime_model_fingerprint_hash", "candidate_definition_hash", "candidate_universe_hash", "data_provenance_hash"):
             _text(getattr(self, field), field)
         if self.profit_factor_zero_loss_policy != "positive_infinity_when_profit_positive_else_zero":
@@ -444,6 +451,16 @@ class StrategyMappingArtifact:
         entries = dict(self.entries)
         assessments = {cluster: MappingProxyType(dict(items)) for cluster, items in self.candidate_assessments.items()}
         expected = set(self.cluster_fingerprints)
+        if (
+            self.selection_confidence_thresholds.model_type == "kmeans"
+            and set(
+                self.selection_confidence_thresholds.kmeans_max_standardized_distances
+            )
+            != expected
+        ):
+            raise ValueError(
+                "KMeans selection threshold keys must match cluster fingerprints"
+            )
         if set(entries) != expected or set(assessments) != expected:
             raise ValueError("mapping artifact cluster coverage is inconsistent")
         if any(not isinstance(item, StrategyMappingEntry) for item in entries.values()):

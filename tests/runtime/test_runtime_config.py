@@ -109,7 +109,7 @@ def test_regime_selection_is_disabled_by_default_and_does_not_require_artifacts(
     assert settings.regime_model_artifact_path is None
 
 
-def test_enabled_regime_selection_loads_compatibility_and_confidence_settings() -> None:
+def test_enabled_regime_selection_loads_artifact_compatibility_settings() -> None:
     hashes = {name: character * 64 for name, character in (
         ("GPTRADER_REGIME_CANDIDATE_DEFINITION_HASH", "a"),
         ("GPTRADER_REGIME_CANDIDATE_UNIVERSE_HASH", "b"),
@@ -119,15 +119,11 @@ def test_enabled_regime_selection_loads_compatibility_and_confidence_settings() 
         "GPTRADER_REGIME_SELECTION_ENABLED": "true",
         "GPTRADER_REGIME_MODEL_ARTIFACT_PATH": " artifacts/model.json ",
         "GPTRADER_REGIME_MAPPING_ARTIFACT_PATH": " artifacts/mapping.json ",
-        "GPTRADER_REGIME_GMM_P_MIN": "0.8",
-        "GPTRADER_REGIME_GMM_MARGIN_MIN": "0.3",
-        "GPTRADER_REGIME_KMEANS_MAX_DISTANCE": "2.5",
         **hashes,
     })
     assert settings.regime_model_artifact_path == "artifacts/model.json"
-    assert settings.regime_gmm_p_min == 0.8
-    assert settings.regime_gmm_margin_min == 0.3
-    assert settings.regime_kmeans_max_distance == 2.5
+    assert "regime_gmm_p_min" not in RuntimeSettings.__dataclass_fields__
+    assert "regime_kmeans_max_distance" not in RuntimeSettings.__dataclass_fields__
 
 
 @pytest.mark.parametrize("value", ["yes", "1", "", "TRUE "])
@@ -145,16 +141,3 @@ def test_enabled_regime_selection_requires_artifact_paths_and_hashes() -> None:
             regime_model_artifact_path="model.json",
             regime_mapping_artifact_path="mapping.json",
         )
-
-
-@pytest.mark.parametrize("field,value", [
-    ("regime_gmm_p_min", True),
-    ("regime_gmm_p_min", float("nan")),
-    ("regime_gmm_p_min", 1.1),
-    ("regime_gmm_margin_min", -0.1),
-    ("regime_kmeans_max_distance", 0),
-    ("regime_kmeans_max_distance", float("inf")),
-])
-def test_regime_confidence_controls_are_strict(field, value) -> None:
-    with pytest.raises(ValueError, match="regime"):
-        RuntimeSettings(**{field: value})

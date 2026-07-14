@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Protocol
 
 from src.domain.regime.selection import (
@@ -22,6 +23,14 @@ class RegimeSelectionStateRepositoryPort(Protocol):
         expected_state_version: int,
         result: SelectStrategyResult,
     ) -> SelectStrategyResult:
+        ...
+
+    def find_committed_result(
+        self,
+        symbol: str,
+        boundary_at: datetime,
+        evaluated_artifact_identity: str,
+    ) -> SelectStrategyResult | None:
         ...
 
     def list_events(self, symbol: str) -> tuple[SelectionEventType, ...]:
