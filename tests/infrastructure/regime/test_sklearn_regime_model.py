@@ -15,6 +15,7 @@ from src.domain.regime.chart_features import (
 from src.domain.regime.model import RegimeModelConfig
 from src.infrastructure.regime.sklearn_regime_model import (
     SklearnRegimeModel,
+    _validate_covariance,
     prune_correlated_features,
 )
 
@@ -177,3 +178,32 @@ def test_fit_rejects_constant_and_unknown_inputs_and_assign_rejects_schema_misma
 def test_model_config_validation(kwargs, message):
     with pytest.raises(ValueError, match=message):
         RegimeModelConfig(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("covariance", "covariance_type"),
+    [
+        (np.asarray([0.05, 0.2]), "diag"),
+        (np.asarray([[0.05, 0.0], [0.0, 0.2]]), "tied"),
+    ],
+)
+def test_gmm_covariance_rejects_values_below_regularization_floor(
+    covariance,
+    covariance_type,
+):
+    with pytest.raises(ValueError, match="covariance.*regularization floor"):
+        _validate_covariance(covariance, covariance_type, regularization=0.1)
+
+
+def test_tied_gmm_artifact_rejects_contradictory_shared_covariances():
+    artifact = SklearnRegimeModel().fit(
+        RegimeModelConfig("gmm", 3, covariance_type="tied"),
+        _vectors(),
+    )
+    contradictory = list(artifact.covariances)
+    changed = list(contradictory[1])
+    changed[0] += 0.1
+    contradictory[1] = tuple(changed)
+
+    with pytest.raises(ValueError, match="shared covariance"):
+        replace(artifact, covariances=tuple(contradictory))

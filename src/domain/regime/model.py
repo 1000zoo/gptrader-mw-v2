@@ -109,6 +109,16 @@ class RegimeModelArtifact:
             expected_covariance_width = feature_count if self.config.covariance_type == "diag" else feature_count * feature_count
             if len(self.covariances) != cluster_count or any(len(row) != expected_covariance_width for row in self.covariances):
                 raise ValueError("gmm covariance shape is inconsistent")
+            if self.config.covariance_type == "tied":
+                shared = self.covariances[0]
+                if any(
+                    any(
+                        not math.isclose(actual, expected, rel_tol=1e-12, abs_tol=1e-15)
+                        for actual, expected in zip(row, shared)
+                    )
+                    for row in self.covariances[1:]
+                ):
+                    raise ValueError("tied gmm artifact must repeat one shared covariance")
             if self.distance_thresholds:
                 raise ValueError("gmm artifact cannot contain distance thresholds")
 

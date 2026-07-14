@@ -195,7 +195,11 @@ class SklearnRegimeModel:
         records = []
         for component in range(config.cluster_count):
             covariance = raw_covariances[component] if config.covariance_type == "diag" else raw_covariances
-            _validate_covariance(covariance, config.covariance_type)
+            _validate_covariance(
+                covariance,
+                config.covariance_type,
+                regularization=config.regularization,
+            )
             flattened = tuple(float(value) for value in covariance.reshape(-1))
             fingerprint = _fingerprint("gmm", means[component], flattened, float(weights[component]))
             records.append((fingerprint, means[component], float(weights[component]), flattened, 0.0))
@@ -227,17 +231,28 @@ def _validate_family_cap(feature_names: tuple[str, ...]) -> None:
         raise ValueError("a feature family cannot exceed half of retained inputs")
 
 
-def _validate_covariance(covariance: np.ndarray, covariance_type: str | None) -> None:
+def _validate_covariance(
+    covariance: np.ndarray,
+    covariance_type: str | None,
+    *,
+    regularization: float,
+) -> None:
     if not np.isfinite(covariance).all():
         raise ValueError("gmm covariance must be finite and positive")
-    if covariance_type == "diag" and np.any(covariance <= 0):
-        raise ValueError("gmm covariance must be finite and positive")
+    tolerance = max(
+        regularization * 1e-12,
+        np.finfo(float).eps * max(1.0, regularization),
+    )
+    if covariance_type == "diag" and float(np.min(covariance)) + tolerance < regularization:
+        raise ValueError("gmm covariance is below the configured regularization floor")
     if covariance_type == "tied":
         if covariance.ndim != 2 or not np.allclose(covariance, covariance.T):
             raise ValueError("gmm tied covariance must be symmetric")
         eigenvalues = np.linalg.eigvalsh(covariance)
-        if not np.isfinite(eigenvalues).all() or np.any(eigenvalues <= 0):
-            raise ValueError("gmm tied covariance must be positive definite")
+        if not np.isfinite(eigenvalues).all():
+            raise ValueError("gmm tied covariance must have finite eigenvalues")
+        if float(np.min(eigenvalues)) + tolerance < regularization:
+            raise ValueError("gmm covariance is below the configured regularization floor")
 
 
 def _fingerprint(model_type: str, mean: np.ndarray, covariance: tuple[float, ...], weight: float) -> str:
@@ -269,6 +284,8 @@ def _gmm_probabilities(artifact: RegimeModelArtifact, scaled: np.ndarray) -> np.
     log_probabilities = np.empty((len(scaled), artifact.config.cluster_count), dtype=float)
     shared_inverse = shared_log_determinant = None
     if artifact.config.covariance_type == "tied":
+        # The artifact contract requires every component row to repeat this
+        # shared matrix, so inference has one unambiguous covariance source.
         shared = np.asarray(artifact.covariances[0]).reshape(dimensions, dimensions)
         shared_inverse = np.linalg.inv(shared)
         sign, shared_log_determinant = np.linalg.slogdet(shared)
