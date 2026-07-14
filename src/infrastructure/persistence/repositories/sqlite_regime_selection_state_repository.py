@@ -1,6 +1,7 @@
 import hashlib
 import json
 import sqlite3
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -49,7 +50,7 @@ class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
 
     def load(self, symbol: str) -> RegimeSelectionState | None:
         symbol = _canonical_symbol(symbol)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             row = connection.execute(
                 """
                 SELECT symbol, state_version, state_json, state_hash, boundary_at
@@ -188,7 +189,7 @@ class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
 
     def list_events(self, symbol: str) -> tuple[SelectionEventType, ...]:
         symbol = _canonical_symbol(symbol)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection:
             rows = connection.execute(
                 """
                 SELECT symbol, boundary_at, artifact_version, expected_version,

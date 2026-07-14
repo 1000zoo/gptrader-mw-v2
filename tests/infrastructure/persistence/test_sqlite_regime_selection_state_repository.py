@@ -20,6 +20,36 @@ ARTIFACT_1 = "a" * 64
 ARTIFACT_2 = "b" * 64
 
 
+class _TrackingConnection:
+    """Expose sqlite context semantics while recording explicit close calls."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+        self.close_calls = 0
+
+    def __enter__(self):
+        self.connection.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        return self.connection.__exit__(*args)
+
+    def execute(self, *args, **kwargs):
+        return self.connection.execute(*args, **kwargs)
+
+    def close(self) -> None:
+        self.close_calls += 1
+        self.connection.close()
+
+
+def _track_next_connection(repository, monkeypatch) -> _TrackingConnection:
+    connection = sqlite3.connect(repository.database_path, isolation_level=None)
+    connection.row_factory = sqlite3.Row
+    tracking = _TrackingConnection(connection)
+    monkeypatch.setattr(repository, "_connect", lambda: tracking)
+    return tracking
+
+
 def _result(
     *,
     expected: int = 0,
@@ -67,6 +97,17 @@ def test_same_boundary_retry_returns_original_commit_once(tmp_path):
     assert retry == first
     assert repository.load("BTCUSDT") == decision.state
     assert repository.list_events("BTCUSDT") == decision.events
+
+
+@pytest.mark.parametrize("operation", ["load", "list_events"])
+def test_read_paths_explicitly_close_connection_once(tmp_path, monkeypatch, operation):
+    repository = SqliteRegimeSelectionStateRepository(tmp_path / "selection.sqlite3")
+    repository.commit(0, _result())
+    tracking = _track_next_connection(repository, monkeypatch)
+
+    getattr(repository, operation)("BTCUSDT")
+
+    assert tracking.close_calls == 1
 
 
 def test_conflicting_duplicate_boundary_is_rejected(tmp_path):
@@ -325,6 +366,23 @@ def test_load_detects_tampered_state_hash(tmp_path):
         repository.load("BTCUSDT")
 
 
+def test_load_closes_connection_when_decode_raises(tmp_path, monkeypatch):
+    path = tmp_path / "selection.sqlite3"
+    repository = SqliteRegimeSelectionStateRepository(path)
+    repository.commit(0, _result())
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE regime_selection_states SET state_hash = ? WHERE symbol = ?",
+            ("0" * 64, "BTCUSDT"),
+        )
+    tracking = _track_next_connection(repository, monkeypatch)
+
+    with pytest.raises(ValueError, match="state.*integrity"):
+        repository.load("BTCUSDT")
+
+    assert tracking.close_calls == 1
+
+
 def test_load_rejects_unknown_state_json_key_even_with_matching_hash(tmp_path):
     path = tmp_path / "selection.sqlite3"
     repository = SqliteRegimeSelectionStateRepository(path)
@@ -354,6 +412,23 @@ def test_list_events_detects_tampered_result_payload(tmp_path):
 
     with pytest.raises(ValueError, match="decision.*integrity"):
         repository.list_events("BTCUSDT")
+
+
+def test_list_events_closes_connection_when_decode_raises(tmp_path, monkeypatch):
+    path = tmp_path / "selection.sqlite3"
+    repository = SqliteRegimeSelectionStateRepository(path)
+    repository.commit(0, _result())
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE regime_selection_events SET decision_hash = ?",
+            ("0" * 64,),
+        )
+    tracking = _track_next_connection(repository, monkeypatch)
+
+    with pytest.raises(ValueError, match="decision.*integrity"):
+        repository.list_events("BTCUSDT")
+
+    assert tracking.close_calls == 1
 
 
 def test_retry_detects_tampered_existing_decision_before_idempotency(tmp_path):
