@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import mmap
 import argparse
 import csv
 import os
@@ -12,7 +13,7 @@ import zipfile
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score, silhouette_score
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -1912,9 +1913,15 @@ def run_chart_regime_walk_forward(
         test_prepared["provider"] = test_inputs.market_feature_provider
     elif inputs is not None:
         test_prepared["market"] = inputs.market
-    raw_comparisons = dict(
-        dependencies.replay_test(test_context, test_prepared, features, models, mappings, validation)
-    )
+    try:
+        raw_comparisons = dict(
+            dependencies.replay_test(test_context, test_prepared, features, models, mappings, validation)
+        )
+    finally:
+        if test_inputs is not None:
+            close = getattr(test_inputs.market_feature_provider, "close", None)
+            if callable(close):
+                close()
     unknown = set(raw_comparisons) - set(COMPARISON_NAMES)
     if unknown:
         raise ValueError(f"unknown comparison result: {', '.join(sorted(unknown))}")
@@ -2224,12 +2231,7 @@ class FeatureCachePlan:
     shards: tuple[FeatureCacheShardPlan, ...]
     required_start: datetime
     required_end: datetime
-
-    @property
-    def combined_hash(self) -> str:
-        return _canonical_hash({
-            shard.cache_path.as_posix(): shard.output_hash for shard in self.shards
-        })
+    verify_full_file: bool = False
 
 
 def _parse_cache_manifest(manifest_path: Path) -> FeatureCacheShardPlan:
@@ -2283,7 +2285,8 @@ def _parse_cache_manifest(manifest_path: Path) -> FeatureCacheShardPlan:
 
 
 def plan_feature_caches(
-    root: Path | None, *, required_start: datetime, required_end: datetime
+    root: Path | None, *, required_start: datetime, required_end: datetime,
+    verify_full_file: bool = False,
 ) -> FeatureCachePlan | None:
     if root is None:
         return None
@@ -2308,42 +2311,155 @@ def plan_feature_caches(
     # Same-coverage shards are intentionally complementary.  Deterministic
     # path/hash ordering makes the merge plan independent of mtime.
     selected = tuple(sorted(exact, key=lambda item: (item.cache_path.as_posix(), item.output_hash)))
-    return FeatureCachePlan(selected, required_start, required_end)
+    return FeatureCachePlan(selected, required_start, required_end, verify_full_file)
 
 
 class _IndexedJsonlShard:
-    def __init__(self, plan: FeatureCacheShardPlan) -> None:
+    def __init__(
+        self,
+        plan: FeatureCacheShardPlan,
+        *,
+        required_start: datetime,
+        required_end: datetime,
+        verify_full_file: bool,
+    ) -> None:
         self.plan = plan
-        self._offsets: list[int] | None = None
+        self._stream = plan.cache_path.open("rb")
+        self._mapping = None
+        self._offsets: list[tuple[int, int]] = []
+        self.slice_hash = ""
+        self.indexed_row_count = 0
+        self.indexed_byte_count = 0
+        self.full_file_verified = False
+        self.source_available_counts = {source: 0 for source in plan.sources}
+        self.source_unavailable_counts = {source: 0 for source in plan.sources}
+        try:
+            self._mapping = mmap.mmap(self._stream.fileno(), 0, access=mmap.ACCESS_READ)
+            self._build_index(
+                required_start=required_start,
+                required_end=required_end,
+                verify_full_file=verify_full_file,
+            )
+        except BaseException:
+            self.close()
+            raise
 
-    def _ensure_offsets(self) -> None:
-        if self._offsets is not None:
-            return
-        offsets = []
-        with self.plan.cache_path.open("rb") as stream:
-            while True:
-                offset = stream.tell()
-                line = stream.readline()
-                if not line:
-                    break
-                if line.strip():
-                    offsets.append(offset)
-        if len(offsets) != self.plan.row_count:
-            raise ValueError("feature cache row count does not match manifest")
-        self._offsets = offsets
+    def _build_index(
+        self, *, required_start: datetime, required_end: datetime, verify_full_file: bool
+    ) -> None:
+        indexed_end = min(required_end, self.plan.end_at)
+        target_count = (
+            self.plan.row_count
+            if verify_full_file
+            else int((indexed_end - self.plan.start_at).total_seconds() // 60)
+        )
+        if target_count < 1 or target_count > self.plan.row_count:
+            raise ValueError("feature cache indexed coverage is invalid")
+        raw_hasher = hashlib.sha256()
+        slice_hasher = hashlib.sha256()
+        cursor = 0
+        for index in range(target_count):
+            newline = self._mapping.find(b"\n", cursor)
+            if newline < 0:
+                raise ValueError("feature cache row count does not match manifest")
+            raw_line = self._mapping[cursor:newline + 1]
+            raw_hasher.update(raw_line)
+            try:
+                row = json.loads(raw_line[:-1])
+            except (UnicodeError, json.JSONDecodeError) as error:
+                raise ValueError("feature cache contains invalid JSONL") from error
+            if not isinstance(row, Mapping):
+                raise ValueError("feature cache row schema mismatch")
+            expected_at = self.plan.start_at + timedelta(minutes=index + 1)
+            measured_at = _parse_canonical_utc(row.get("measured_at"), "measured_at")
+            if measured_at != expected_at:
+                raise ValueError("feature cache timestamps must be strict increasing one-minute UTC")
+            if row.get("symbol") != "BTCUSDT" or row.get("timeframe") != "1m":
+                raise ValueError("feature cache row identity mismatch")
+            features = row.get("features")
+            unavailable = row.get("unavailable_sources", ())
+            if (
+                not isinstance(features, Mapping) or not isinstance(unavailable, list)
+                or any(not isinstance(source, str) for source in unavailable)
+            ):
+                raise ValueError("feature cache row schema mismatch")
+            filtered_features = {}
+            available_sources = set()
+            for name, item in features.items():
+                if not isinstance(name, str) or not isinstance(item, Mapping):
+                    raise ValueError("feature cache feature schema mismatch")
+                source = item.get("source")
+                if source not in self.plan.sources:
+                    raise ValueError("feature cache feature source is not declared")
+                observed_at = _parse_canonical_utc(item.get("observed_at"), "observed_at")
+                available_at = _parse_canonical_utc(item.get("available_at"), "available_at")
+                if observed_at > measured_at or available_at > measured_at:
+                    raise ValueError("feature cache row is not point-in-time safe")
+                try:
+                    parsed_value = Decimal(str(item.get("value")))
+                except InvalidOperation as error:
+                    raise ValueError("feature cache value is not decimal") from error
+                if not parsed_value.is_finite():
+                    raise ValueError("feature cache value must be finite")
+                filtered_features[name] = {
+                    "value": str(item.get("value")),
+                    "source": source,
+                    "observed_at": observed_at.isoformat(),
+                    "available_at": available_at.isoformat(),
+                }
+                available_sources.add(source)
+            if any(source not in self.plan.sources for source in unavailable):
+                raise ValueError("feature cache unavailable source is not declared")
+            self._offsets.append((cursor, newline))
+            if required_start <= measured_at <= required_end:
+                canonical_slice_row = {
+                    "features": filtered_features,
+                    "measured_at": measured_at.isoformat(),
+                    "symbol": "BTCUSDT",
+                    "timeframe": "1m",
+                    "unavailable_sources": sorted(unavailable),
+                }
+                slice_hasher.update(
+                    (json.dumps(canonical_slice_row, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+                )
+                for source in self.plan.sources:
+                    if source in available_sources:
+                        self.source_available_counts[source] += 1
+                    if source in unavailable:
+                        self.source_unavailable_counts[source] += 1
+            cursor = newline + 1
+        self.indexed_row_count = target_count
+        self.indexed_byte_count = cursor
+        self.slice_hash = slice_hasher.hexdigest()
+        if target_count == self.plan.row_count:
+            if cursor != len(self._mapping):
+                raise ValueError("feature cache row count does not match manifest")
+            if raw_hasher.hexdigest() != self.plan.output_hash:
+                raise ValueError("feature cache output hash mismatch")
+            self.full_file_verified = True
 
     def row_at(self, as_of: datetime) -> Mapping[str, object] | None:
         index = int((as_of - self.plan.start_at).total_seconds() // 60) - 1
         if index < 0 or index >= self.plan.row_count:
             return None
-        self._ensure_offsets()
-        with self.plan.cache_path.open("rb") as stream:
-            stream.seek(self._offsets[index])
-            row = json.loads(stream.readline())
+        if self._mapping is None:
+            raise RuntimeError("feature cache provider is closed")
+        if index >= len(self._offsets):
+            return None
+        start, end = self._offsets[index]
+        row = json.loads(self._mapping[start:end])
         measured_at = _parse_canonical_utc(row.get("measured_at"), "measured_at")
         if measured_at > as_of:
             raise ValueError("feature cache row is not point-in-time safe")
         return row
+
+    def close(self) -> None:
+        mapping, self._mapping = self._mapping, None
+        if mapping is not None:
+            mapping.close()
+        stream, self._stream = getattr(self, "_stream", None), None
+        if stream is not None:
+            stream.close()
 
 
 class IndexedCompositeFeatureProvider:
@@ -2351,40 +2467,94 @@ class IndexedCompositeFeatureProvider:
 
     def __init__(self, plan: FeatureCachePlan) -> None:
         self._plan = plan
-        self._shards = tuple(_IndexedJsonlShard(item) for item in plan.shards)
-        self.feature_cache_hash = plan.combined_hash
-        self.feature_config_hash = plan.combined_hash
+        built = []
+        try:
+            for item in plan.shards:
+                built.append(_IndexedJsonlShard(
+                    item, required_start=plan.required_start, required_end=plan.required_end,
+                    verify_full_file=plan.verify_full_file,
+                ))
+        except BaseException:
+            for shard in built:
+                shard.close()
+            raise
+        self._shards = tuple(built)
+        definitions = [
+            {
+                "schema_version": "binance-usdm-market-features-v1",
+                "sources": list(shard.plan.sources),
+                "slice_hash": shard.slice_hash,
+            }
+            for shard in self._shards
+        ]
+        slice_identity = {
+            "symbol": "BTCUSDT", "timeframe": "1m",
+            "required_start": plan.required_start.isoformat(),
+            "required_end": plan.required_end.isoformat(),
+            "shards": definitions,
+        }
+        self.feature_cache_hash = _canonical_hash(slice_identity)
+        self.feature_config_hash = _canonical_hash({
+            **slice_identity,
+            "provider": "indexed-composite-jsonl-v2",
+        })
         self.feature_source_coverage = {
             source: max(
-                int(shard.source_coverage.get(source, {}).get("available_rows", 0))
-                for shard in plan.shards
+                shard.source_available_counts.get(source, 0)
+                for shard in self._shards
             )
-            for source in sorted({source for shard in plan.shards for source in shard.sources})
+            for source in sorted({source for shard in self._shards for source in shard.plan.sources})
         }
-        self.feature_unavailable_counts = {}
+        self.feature_unavailable_counts = {
+            source: max(
+                shard.source_unavailable_counts.get(source, 0)
+                for shard in self._shards
+            )
+            for source in self.feature_source_coverage
+        }
         self.feature_provenance = {
-            shard.cache_path.as_posix(): {
-                "output_hash": shard.output_hash,
-                "manifest_hash": shard.manifest_hash,
-                "cache_identity_hash": shard.cache_identity_hash,
-                "input_hashes": dict(shard.input_hashes),
-                "raw_hashes": dict(shard.raw_hashes),
-                "sources": list(shard.sources),
-                "provenance": dict(shard.provenance),
-                "provenance_hash": _canonical_hash(shard.provenance),
+            f"shard_{index:02d}": {
+                "schema_version": "binance-usdm-market-features-v1",
+                "slice_hash": shard.slice_hash,
+                "sources": list(shard.plan.sources),
+                "required_start": plan.required_start.isoformat(),
+                "required_end": plan.required_end.isoformat(),
             }
-            for shard in plan.shards
+            for index, shard in enumerate(self._shards)
         }
+        self.feature_read_audit = {
+            f"shard_{index:02d}": {
+                "indexed_row_count": shard.indexed_row_count,
+                "indexed_byte_count": shard.indexed_byte_count,
+                "full_file_verified": shard.full_file_verified,
+            }
+            for index, shard in enumerate(self._shards)
+        }
+        interval_minutes = int((plan.required_end - plan.required_start).total_seconds() // 60) + 1
+        # A merged set is conservatively budgeted at 6 KiB.  131,072 entries
+        # keep a complete 77-day Validation or 86-day Test replay hot while
+        # bounding the worst-case cache estimate at 768 MiB.  Weekly mapping
+        # episodes always retain at least their complete 10,080-row working set.
+        self._cache_capacity = max(7 * 24 * 60, min(interval_minutes, 131_072))
+        self._merged_cache = OrderedDict()
+        self._closed = False
 
     def load_features(self, symbol: Symbol, timeframe: Timeframe, as_of: datetime) -> MarketFeatureSet:
+        if self._closed:
+            raise RuntimeError("feature cache provider is closed")
         if as_of < self._plan.required_start or as_of > self._plan.required_end:
             raise ValueError("feature request is outside the provider's frozen access boundary")
+        key = (symbol.pair, timeframe.label, as_of)
+        cached = self._merged_cache.get(key)
+        if cached is not None:
+            self._merged_cache.move_to_end(key)
+            return cached
         merged = {}
         unavailable = set()
         for shard in self._shards:
             row = shard.row_at(as_of)
             if row is None:
-                unavailable.update(shard.sources)
+                unavailable.update(shard.plan.sources)
                 continue
             for name, value in row.get("features", {}).items():
                 canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -2401,36 +2571,43 @@ class IndexedCompositeFeatureProvider:
             for name, (_, item) in sorted(merged.items())
         )
         available_sources = {item.source for item in values}
-        return MarketFeatureSet(
+        result = MarketFeatureSet(
             symbol=symbol, timeframe=timeframe, measured_at=as_of, values=values,
             unavailable_sources=tuple(sorted(unavailable - available_sources)),
         )
+        self._merged_cache[key] = result
+        self._merged_cache.move_to_end(key)
+        if len(self._merged_cache) > self._cache_capacity:
+            self._merged_cache.popitem(last=False)
+        return result
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._merged_cache.clear()
+        for shard in self._shards:
+            shard.close()
 
 
-def _select_feature_cache(root: Path | None, *, required_start: datetime, required_end: datetime):
-    plan = plan_feature_caches(root, required_start=required_start, required_end=required_end)
+def _select_feature_cache(
+    root: Path | None, *, required_start: datetime, required_end: datetime,
+    verify_full_file: bool = False,
+):
+    plan = plan_feature_caches(
+        root, required_start=required_start, required_end=required_end,
+        verify_full_file=verify_full_file,
+    )
     if plan is None:
         return None, {"selection_rule": "no covering manifest plan", "selected_shards": []}
     provider = IndexedCompositeFeatureProvider(plan)
     return provider, {
-        "selection_rule": "metadata-only widest-coverage complementary shard merge",
-        "combined_hash": plan.combined_hash,
+        "selection_rule": "manifest plan with access-bounded verified slice index",
+        "slice_hash": provider.feature_cache_hash,
+        "provider_config_hash": provider.feature_config_hash,
         "coverage": {"start_at": required_start.isoformat(), "end_at": required_end.isoformat()},
-        "selected_shards": [
-            {
-                "path": shard.cache_path.as_posix(),
-                "manifest_path": shard.manifest_path.as_posix(),
-                "output_hash": shard.output_hash,
-                "manifest_hash": shard.manifest_hash,
-                "cache_identity_hash": shard.cache_identity_hash,
-                "input_hashes": dict(shard.input_hashes),
-                "raw_hashes": dict(shard.raw_hashes),
-                "sources": list(shard.sources),
-                "source_coverage": dict(shard.source_coverage),
-                "provenance": dict(shard.provenance),
-            }
-            for shard in plan.shards
-        ],
+        "selected_shards": list(provider.feature_provenance.values()),
+        "read_audit": dict(provider.feature_read_audit),
     }
 
 
@@ -2544,6 +2721,7 @@ def load_test_replay_inputs(
         raise ValueError(f"OHLCV coverage ends at {expected.isoformat()}, expected {end_at.isoformat()}")
     provider, cache_provenance = _select_feature_cache(
         feature_cache_root, required_start=start_at, required_end=end_at,
+        verify_full_file=True,
     )
     provenance = {
         "archives": archives,
@@ -2595,6 +2773,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         fold = BTCUSDT_FIRST_FOLD
     else:
         fold = RegimeWalkForwardFold(*(UtcInterval(supplied[index], supplied[index + 1]) for index in range(0, 8, 2)))
+    inputs = None
     try:
         resolved, _ = _resolve_walk_forward_candidates(
             candidates=None,
@@ -2629,6 +2808,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, ValueError, RuntimeError) as error:
         print(f"walk-forward failed: {error}")
         return 1
+    finally:
+        if inputs is not None:
+            close = getattr(inputs.market_feature_provider, "close", None)
+            if callable(close):
+                close()
     print(f"wrote {args.output_json} and {args.output_markdown}")
     return 0
 

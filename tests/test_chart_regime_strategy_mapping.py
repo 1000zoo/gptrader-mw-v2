@@ -8,6 +8,7 @@ from io import BytesIO
 import subprocess
 import sys
 import zipfile
+from types import SimpleNamespace
 
 import pytest
 
@@ -160,6 +161,210 @@ def _write_feature_shard(root: Path, suffix: str, feature_value: str, extra_name
     }
     (root / f"{stem}.manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     return cache
+
+
+def _write_multi_feature_shard(root: Path, values: list[str], suffix: str = "metrics") -> tuple[Path, Path]:
+    start_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    rows = []
+    for index, value in enumerate(values, start=1):
+        measured_at = (start_at + timedelta(minutes=index)).isoformat()
+        rows.append({
+            "symbol": "BTCUSDT", "timeframe": "1m", "measured_at": measured_at,
+            "unavailable_sources": [],
+            "features": {
+                "open_interest": {
+                    "value": value, "source": suffix,
+                    "observed_at": measured_at, "available_at": measured_at,
+                },
+            },
+        })
+    cache = root / f"multi-{suffix}.jsonl"
+    cache.write_bytes(b"".join((json.dumps(row, sort_keys=True) + "\n").encode() for row in rows))
+    manifest_path = root / f"multi-{suffix}.manifest.json"
+    manifest = {
+        "symbol": "BTCUSDT", "timeframe": "1m", "row_count": len(rows),
+        "output_hash": hashlib.sha256(cache.read_bytes()).hexdigest(),
+        "cache_identity_hash": "a" * 64, "input_hashes": {}, "raw_hashes": {},
+        "cache_identity": {
+            "schema_version": "binance-usdm-market-features-v1",
+            "start": start_at.isoformat(),
+            "end": (start_at + timedelta(minutes=len(rows))).isoformat(),
+            "sources": [suffix],
+        },
+        "source_coverage": {suffix: {"available_rows": len(rows)}},
+        "provenance": {"fixture": suffix},
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    return cache, manifest_path
+
+
+def test_pretest_feature_identity_excludes_test_only_rows(tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    cache, manifest_path = _write_multi_feature_shard(tmp_path, ["1", "2", "3"])
+    bounds = {
+        "required_start": datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+        "required_end": datetime(2026, 1, 1, 0, 2, tzinfo=timezone.utc),
+    }
+    first = module.IndexedCompositeFeatureProvider(module.plan_feature_caches(tmp_path, **bounds))
+    first_identity = (first.feature_cache_hash, first.feature_config_hash, first.feature_provenance)
+    assert next(iter(first.feature_read_audit.values()))["indexed_row_count"] == 2
+    assert "output_hash" not in next(iter(first.feature_provenance.values()))
+    first.close()
+
+    lines = cache.read_text(encoding="utf-8").splitlines()
+    changed = json.loads(lines[2])
+    changed["features"]["open_interest"]["value"] = "999"
+    lines[2] = json.dumps(changed, sort_keys=True)
+    cache.write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["output_hash"] = hashlib.sha256(cache.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    second = module.IndexedCompositeFeatureProvider(module.plan_feature_caches(tmp_path, **bounds))
+    assert (second.feature_cache_hash, second.feature_config_hash, second.feature_provenance) == first_identity
+    second.close()
+
+
+def test_feature_index_rejects_tamper_with_unchanged_line_count(tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    cache, _ = _write_multi_feature_shard(tmp_path, ["1", "2", "3"])
+    plan = module.plan_feature_caches(
+        tmp_path,
+        required_start=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+        required_end=datetime(2026, 1, 1, 0, 3, tzinfo=timezone.utc),
+    )
+    data = cache.read_bytes().replace(b'"value": "2"', b'"value": "9"')
+    cache.write_bytes(data)
+    with pytest.raises(ValueError, match="output hash"):
+        module.IndexedCompositeFeatureProvider(plan)
+
+
+def test_post_freeze_provider_full_verifies_beyond_test_slice(tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    cache, _ = _write_multi_feature_shard(tmp_path, ["1", "2", "3"])
+    bounds = {
+        "required_start": datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+        "required_end": datetime(2026, 1, 1, 0, 2, tzinfo=timezone.utc),
+    }
+    pretest = module.IndexedCompositeFeatureProvider(module.plan_feature_caches(tmp_path, **bounds))
+    pretest.close()
+    cache.write_bytes(cache.read_bytes().replace(b'"value": "3"', b'"value": "8"'))
+
+    # Access-bounded pre-Test construction never reads the changed third row.
+    bounded = module.IndexedCompositeFeatureProvider(module.plan_feature_caches(tmp_path, **bounds))
+    assert next(iter(bounded.feature_read_audit.values()))["indexed_row_count"] == 2
+    bounded.close()
+    # Post-freeze Test construction authenticates the complete selected shard.
+    verified_plan = module.plan_feature_caches(tmp_path, **bounds, verify_full_file=True)
+    with pytest.raises(ValueError, match="output hash"):
+        module.IndexedCompositeFeatureProvider(verified_plan)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    (
+        ("measured_at", "2026-01-01T00:01:00+00:00", "strict increasing"),
+        ("symbol", "ETHUSDT", "row identity"),
+    ),
+)
+def test_full_feature_index_validates_row_timeline_and_identity(
+    tmp_path, field, replacement, message
+) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    cache, manifest_path = _write_multi_feature_shard(tmp_path, ["1", "2", "3"])
+    lines = cache.read_text(encoding="utf-8").splitlines()
+    row = json.loads(lines[1])
+    row[field] = replacement
+    lines[1] = json.dumps(row, sort_keys=True)
+    cache.write_bytes(("\n".join(lines) + "\n").encode())
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["output_hash"] = hashlib.sha256(cache.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    plan = module.plan_feature_caches(
+        tmp_path,
+        required_start=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+        required_end=datetime(2026, 1, 1, 0, 3, tzinfo=timezone.utc),
+        verify_full_file=True,
+    )
+    with pytest.raises(ValueError, match=message):
+        module.IndexedCompositeFeatureProvider(plan)
+
+
+def test_full_feature_index_rejects_extra_row_even_with_matching_raw_hash(tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    cache, manifest_path = _write_multi_feature_shard(tmp_path, ["1", "2", "3"])
+    cache.write_bytes(cache.read_bytes() + cache.read_bytes().splitlines(keepends=True)[-1])
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["output_hash"] = hashlib.sha256(cache.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    plan = module.plan_feature_caches(
+        tmp_path,
+        required_start=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+        required_end=datetime(2026, 1, 1, 0, 3, tzinfo=timezone.utc),
+        verify_full_file=True,
+    )
+    with pytest.raises(ValueError, match="row count"):
+        module.IndexedCompositeFeatureProvider(plan)
+
+
+def test_feature_provider_opens_each_shard_once_and_reuses_parsed_rows(monkeypatch, tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    _write_multi_feature_shard(tmp_path, ["1", "2", "3"])
+    plan = module.plan_feature_caches(
+        tmp_path,
+        required_start=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+        required_end=datetime(2026, 1, 1, 0, 3, tzinfo=timezone.utc),
+    )
+    real_open = Path.open
+    opened = []
+
+    def tracked_open(path, *args, **kwargs):
+        if path.suffix == ".jsonl":
+            opened.append(path)
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", tracked_open)
+    provider = module.IndexedCompositeFeatureProvider(plan)
+    when = datetime(2026, 1, 1, 0, 2, tzinfo=timezone.utc)
+    first = provider.load_features(Symbol("BTC", "USDT"), Timeframe(1, "m"), when)
+    for _ in range(1_000):
+        assert provider.load_features(Symbol("BTC", "USDT"), Timeframe(1, "m"), when) is first
+    assert len(opened) == len(plan.shards)
+    provider.close()
+
+
+def test_feature_provider_keeps_complete_weekly_episode_hot(tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    episode_rows = 7 * 24 * 60
+    _write_multi_feature_shard(tmp_path, ["1"] * episode_rows)
+    plan = module.plan_feature_caches(
+        tmp_path,
+        required_start=datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+        required_end=datetime(2026, 1, 8, tzinfo=timezone.utc),
+    )
+    provider = module.IndexedCompositeFeatureProvider(plan)
+    symbol, timeframe = Symbol("BTC", "USDT"), Timeframe(1, "m")
+    first_pass = [
+        provider.load_features(
+            symbol, timeframe, datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=index)
+        )
+        for index in range(1, episode_rows + 1)
+    ]
+    second_pass = [
+        provider.load_features(
+            symbol, timeframe, datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=index)
+        )
+        for index in range(1, episode_rows + 1)
+    ]
+    assert all(first is second for first, second in zip(first_pass, second_pass, strict=True))
+    provider.close()
 
 
 def test_complementary_feature_caches_merge_identical_overlap(tmp_path) -> None:
@@ -405,11 +610,20 @@ def test_test_inputs_are_loaded_once_and_only_after_mapping_freeze() -> None:
     events = []
     calls = []
 
+    class Provider:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    provider = Provider()
+
     def load_test():
         calls.append(tuple(events))
         return module.TestReplayInputs(
             market=_minute_market(BTCUSDT_FIRST_FOLD.test.start_at - timedelta(days=7), 8),
             data_provenance={"fixture": "test-only"},
+            market_feature_provider=provider,
         )
 
     payload = run_chart_regime_walk_forward(
@@ -420,6 +634,7 @@ def test_test_inputs_are_loaded_once_and_only_after_mapping_freeze() -> None:
         test_input_loader=load_test,
     )
     assert len(calls) == 1
+    assert provider.closed is True
     assert "mapping_frozen" in calls[0]
     assert "first_test_classification" not in calls[0]
     assert events.index("test_data_prepared") < events.index("first_test_classification")
@@ -447,6 +662,39 @@ def test_cash_only_run_writes_reports_and_explicit_artifact_envelopes(tmp_path) 
         envelope = json.loads(paths[key].read_text(encoding="utf-8"))
         assert envelope["kind"] == "cash_only"
         assert envelope["artifact_hash"]
+
+
+def test_main_closes_pretest_feature_provider(monkeypatch, tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    class Provider:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    provider = Provider()
+    args = SimpleNamespace(
+        symbol="BTCUSDT", candidate_group=["all"], include_deferred=False,
+        raw_kline_root=tmp_path, feature_cache_root=tmp_path,
+        output_json=tmp_path / "result.json", output_markdown=tmp_path / "result.md",
+        output_model=tmp_path / "model.json", output_mapping=tmp_path / "mapping.json",
+        **{name: None for name in (
+            "cluster_fit_start", "cluster_fit_end", "mapping_fit_start", "mapping_fit_end",
+            "validation_start", "validation_end", "test_start", "test_end",
+        )},
+    )
+    inputs = WalkForwardInputs(
+        market=_minute_market(BTCUSDT_FIRST_FOLD.mapping_fit.start_at, 1),
+        cluster_fit_vectors=(), mapping_vectors=(), validation_vectors=(),
+        data_provenance={}, market_feature_provider=provider,
+    )
+    monkeypatch.setattr(module, "parse_walk_forward_args", lambda _argv: args)
+    monkeypatch.setattr(module, "_resolve_walk_forward_candidates", lambda **_kwargs: ((_candidate("a"),), {}))
+    monkeypatch.setattr(module, "load_walk_forward_inputs", lambda *_args, **_kwargs: inputs)
+    monkeypatch.setattr(module, "run_chart_regime_walk_forward", lambda *_args, **_kwargs: {})
+    assert module.main([]) == 0
+    assert provider.closed is True
 
 
 def test_walk_forward_report_records_grid_provenance_and_rejections() -> None:
