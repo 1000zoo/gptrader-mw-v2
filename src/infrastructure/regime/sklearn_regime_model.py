@@ -61,13 +61,25 @@ class SklearnRegimeModel:
         self,
         config: RegimeModelConfig,
         vectors: tuple[ChartFeatureVector, ...],
+        *,
+        retained_feature_names: tuple[str, ...] | None = None,
     ) -> RegimeModelArtifact:
         _validate_vector_sequence(vectors, require_nonempty=True)
         if len(vectors) < config.cluster_count:
             raise ValueError("cluster-fit vectors must be at least the cluster count")
 
         all_values = np.asarray([tuple(vector.values.values()) for vector in vectors], dtype=float)
-        selected_names = prune_correlated_features(all_values, _REGISTRY_NAMES)
+        if retained_feature_names is None:
+            selected_names = prune_correlated_features(all_values, _REGISTRY_NAMES)
+        else:
+            selected_names = tuple(retained_feature_names)
+            if not selected_names or len(set(selected_names)) != len(selected_names):
+                raise ValueError("retained feature names must be nonempty and unique")
+            if any(name not in _REGISTRY_NAMES for name in selected_names):
+                raise ValueError("retained feature names contain unknown registry features")
+            positions = tuple(_REGISTRY_NAMES.index(name) for name in selected_names)
+            if positions != tuple(sorted(positions)):
+                raise ValueError("retained feature names must follow registry priority order")
         _validate_family_cap(selected_names)
         selected_indices = tuple(_REGISTRY_NAMES.index(name) for name in selected_names)
         matrix = all_values[:, selected_indices]

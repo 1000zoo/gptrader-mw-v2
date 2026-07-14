@@ -99,6 +99,40 @@ def test_all_eight_walk_forward_fold_dates_are_accepted() -> None:
     assert args.test_end == datetime(2026, 7, 1, tzinfo=timezone.utc)
 
 
+def test_diagnostic_test_claim_requires_complete_prior_exposure_audit() -> None:
+    common = [
+        "--symbol", "BTCUSDT", "--output-json", "report.json",
+        "--output-markdown", "report.md",
+        "--test-claim-status", "diagnostic_after_pipeline_defect",
+    ]
+    with pytest.raises(SystemExit):
+        parse_walk_forward_args(common)
+    args = parse_walk_forward_args(common + [
+        "--test-claim-reason", "pre-Test extractor denominator defect",
+        "--prior-run-timestamp", "2026-07-15T12:34:56+00:00",
+        "--prior-run-hash", "a" * 64,
+    ])
+    assert args.test_claim_status == "diagnostic_after_pipeline_defect"
+    assert args.prior_run_hash == "a" * 64
+
+
+def test_diagnostic_test_claim_is_surfaced_separately_from_structural_freeze() -> None:
+    payload = run_chart_regime_walk_forward(
+        BTCUSDT_FIRST_FOLD,
+        candidates=(_candidate("candidate-a"),),
+        dependencies=_fixture_walk_forward_dependencies(),
+        test_claim_status="diagnostic_after_pipeline_defect",
+        test_claim_reason="pre-Test extractor denominator defect",
+        prior_run_timestamp="2026-07-15T12:34:56+00:00",
+        prior_run_hash="b" * 64,
+    )
+    audit = payload["leakage_audit"]
+    assert audit["frozen_before_test"] is True
+    assert audit["confirmatory_status"] == "diagnostic_after_pipeline_defect"
+    assert audit["thresholds_changed_after_prior_exposure"] is False
+    assert audit["configuration_grid_changed_after_prior_exposure"] is False
+
+
 def test_real_feature_cache_selection_reads_manifests_only() -> None:
     import scripts.chart_regime_strategy_mapping as module
 
@@ -590,6 +624,9 @@ def _fixture_walk_forward_dependencies(test_return: str = "0.01"):
         return {"score": "0.02", "selected_family": "kmeans"}
 
     def test(context, prepared, features, models, mappings, validation):
+        callback = context.get("on_test_selector_invoked")
+        if callable(callback):
+            callback("fixture")
         return {
             name: {"status": "cash" if name == "cash" else "ok", "continuous_metrics": {"return_ratio": test_return}}
             for name in ("cash", "adopted_fixed", "train_selected_fixed", "manual_regime_router", "kmeans_dynamic", "gmm_dynamic")
@@ -613,11 +650,9 @@ def test_walk_forward_freezes_artifacts_before_test_and_has_required_baselines()
         "kmeans_dynamic", "gmm_dynamic",
     }
     assert payload["leakage_audit"]["frozen_before_test"] is True
-    assert all(
-        access["stage"] == "test_result"
-        for access in payload["data_access_audit"]
-        if access["interval"] == "test"
-    )
+    assert {access["stage"] for access in payload["data_access_audit"] if access["interval"] == "test"} == {
+        "test_result", "test_selector_invoked",
+    }
 
 
 def test_test_inputs_are_loaded_once_and_only_after_mapping_freeze() -> None:
@@ -655,7 +690,7 @@ def test_test_inputs_are_loaded_once_and_only_after_mapping_freeze() -> None:
     assert "first_test_classification" not in calls[0]
     assert events.index("test_data_prepared") < events.index("first_test_classification")
     assert {item["stage"] for item in payload["data_access_audit"] if item["interval"] == "test"} == {
-        "test_data_loaded", "test_result",
+        "test_data_loaded", "test_result", "test_selector_invoked",
     }
 
 
@@ -695,6 +730,8 @@ def test_main_closes_pretest_feature_provider(monkeypatch, tmp_path) -> None:
         raw_kline_root=tmp_path, feature_cache_root=tmp_path,
         output_json=tmp_path / "result.json", output_markdown=tmp_path / "result.md",
         output_model=tmp_path / "model.json", output_mapping=tmp_path / "mapping.json",
+        test_claim_status="untouched", test_claim_reason=None,
+        prior_run_timestamp=None, prior_run_hash=None,
         **{name: None for name in (
             "cluster_fit_start", "cluster_fit_end", "mapping_fit_start", "mapping_fit_end",
             "validation_start", "validation_end", "test_start", "test_end",
@@ -725,6 +762,63 @@ def test_walk_forward_report_records_grid_provenance_and_rejections() -> None:
     assert payload["data_provenance"]
     assert payload["rejected_model_configurations"][0]["config_id"] == "bad"
     assert payload["configuration_grid"]["cluster_counts"] == [3, 4, 5, 6, 7, 8]
+
+
+def test_serialized_candidate_behavior_payloads_self_verify_hashes() -> None:
+    payload = run_chart_regime_walk_forward(
+        BTCUSDT_FIRST_FOLD,
+        candidates=(_candidate("candidate-a"), _candidate("candidate-b", equity_ratio="0.2")),
+        dependencies=_fixture_walk_forward_dependencies(),
+    )
+    for candidate_id, behavior in payload["candidate_behaviors"].items():
+        assert _canonical_hash(behavior) == payload["candidate_behavior_hashes"][candidate_id]
+
+
+def test_cash_only_replay_does_not_claim_first_dynamic_selector() -> None:
+    dependencies = replace(
+        _fixture_walk_forward_dependencies(),
+        replay_test=lambda *_args: {},
+    )
+    payload = run_chart_regime_walk_forward(
+        BTCUSDT_FIRST_FOLD,
+        candidates=(_candidate("candidate-a"),),
+        dependencies=dependencies,
+    )
+    assert "first_test_classification" not in payload["pipeline_events"]
+    assert "test_selector_not_reached" in payload["pipeline_events"]
+    assert payload["leakage_audit"]["test_selector_reached"] is False
+    assert payload["leakage_audit"]["test_selector_not_reached_reason"]
+
+
+def test_no_eligible_model_skips_mapping_and_reports_actual_fixed_baseline_reason(monkeypatch) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    monkeypatch.setattr(module, "run_scheduler_driven_backtest", lambda *_args, **_kwargs: {})
+    base = _fixture_walk_forward_dependencies()
+    dependencies = replace(
+        base,
+        evaluate_models=lambda *_args: {
+            "selected": {},
+            "candidates": [{"config_id": "failed", "eligible": False, "rejection_reasons": ["distance gate"]}],
+        },
+        build_mappings=lambda *_args: pytest.fail("mapping must not run without an eligible model"),
+        replay_test=_default_replay_test,
+    )
+    inputs = WalkForwardInputs(
+        market=_minute_market(BTCUSDT_FIRST_FOLD.test.start_at - timedelta(days=7), 1),
+        cluster_fit_vectors=(), mapping_vectors=(), validation_vectors=(), data_provenance={},
+    )
+    payload = run_chart_regime_walk_forward(
+        BTCUSDT_FIRST_FOLD,
+        candidates=(_candidate("candidate-a"),), dependencies=dependencies, inputs=inputs,
+    )
+    assert "mapping_evidence_ready" not in payload["pipeline_events"]
+    assert "mapping_skipped_no_eligible_model" in payload["pipeline_events"]
+    assert payload["comparisons"]["train_selected_fixed"]["rejection_reasons"] == [
+        "not evaluated: no eligible model"
+    ]
+    markdown = __import__("scripts.chart_regime_strategy_mapping", fromlist=["render_walk_forward_markdown"]).render_walk_forward_markdown(payload)
+    assert "distance gate" in markdown
 
 
 def test_frozen_selection_hashes_do_not_depend_on_test_outcome() -> None:
@@ -859,9 +953,9 @@ def test_chronological_stability_refits_disjoint_time_blocks() -> None:
         def __init__(self):
             self.blocks = []
 
-        def fit(self, config, block):
+        def fit(self, config, block, *, retained_feature_names=None):
             self.blocks.append((block[0].anchor_at, block[-1].anchor_at, len(block)))
-            return real.fit(config, block)
+            return real.fit(config, block, retained_feature_names=retained_feature_names)
 
         def assign(self, artifact, values):
             return real.assign(artifact, values)
@@ -870,6 +964,41 @@ def test_chronological_stability_refits_disjoint_time_blocks() -> None:
     distance, drift, profiles = _chronological_block_stability(engine, primary, vectors, mapping)
     assert engine.blocks[0][1] < engine.blocks[1][0]
     assert [item[2] for item in engine.blocks] == [45, 45]
+    assert distance >= 0 and 0 <= drift <= 1
+    assert len(profiles) == 2
+
+
+def test_chronological_refits_freeze_primary_features_when_block_correlations_differ() -> None:
+    from src.domain.regime.model import RegimeModelConfig
+    from src.infrastructure.regime.sklearn_regime_model import SklearnRegimeModel
+
+    anchors = [datetime(2021, 1, 1, tzinfo=timezone.utc) + timedelta(hours=4 * index) for index in range(90)]
+    varied = []
+    for index, vector in enumerate(_regime_vectors(anchors)):
+        values = dict(vector.values)
+        values["return_12h"] = (
+            values["return_4h"]
+            if index < 45
+            else float((index % 11) ** 2 + (index % 3) * 0.17)
+        )
+        varied.append(replace(vector, values=values))
+    vectors = tuple(varied)
+    engine = SklearnRegimeModel()
+    config = RegimeModelConfig("kmeans", 3, 20260714)
+    independently_selected = (
+        engine.fit(config, vectors[:45]).feature_names,
+        engine.fit(config, vectors[45:]).feature_names,
+    )
+    assert independently_selected[0] != independently_selected[1]
+    primary = engine.fit(config, vectors)
+    mapping = _regime_vectors([
+        datetime(2025, 7, 7, tzinfo=timezone.utc) + timedelta(days=7 * index)
+        for index in range(26)
+    ])
+
+    distance, drift, profiles = _chronological_block_stability(
+        engine, primary, vectors, mapping
+    )
     assert distance >= 0 and 0 <= drift <= 1
     assert len(profiles) == 2
 
@@ -975,6 +1104,10 @@ def test_default_model_mapping_and_replay_stages_execute_end_to_end(monkeypatch,
     assert any(
         len(item.get("evidence", {}).get("chronological_block_refits", ())) == 2
         for item in payload["model_candidates"] if item.get("eligible")
+    )
+    assert all(
+        "incompatible feature profiles" not in " ".join(item.get("rejection_reasons", ()))
+        for item in payload["model_candidates"]
     )
     assert set(payload["mapping_artifacts"]) == {"kmeans", "gmm"}
     assert payload["mapping_metrics"]["evidence_rows"] == 26

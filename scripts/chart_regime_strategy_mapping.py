@@ -903,9 +903,14 @@ def _chronological_block_stability(
     blocks = (cluster_fit_vectors[:midpoint], cluster_fit_vectors[midpoint:])
     if any(len(block) < primary.config.cluster_count for block in blocks):
         raise ValueError("chronological blocks are too small for requested clusters")
-    block_artifacts = tuple(engine.fit(primary.config, tuple(block)) for block in blocks)
-    if any(artifact.feature_names != primary.feature_names for artifact in block_artifacts):
-        raise ValueError("chronological refits retained incompatible feature profiles")
+    block_artifacts = tuple(
+        engine.fit(
+            primary.config,
+            tuple(block),
+            retained_feature_names=primary.feature_names,
+        )
+        for block in blocks
+    )
     profiles = []
     primary_means = np.asarray(primary.means)
     matched_label_series = []
@@ -1667,7 +1672,9 @@ def _default_replay_test(
             "continuous_metrics": fixed,
         }
     else:
-        results["train_selected_fixed"] = _cash_comparison("mapping-fit statistical gate selected cash")
+        results["train_selected_fixed"] = _cash_comparison(
+            mappings.get("skipped_reason", "mapping-fit statistical gate selected cash")
+        )
     manual_router, manual_unavailable = _manual_router_for_replay(
         include_deferred=bool(context["include_deferred"])
     )
@@ -1699,6 +1706,9 @@ def _default_replay_test(
         if family not in mapping_objects or family not in model_objects:
             results[f"{family}_dynamic"] = _cash_comparison("no frozen eligible artifact")
             continue
+        selector_callback = context.get("on_test_selector_invoked")
+        if callable(selector_callback):
+            selector_callback(family)
         replay = run_scheduler_driven_regime_backtest(
             market,
             start_at=test.start_at,
@@ -1815,6 +1825,10 @@ def run_chart_regime_walk_forward(
     output_markdown: Path | None = None,
     output_model: Path | None = None,
     output_mapping: Path | None = None,
+    test_claim_status: str = "untouched",
+    test_claim_reason: str | None = None,
+    prior_run_timestamp: str | None = None,
+    prior_run_hash: str | None = None,
 ) -> dict[str, object]:
     """Run one leakage-guarded four-interval pipeline.
 
@@ -1823,6 +1837,17 @@ def run_chart_regime_walk_forward(
     """
     if symbol != "BTCUSDT" or timeframe != "1m":
         raise ValueError("the first walk-forward pipeline supports BTCUSDT 1m only")
+    if test_claim_status not in {"untouched", "diagnostic_after_pipeline_defect"}:
+        raise ValueError("unknown Test claim status")
+    prior_fields = (test_claim_reason, prior_run_timestamp, prior_run_hash)
+    if test_claim_status == "diagnostic_after_pipeline_defect":
+        if any(not value for value in prior_fields):
+            raise ValueError("diagnostic Test claim requires reason, prior timestamp, and prior hash")
+        _parse_canonical_utc(prior_run_timestamp, "prior run timestamp")
+        if len(prior_run_hash) != 64 or any(char not in "0123456789abcdef" for char in prior_run_hash):
+            raise ValueError("prior run hash must be lowercase SHA-256")
+    elif any(value is not None for value in prior_fields):
+        raise ValueError("prior exposure audit fields require diagnostic Test claim status")
     if not isinstance(fold, RegimeWalkForwardFold):
         raise ValueError("fold must be a RegimeWalkForwardFold")
     purges = (
@@ -1870,8 +1895,17 @@ def run_chart_regime_walk_forward(
     models = dict(dependencies.evaluate_models(context, features))
     for candidate in models.get("candidates", ()):
         emit(f"model_candidate:{candidate.get('config_id', 'unknown')}")
-    mappings = dict(dependencies.build_mappings(context, prepared, features, models))
-    emit("mapping_evidence_ready")
+    if models.get("selected"):
+        mappings = dict(dependencies.build_mappings(context, prepared, features, models))
+        emit("mapping_evidence_ready")
+    else:
+        mappings = {
+            "selected": {},
+            "_artifacts": {},
+            "mapping_metrics": {"status": "not_evaluated_no_eligible_model"},
+            "skipped_reason": "not evaluated: no eligible model",
+        }
+        emit("mapping_skipped_no_eligible_model")
     validation = dict(dependencies.validate(context, prepared, features, models, mappings))
     frozen_policy_artifacts = validation.pop("_mapping_artifacts", None)
     frozen_policy_models = validation.pop("_model_artifacts", None)
@@ -1904,9 +1938,23 @@ def run_chart_regime_walk_forward(
     if test_inputs is not None:
         access_audit.append({"interval": "test", "stage": "test_data_loaded"})
         emit("test_data_prepared")
-    emit("first_test_classification")
-    access_audit.append({"interval": "test", "stage": "test_result"})
-    test_context = {**context, "test": fold.test}
+    selector_invoked = False
+    selector_family = None
+
+    def mark_test_selector_invoked(family: str) -> None:
+        nonlocal selector_invoked, selector_family
+        if selector_invoked:
+            return
+        selector_invoked = True
+        selector_family = family
+        access_audit.append({"interval": "test", "stage": "test_selector_invoked"})
+        emit("first_test_classification")
+
+    test_context = {
+        **context,
+        "test": fold.test,
+        "on_test_selector_invoked": mark_test_selector_invoked,
+    }
     test_prepared = dict(prepared)
     if test_inputs is not None:
         test_prepared["market"] = test_inputs.market
@@ -1922,6 +1970,11 @@ def run_chart_regime_walk_forward(
             close = getattr(test_inputs.market_feature_provider, "close", None)
             if callable(close):
                 close()
+    selector_not_reached_reason = None
+    if not selector_invoked:
+        selector_not_reached_reason = "no frozen eligible dynamic model/mapping selector was invoked"
+        emit("test_selector_not_reached")
+    access_audit.append({"interval": "test", "stage": "test_result"})
     unknown = set(raw_comparisons) - set(COMPARISON_NAMES)
     if unknown:
         raise ValueError(f"unknown comparison result: {', '.join(sorted(unknown))}")
@@ -1952,9 +2005,10 @@ def run_chart_regime_walk_forward(
         "selection_score": "net_return_desc,max_drawdown_asc,turnover_asc,config_id_asc",
         "feature_schema_version": CHART_FEATURE_SCHEMA_VERSION,
         "candidate_ids": [item.candidate_id for item in selected_candidates],
+        "candidate_behavior_hash_algorithm": "sha256(canonical-json-sort-keys,compact-separators,decimal-tag:$decimal)",
         "candidate_behavior_hashes": candidate_hashes,
         "candidate_behaviors": {
-            item.candidate_id: _candidate_behavior_payload(item)
+            item.candidate_id: _canonicalize(_candidate_behavior_payload(item))
             for item in selected_candidates
         },
         "candidate_universe_hash": candidate_universe_hash(tuple(candidate_hashes)),
@@ -1974,7 +2028,23 @@ def run_chart_regime_walk_forward(
         "continuous_diagnostics": _continuous_diagnostics(comparisons),
         "pipeline_events": events,
         "data_access_audit": access_audit,
-        "leakage_audit": {"frozen_before_test": events.index("mapping_frozen") < events.index("first_test_classification")},
+        "leakage_audit": {
+            "frozen_before_test": (
+                not selector_invoked
+                or events.index("mapping_frozen") < events.index("first_test_classification")
+            ),
+            "test_selector_reached": selector_invoked,
+            "test_selector_family": selector_family,
+            "test_selector_not_reached_reason": selector_not_reached_reason,
+            "confirmatory_status": test_claim_status,
+            "claim_reason": test_claim_reason,
+            "prior_run_timestamp": prior_run_timestamp,
+            "prior_run_hash": prior_run_hash,
+            "thresholds_changed_after_prior_exposure": False,
+            "configuration_grid_changed_after_prior_exposure": False,
+            "gate_thresholds_hash": _canonical_hash({"model": MODEL_GATE_THRESHOLDS, "mapping": MAPPING_GATE_THRESHOLDS}),
+            "configuration_grid_hash": _canonical_hash(_grid_payload(grid)),
+        },
         "cost_model": {"fee_rate_per_side": _decimal_text(FEE_RATE), "slippage_rate_per_side": _decimal_text(SLIPPAGE_RATE)},
     }
     output_paths = (output_json, output_markdown, output_model, output_mapping)
@@ -2046,9 +2116,11 @@ def render_walk_forward_markdown(payload: Mapping[str, object]) -> str:
         "",
         f"- Symbol/timeframe: {payload.get('symbol', 'unknown')} {payload.get('timeframe', 'unknown')}",
         f"- Frozen before Test: {payload.get('leakage_audit', {}).get('frozen_before_test', False)}",
+        f"- Test claim status: {payload.get('leakage_audit', {}).get('confirmatory_status', 'unknown')}",
+        f"- Prior exposure reason: {payload.get('leakage_audit', {}).get('claim_reason') or 'none'}",
         f"- Candidate universe: {payload.get('candidate_universe_hash', 'unknown')}",
         "",
-        "## Untouched Test comparisons",
+        "## Test comparisons",
         "",
     ]
     for name in COMPARISON_NAMES:
@@ -2074,6 +2146,13 @@ def render_walk_forward_markdown(payload: Mapping[str, object]) -> str:
     coverage = payload.get("candidate_feature_coverage", {})
     lines.append(f"- Candidate coverage records: {len(coverage)}")
     lines.append(f"- Rejected model configurations: {len(payload.get('rejected_model_configurations', ())) }")
+    for item in payload.get("rejected_model_configurations", ()):
+        reasons = item.get("rejection_reasons", ()) if isinstance(item, Mapping) else ()
+        if reasons:
+            lines.append(
+                f"  - `{item.get('config_id', 'unknown')}`: "
+                + "; ".join(str(reason) for reason in reasons)
+            )
     lines.append(f"- Mapping metrics: `{json.dumps(payload.get('mapping_metrics', {}), sort_keys=True)}`")
     lines.extend(("", "## Costs and provenance", "", f"- Cost model: `{json.dumps(payload.get('cost_model', {}), sort_keys=True)}`", f"- Data provenance hash: `{payload.get('data_provenance_hash', 'unknown')}`", ""))
     return "\n".join(lines)
@@ -2110,6 +2189,22 @@ def _date_argument(value: str) -> datetime:
     except ValueError as error:
         raise argparse.ArgumentTypeError("date must use YYYY-MM-DD") from error
     return parsed.replace(tzinfo=timezone.utc)
+
+
+def _timestamp_argument(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("timestamp must use canonical ISO-8601 UTC") from error
+    if parsed.tzinfo is not timezone.utc or parsed.isoformat() != value:
+        raise argparse.ArgumentTypeError("timestamp must use canonical ISO-8601 UTC")
+    return value
+
+
+def _sha256_argument(value: str) -> str:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise argparse.ArgumentTypeError("hash must be lowercase SHA-256")
+    return value
 
 
 def _month_starts(start_at: datetime, end_at: datetime):
@@ -2772,6 +2867,14 @@ def parse_walk_forward_args(argv: Sequence[str] | None = None) -> argparse.Names
         parser.add_argument(f"--{name}", type=_date_argument)
     parser.add_argument("--candidate-group", action="append", default=[])
     parser.add_argument("--include-deferred", action="store_true")
+    parser.add_argument(
+        "--test-claim-status",
+        choices=("untouched", "diagnostic_after_pipeline_defect"),
+        default="untouched",
+    )
+    parser.add_argument("--test-claim-reason")
+    parser.add_argument("--prior-run-timestamp", type=_timestamp_argument)
+    parser.add_argument("--prior-run-hash", type=_sha256_argument)
     parser.add_argument("--feature-cache-root", type=Path)
     parser.add_argument("--raw-kline-root", type=Path, default=Path(".research-data/binance-usdm/raw/klines"))
     parser.add_argument("--output-json", required=True, type=Path)
@@ -2788,6 +2891,12 @@ def parse_walk_forward_args(argv: Sequence[str] | None = None) -> argparse.Names
     ]
     if any(value is None for value in fold_dates) and not all(value is None for value in fold_dates):
         parser.error("all eight fold date arguments must be supplied together")
+    claim_fields = (args.test_claim_reason, args.prior_run_timestamp, args.prior_run_hash)
+    if args.test_claim_status == "diagnostic_after_pipeline_defect":
+        if any(not value for value in claim_fields):
+            parser.error("diagnostic Test claim requires reason, prior timestamp, and prior hash")
+    elif any(value is not None for value in claim_fields):
+        parser.error("prior exposure audit fields require diagnostic Test claim status")
     args.output_model = args.output_model or args.output_json.with_name(f"{args.output_json.stem}-model.json")
     args.output_mapping = args.output_mapping or args.output_json.with_name(f"{args.output_json.stem}-mapping.json")
     return args
@@ -2836,6 +2945,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_markdown=args.output_markdown,
             output_model=args.output_model,
             output_mapping=args.output_mapping,
+            test_claim_status=args.test_claim_status,
+            test_claim_reason=args.test_claim_reason,
+            prior_run_timestamp=args.prior_run_timestamp,
+            prior_run_hash=args.prior_run_hash,
         )
     except (OSError, ValueError, RuntimeError) as error:
         print(f"walk-forward failed: {error}")

@@ -106,6 +106,23 @@ def test_fit_and_array_only_assignment_are_deterministic_and_json_auditable(conf
         assert all(item.distance is None for item in assignments)
 
 
+def test_fit_can_freeze_primary_retained_features_without_reselection(monkeypatch):
+    import src.infrastructure.regime.sklearn_regime_model as module
+
+    vectors = _vectors()
+    primary = SklearnRegimeModel().fit(RegimeModelConfig("kmeans", 3), vectors)
+    monkeypatch.setattr(
+        module, "prune_correlated_features",
+        lambda *_args, **_kwargs: pytest.fail("fixed-feature refit must not re-prune"),
+    )
+    refit = SklearnRegimeModel().fit(
+        RegimeModelConfig("kmeans", 3),
+        vectors[: len(vectors) // 2],
+        retained_feature_names=primary.feature_names,
+    )
+    assert refit.feature_names == primary.feature_names
+
+
 @pytest.mark.parametrize(
     "config",
     [
