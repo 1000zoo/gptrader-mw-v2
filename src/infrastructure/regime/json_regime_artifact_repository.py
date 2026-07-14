@@ -10,7 +10,7 @@ import math
 import os
 from pathlib import Path
 import tempfile
-from typing import Any, Mapping
+from typing import Mapping
 
 from src.domain.regime.mapping import (
     MAPPING_METRIC_NAMES,
@@ -238,13 +238,22 @@ class JsonRegimeArtifactRepository:
     def load_mapping(
         self,
         *,
-        expected_candidate_definition_hash: str | None = None,
-        expected_candidate_universe_hash: str | None = None,
-        expected_data_provenance_hash: str | None = None,
+        expected_candidate_definition_hash: str,
+        expected_candidate_universe_hash: str,
+        expected_data_provenance_hash: str,
         expected_model_artifact_hash: str | None = None,
         expected_model_fingerprint_hash: str | None = None,
         expected_artifact_hash: str | None = None,
     ) -> StrategyMappingArtifact:
+        expected_candidate_definition_hash = _expected_sha256(
+            expected_candidate_definition_hash, "candidate definition hash"
+        )
+        expected_candidate_universe_hash = _expected_sha256(
+            expected_candidate_universe_hash, "candidate universe hash"
+        )
+        expected_data_provenance_hash = _expected_sha256(
+            expected_data_provenance_hash, "data provenance hash"
+        )
         payload, artifact_hash = self._read_envelope(self._directory / _MAPPING_FILE, "strategy_mapping")
         artifact = _decode_mapping(payload)
         if expected_artifact_hash is not None and artifact_hash != expected_artifact_hash:
@@ -424,10 +433,23 @@ def _integer(value: object, field: str) -> int:
 def _number(value: object, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{field} must be a JSON number")
-    result = float(value)
+    try:
+        result = float(value)
+    except (OverflowError, ValueError) as error:
+        raise ValueError(f"{field} must be a finite JSON number") from error
     if not math.isfinite(result):
         raise ValueError(f"{field} must be finite")
     return result
+
+
+def _expected_sha256(value: object, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"expected {field} must be a lowercase SHA256 hash")
+    return value
 
 
 def _decimal(value: object, field: str, *, allow_infinity: bool = False) -> Decimal:

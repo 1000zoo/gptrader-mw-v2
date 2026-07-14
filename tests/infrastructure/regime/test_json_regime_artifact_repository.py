@@ -174,6 +174,14 @@ def _mapping(model: RegimeModelArtifact) -> StrategyMappingArtifact:
     )
 
 
+def _mapping_expectations(mapping: StrategyMappingArtifact) -> dict[str, str]:
+    return {
+        "expected_candidate_definition_hash": mapping.candidate_definition_hash,
+        "expected_candidate_universe_hash": mapping.candidate_universe_hash,
+        "expected_data_provenance_hash": mapping.data_provenance_hash,
+    }
+
+
 @pytest.mark.parametrize("covariance_type", [None, "diag", "tied"])
 def test_model_round_trip_is_canonical_and_deterministic(tmp_path, covariance_type) -> None:
     model = _model(covariance_type)
@@ -223,19 +231,35 @@ def test_load_rejects_compatibility_mismatches_with_clear_messages(tmp_path) -> 
     repo.save_model(model)
     repo.save_mapping(mapping)
     checks = (
-        ({"expected_candidate_definition_hash": "wrong"}, "candidate definition hash"),
-        ({"expected_candidate_universe_hash": "wrong"}, "candidate universe hash"),
-        ({"expected_data_provenance_hash": "wrong"}, "data provenance hash"),
-        ({"expected_model_artifact_hash": "wrong"}, "model artifact hash"),
-        ({"expected_model_fingerprint_hash": "wrong"}, "model fingerprint hash"),
+        ({"expected_candidate_definition_hash": _sha("wrong-definition")}, "candidate definition hash"),
+        ({"expected_candidate_universe_hash": _sha("wrong-universe")}, "candidate universe hash"),
+        ({"expected_data_provenance_hash": _sha("wrong-provenance")}, "data provenance hash"),
+        ({"expected_model_artifact_hash": _sha("wrong-model")}, "model artifact hash"),
+        ({"expected_model_fingerprint_hash": _sha("wrong-fingerprint")}, "model fingerprint hash"),
     )
     for kwargs, message in checks:
         with pytest.raises(ValueError, match=message):
-            repo.load_mapping(**kwargs)
+            repo.load_mapping(**(_mapping_expectations(mapping) | kwargs))
     with pytest.raises(ValueError, match="symbol"):
         repo.load_model(expected_symbol="ETHUSDT", expected_schema=CHART_FEATURE_SCHEMA_VERSION)
     with pytest.raises(ValueError, match="schema"):
         repo.load_model(expected_symbol="BTCUSDT", expected_schema="old")
+
+
+def test_load_mapping_requires_canonical_compatibility_context(tmp_path) -> None:
+    model = _model()
+    mapping = _mapping(model)
+    repo = JsonRegimeArtifactRepository(tmp_path)
+    repo.save_model(model)
+    repo.save_mapping(mapping)
+
+    with pytest.raises(TypeError, match="required keyword-only"):
+        repo.load_mapping()
+    for field in _mapping_expectations(mapping):
+        context = _mapping_expectations(mapping)
+        context[field] = "" if field != "expected_candidate_universe_hash" else _sha("x").upper()
+        with pytest.raises(ValueError, match=field.removeprefix("expected_").replace("_", " ")):
+            repo.load_mapping(**context)
 
 
 def test_tampering_duplicate_keys_constants_truncation_and_version_are_rejected(tmp_path) -> None:
@@ -330,7 +354,7 @@ def test_load_rejects_mapping_clusters_not_present_in_linked_model(tmp_path) -> 
     path.write_text(json.dumps(envelope), encoding="utf-8")
 
     with pytest.raises(ValueError, match="cluster fingerprint"):
-        repo.load_mapping()
+        repo.load_mapping(**_mapping_expectations(mapping))
 
 
 def test_domain_validation_runs_after_validly_rehashed_forgery(tmp_path) -> None:
@@ -364,7 +388,22 @@ def test_mapping_domain_validation_runs_after_validly_rehashed_forgery(tmp_path)
     path.write_text(json.dumps(envelope), encoding="utf-8")
 
     with pytest.raises(ValueError, match="eligibility"):
-        repo.load_mapping()
+        repo.load_mapping(**_mapping_expectations(mapping))
+
+
+def test_validly_rehashed_huge_json_number_is_a_field_specific_value_error(tmp_path) -> None:
+    repo = JsonRegimeArtifactRepository(tmp_path)
+    repo.save_model(_model())
+    path = tmp_path / "model.json"
+    envelope = json.loads(path.read_text(encoding="utf-8"))
+    envelope["payload"]["lower_bounds"][0] = 10**400
+    envelope["artifact_hash"] = hashlib.sha256(
+        json.dumps(envelope["payload"], sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+    ).hexdigest()
+    path.write_text(json.dumps(envelope), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="lower_bounds.*finite"):
+        repo.load_model(expected_symbol="BTCUSDT", expected_schema=CHART_FEATURE_SCHEMA_VERSION)
 
 
 def test_atomic_replace_failure_keeps_previous_target_and_cleans_temp(tmp_path, monkeypatch) -> None:
