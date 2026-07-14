@@ -441,7 +441,7 @@ class StrategyMappingArtifact:
         ):
             raise ValueError("selection confidence thresholds are required")
         for field in ("regime_model_artifact_hash", "regime_model_fingerprint_hash", "candidate_definition_hash", "candidate_universe_hash", "data_provenance_hash"):
-            _text(getattr(self, field), field)
+            _hash_text(getattr(self, field), field)
         if self.profit_factor_zero_loss_policy != "positive_infinity_when_profit_positive_else_zero":
             raise ValueError("unsupported profit factor zero-loss policy")
         if not isinstance(self.common_initial_equity, Decimal) or not self.common_initial_equity.is_finite() or self.common_initial_equity <= 0:

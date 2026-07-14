@@ -71,8 +71,8 @@ def _rows(
 def _build(rows: list[dict[str, object]], **overrides: object):
     command = BuildStrategyMappingCommand(
         evidence_rows=tuple(rows),
-        regime_model_artifact_hash="model-artifact-hash",
-        regime_model_fingerprint_hash="model-fingerprint-hash",
+        regime_model_artifact_hash=_sha("model-artifact"),
+        regime_model_fingerprint_hash=_sha("model-fingerprint"),
         selection_confidence_thresholds=SelectionConfidenceThresholds(
             model_type="gmm", gmm_probability_min=0.7, gmm_margin_min=0.2
         ),

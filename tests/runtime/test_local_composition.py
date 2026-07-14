@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -47,7 +48,11 @@ def test_enabled_regime_selection_fails_fast_when_artifact_files_are_missing(tmp
 
 def test_enabled_regime_selection_loads_frozen_artifacts_without_changing_trade_strategy(tmp_path) -> None:
     artifact_dir = tmp_path / "artifacts"
-    model = _model()
+    original_model = _model()
+    model = replace(
+        original_model,
+        distance_thresholds=(0.0,) + original_model.distance_thresholds[1:],
+    )
     mapping = _mapping(model)
     artifacts = JsonRegimeArtifactRepository(artifact_dir)
     artifacts.save_model(model)
@@ -78,7 +83,7 @@ def test_enabled_regime_selection_loads_frozen_artifacts_without_changing_trade_
     assert SqliteRegimeSelectionStateRepository(database_path).list_events("BTCUSDT") == ()
 
     boundary = datetime(2026, 7, 13, 0, tzinfo=timezone.utc)
-    assignment = ClusterAssignment(model.fingerprints[0], 1.0, 0.0, 1.0)
+    assignment = ClusterAssignment(model.fingerprints[0], 1.0, 0.0, 0.0)
     factory = lambda previous: SelectStrategyCommand(
         previous_state=previous,
         symbol="BTCUSDT",

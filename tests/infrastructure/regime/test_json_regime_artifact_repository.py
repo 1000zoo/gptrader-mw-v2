@@ -25,7 +25,10 @@ from src.domain.regime.model import (
     RegimeModelConfig,
     component_fingerprint,
 )
-from src.domain.regime.selection import SelectionConfidenceThresholds
+from src.domain.regime.selection import (
+    SelectionArtifactSnapshot,
+    SelectionConfidenceThresholds,
+)
 from src.infrastructure.regime.json_regime_artifact_repository import (
     JsonRegimeArtifactRepository,
     mapping_artifact_hash,
@@ -239,6 +242,58 @@ def test_mapping_round_trip_preserves_strategy_cash_zero_evidence_and_infinity(t
     assert loaded.entries[model.fingerprints[1]].decision == "cash"
     assert loaded.candidate_assessments[model.fingerprints[1]]["alpha"].effective_episode_starts == ()
     assert loaded.candidate_assessments[model.fingerprints[0]]["alpha"].metrics["profit_factor"] == Decimal("Infinity")
+
+
+def test_snapshot_factory_derives_policy_only_from_mapping_artifact() -> None:
+    model = _model()
+    mapping = _mapping(model)
+    snapshot = SelectionArtifactSnapshot.from_mapping_artifact(
+        mapping, mapping_artifact_hash=mapping_artifact_hash(mapping)
+    )
+    assert snapshot.confidence_thresholds is mapping.selection_confidence_thresholds
+    assert snapshot.model_type == mapping.selection_confidence_thresholds.model_type
+    with pytest.raises(TypeError, match="unexpected keyword"):
+        SelectionArtifactSnapshot.from_mapping_artifact(
+            mapping,
+            mapping_artifact_hash=mapping_artifact_hash(mapping),
+            confidence_thresholds=SelectionConfidenceThresholds(
+                model_type="gmm", gmm_probability_min=0.9, gmm_margin_min=0.8
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "field,bad",
+    [
+        ("regime_model_artifact_hash", "a" * 63),
+        ("regime_model_fingerprint_hash", "A" * 64),
+        ("candidate_definition_hash", "g" * 64),
+        ("candidate_universe_hash", "short"),
+        ("data_provenance_hash", "0X" + "a" * 62),
+    ],
+)
+def test_mapping_rejects_noncanonical_sha_fields(field, bad) -> None:
+    with pytest.raises(ValueError, match=field):
+        replace(_mapping(_model()), **{field: bad})
+
+
+def test_zero_kmeans_threshold_roundtrips_and_links_to_model(tmp_path) -> None:
+    original = _model()
+    model = replace(
+        original,
+        distance_thresholds=(0.0,) + original.distance_thresholds[1:],
+    )
+    mapping = _mapping(model)
+    repo = JsonRegimeArtifactRepository(tmp_path)
+    repo.save_model(model)
+    repo.save_mapping(mapping)
+    loaded = repo.load_mapping(**_mapping_expectations(mapping))
+    assert (
+        loaded.selection_confidence_thresholds.kmeans_max_standardized_distances[
+            model.fingerprints[0]
+        ]
+        == 0.0
+    )
 
 
 def test_load_rejects_compatibility_mismatches_with_clear_messages(tmp_path) -> None:

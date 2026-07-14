@@ -227,8 +227,6 @@ class LocalRuntime:
         snapshot = SelectionArtifactSnapshot.from_mapping_artifact(
             mapping,
             mapping_artifact_hash=mapping_artifact_hash(mapping),
-            model_type=model.config.model_type,
-            confidence_thresholds=thresholds,
         )
         selection_repository = SqliteRegimeSelectionStateRepository(database_path)
         self._regime_model_artifact = model

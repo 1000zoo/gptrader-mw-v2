@@ -80,6 +80,28 @@ def test_kmeans_uses_fingerprint_specific_frozen_distance_bound():
     assert b.state.active_strategy_profile_id == "strategy-y"
 
 
+def test_zero_kmeans_bound_accepts_exact_zero_and_rejects_epsilon():
+    snapshot = _snapshot(
+        model_type="kmeans",
+        thresholds=SelectionConfidenceThresholds(
+            model_type="kmeans",
+            kmeans_max_standardized_distances={"a": 0.0, "b": 2.5},
+        ),
+    )
+    exact = _select(
+        snapshot=snapshot,
+        model_type="kmeans",
+        assignment=_assignment("a", distance=0.0),
+    )
+    epsilon = _select(
+        snapshot=snapshot,
+        model_type="kmeans",
+        assignment=_assignment("a", distance=1e-12),
+    )
+    assert exact.state.active_strategy_profile_id == "strategy-x"
+    assert epsilon.state.active_strategy_profile_id is None
+
+
 def _state(
     *,
     artifact: str = "artifact-v1",

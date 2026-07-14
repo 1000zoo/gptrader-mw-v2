@@ -107,8 +107,6 @@ class SelectionConfidenceThresholds:
             for fingerprint, distance in distances.items():
                 _canonical_text(fingerprint, "KMeans threshold fingerprint")
                 _distance(distance, "KMeans maximum distance")
-                if distance <= 0:
-                    raise ValueError("KMeans maximum distance must be positive")
             if self.gmm_probability_min is not None or self.gmm_margin_min is not None:
                 raise ValueError("KMeans thresholds cannot contain GMM probabilities")
             object.__setattr__(
@@ -203,8 +201,6 @@ class SelectionArtifactSnapshot:
         artifact: object,
         *,
         mapping_artifact_hash: str,
-        model_type: str,
-        confidence_thresholds: SelectionConfidenceThresholds,
         artifact_identity: str | None = None,
     ) -> "SelectionArtifactSnapshot":
         """Build a snapshot from a mapping artifact without infrastructure coupling."""
@@ -215,13 +211,14 @@ class SelectionArtifactSnapshot:
                 fingerprint: entry.strategy_profile_id
                 for fingerprint, entry in entries.items()
             }
+            confidence_thresholds = artifact.selection_confidence_thresholds
         except (AttributeError, TypeError) as error:
             raise ValueError("mapping artifact is incompatible with selection") from error
         return cls(
             model_artifact_hash=model_hash,
             mapping_artifact_hash=mapping_artifact_hash,
             cluster_strategy_mapping=mapping,
-            model_type=model_type,
+            model_type=confidence_thresholds.model_type,
             confidence_thresholds=confidence_thresholds,
             artifact_identity=artifact_identity,
         )
