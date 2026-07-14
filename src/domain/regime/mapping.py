@@ -252,6 +252,33 @@ class BootstrapConfig:
             raise ValueError("bootstrap random_seed must be an integer")
 
 
+def derive_mapping_rejection_reasons(
+    *,
+    thresholds: MappingThresholds,
+    weekly_episode_count: int,
+    distinct_month_count: int,
+    closed_trade_count: int,
+    has_sufficient_consecutive_blocks: bool,
+    corrected_lower_bound: Decimal,
+    observed_mean: Decimal,
+) -> tuple[str, ...]:
+    """Derive the canonical eligibility audit tuple from persisted evidence."""
+    if type(has_sufficient_consecutive_blocks) is not bool:
+        raise ValueError("has_sufficient_consecutive_blocks must be a strict boolean")
+    return tuple(
+        reason
+        for reason, applies in (
+            ("minimum_weekly_episodes", weekly_episode_count < thresholds.minimum_weekly_episodes),
+            ("minimum_distinct_months", distinct_month_count < thresholds.minimum_distinct_months),
+            ("minimum_trade_count", closed_trade_count < thresholds.minimum_trade_count),
+            ("insufficient_consecutive_blocks", not has_sufficient_consecutive_blocks),
+            ("non_positive_corrected_lower_bound", corrected_lower_bound <= 0),
+            ("cash_dominance", observed_mean <= 0),
+        )
+        if applies
+    )
+
+
 def _freeze_metrics(metrics: Mapping[str, Decimal]) -> Mapping[str, Decimal]:
     if tuple(metrics) != MAPPING_METRIC_NAMES:
         raise ValueError("mapping metrics must use the complete canonical order")
@@ -277,6 +304,7 @@ class CandidateMappingAssessment:
     closed_trade_count: int
     observed_mean: Decimal
     corrected_lower_bound: Decimal
+    has_sufficient_consecutive_blocks: bool
     eligible: bool
     metrics: Mapping[str, Decimal]
     rejection_reasons: tuple[str, ...]
@@ -287,14 +315,24 @@ class CandidateMappingAssessment:
         _hash_text(self.candidate_hash, "candidate_hash")
         if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in (self.weekly_episode_count, self.distinct_month_count, self.closed_trade_count)):
             raise ValueError("assessment counts must be nonnegative integers")
-        if not self.observed_mean.is_finite() or not self.corrected_lower_bound.is_finite():
+        if (
+            not isinstance(self.observed_mean, Decimal)
+            or not isinstance(self.corrected_lower_bound, Decimal)
+            or not self.observed_mean.is_finite()
+            or not self.corrected_lower_bound.is_finite()
+        ):
             raise ValueError("assessment returns must be finite")
+        if type(self.has_sufficient_consecutive_blocks) is not bool:
+            raise ValueError("has_sufficient_consecutive_blocks must be a strict boolean")
+        frozen_metrics = _freeze_metrics(self.metrics)
+        if self.observed_mean != frozen_metrics["mean_weekly_return"]:
+            raise ValueError("assessment observed mean must equal its mean weekly return metric")
         if self.eligible == bool(self.rejection_reasons):
             raise ValueError("assessment eligibility and rejection reasons are inconsistent")
         expected_order = tuple(reason for reason in MAPPING_REJECTION_ORDER if reason in self.rejection_reasons)
         if self.rejection_reasons != expected_order:
             raise ValueError("assessment rejection reasons must be unique, known, and ordered")
-        object.__setattr__(self, "metrics", _freeze_metrics(self.metrics))
+        object.__setattr__(self, "metrics", frozen_metrics)
 
 
 @dataclass(frozen=True)
@@ -379,6 +417,18 @@ class StrategyMappingArtifact:
                 raise ValueError("candidate universe must be identical across clusters")
             if any(item.candidate_hash != candidate_hashes[key] for key, item in assessments[cluster].items()):
                 raise ValueError("candidate assessment hash is inconsistent")
+            for item in assessments[cluster].values():
+                derived_reasons = derive_mapping_rejection_reasons(
+                    thresholds=self.thresholds,
+                    weekly_episode_count=item.weekly_episode_count,
+                    distinct_month_count=item.distinct_month_count,
+                    closed_trade_count=item.closed_trade_count,
+                    has_sufficient_consecutive_blocks=item.has_sufficient_consecutive_blocks,
+                    corrected_lower_bound=item.corrected_lower_bound,
+                    observed_mean=item.observed_mean,
+                )
+                if item.rejection_reasons != derived_reasons or item.eligible != (not derived_reasons):
+                    raise ValueError("candidate assessment does not match derived eligibility")
             counts = {(item.weekly_episode_count, item.distinct_month_count) for item in assessments[cluster].values()}
             if len(counts) != 1:
                 raise ValueError("candidate assessment episode counts are inconsistent")

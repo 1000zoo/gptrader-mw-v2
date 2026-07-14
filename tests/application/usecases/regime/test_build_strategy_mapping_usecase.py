@@ -261,6 +261,53 @@ def test_same_candidate_episode_cannot_be_silently_assigned_to_two_clusters() ->
         _build(rows + [duplicate])
 
 
+def test_artifact_rederives_eligibility_from_persisted_evidence_fields() -> None:
+    artifact = _build(_rows({"candidate": [".01"] * 8}, trades_per_week=4, start=datetime(2026, 1, 26, tzinfo=UTC)))
+    cluster = "cluster-a"
+    assessment = artifact.candidate_assessments[cluster]["candidate"]
+    forged = replace(
+        assessment,
+        weekly_episode_count=1,
+        distinct_month_count=1,
+        closed_trade_count=0,
+    )
+    forged_entry = replace(
+        artifact.entries[cluster],
+        weekly_episode_count=1,
+        distinct_month_count=1,
+        closed_trade_count=0,
+    )
+    with pytest.raises(ValueError, match="derived eligibility"):
+        replace(
+            artifact,
+            entries={cluster: forged_entry},
+            candidate_assessments={cluster: {"candidate": forged}},
+        )
+
+
+def test_assessment_observed_mean_must_equal_metric_mean() -> None:
+    artifact = _build(_rows({"candidate": [".01"] * 8}, trades_per_week=4, start=datetime(2026, 1, 26, tzinfo=UTC)))
+    assessment = artifact.candidate_assessments["cluster-a"]["candidate"]
+    with pytest.raises(ValueError, match="observed mean"):
+        replace(assessment, observed_mean=assessment.observed_mean + Decimal(".001"))
+
+
+def test_consecutive_block_flag_is_strict_and_bound_to_rejection_reason() -> None:
+    artifact = _build(_rows({"candidate": [".01"] * 8}, trades_per_week=4, start=datetime(2026, 1, 26, tzinfo=UTC)))
+    cluster = "cluster-a"
+    assessment = artifact.candidate_assessments[cluster]["candidate"]
+    with pytest.raises(ValueError, match="strict boolean"):
+        replace(assessment, has_sufficient_consecutive_blocks=1)
+    forged = replace(assessment, has_sufficient_consecutive_blocks=False)
+    with pytest.raises(ValueError, match="derived eligibility"):
+        replace(artifact, candidate_assessments={cluster: {"candidate": forged}})
+
+
+def test_production_artifact_can_be_reconstructed_without_validation_drift() -> None:
+    artifact = _build(_rows({"candidate": [".01"] * 8}, trades_per_week=4, start=datetime(2026, 1, 26, tzinfo=UTC)))
+    assert replace(artifact) == artifact
+
+
 def test_task5_no_provider_rows_are_consumed_with_null_feature_identity(monkeypatch) -> None:
     import scripts.chart_regime_strategy_mapping as task5
     from scripts.scheduler_driven_scalping_backtest import SchedulerBacktestCandidate, StrategyCandidateSpec

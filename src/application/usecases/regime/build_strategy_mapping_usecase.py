@@ -18,6 +18,7 @@ from src.domain.regime.mapping import (
     StrategyMappingArtifact,
     StrategyMappingEntry,
     WeeklyStrategyEvidence,
+    derive_mapping_rejection_reasons,
 )
 
 
@@ -80,20 +81,23 @@ class BuildStrategyMappingUseCase:
                 episode_count = len(rows)
                 months = len({(row.episode_start_at.year, row.episode_start_at.month) for row in rows})
                 trades = sum(len(row.trades) for row in rows)
-                reasons = tuple(reason for reason, applies in (
-                    ("minimum_weekly_episodes", episode_count < thresholds.minimum_weekly_episodes),
-                    ("minimum_distinct_months", months < thresholds.minimum_distinct_months),
-                    ("minimum_trade_count", trades < thresholds.minimum_trade_count),
-                    ("insufficient_consecutive_blocks", not sufficient_blocks),
-                    ("non_positive_corrected_lower_bound", lcbs[candidate] <= 0),
-                    ("cash_dominance", metrics["mean_weekly_return"] <= 0),
-                ) if applies)
+                reasons = derive_mapping_rejection_reasons(
+                    thresholds=thresholds,
+                    weekly_episode_count=episode_count,
+                    distinct_month_count=months,
+                    closed_trade_count=trades,
+                    has_sufficient_consecutive_blocks=sufficient_blocks,
+                    corrected_lower_bound=lcbs[candidate],
+                    observed_mean=metrics["mean_weekly_return"],
+                )
                 assessments[candidate] = CandidateMappingAssessment(
                     cluster_fingerprint=cluster, candidate_id=candidate,
                     candidate_hash=candidate_hashes[candidate],
                     weekly_episode_count=episode_count, distinct_month_count=months,
                     closed_trade_count=trades, observed_mean=metrics["mean_weekly_return"],
-                    corrected_lower_bound=lcbs[candidate], eligible=not reasons,
+                    corrected_lower_bound=lcbs[candidate],
+                    has_sufficient_consecutive_blocks=sufficient_blocks,
+                    eligible=not reasons,
                     metrics=metrics, rejection_reasons=reasons,
                 )
             all_assessments[cluster] = assessments

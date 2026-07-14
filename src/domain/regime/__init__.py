@@ -20,6 +20,7 @@ from src.domain.regime.mapping import (
     StrategyMappingArtifact,
     StrategyMappingEntry,
     WeeklyStrategyEvidence,
+    derive_mapping_rejection_reasons,
 )
 
 __all__ = [
@@ -40,4 +41,5 @@ __all__ = [
     "StrategyMappingArtifact",
     "StrategyMappingEntry",
     "WeeklyStrategyEvidence",
+    "derive_mapping_rejection_reasons",
 ]
