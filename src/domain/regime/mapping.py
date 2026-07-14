@@ -470,9 +470,9 @@ class StrategyMappingArtifact:
             raise ValueError("candidate hashes must cover a nonempty candidate universe")
         for value in candidate_hashes.values():
             _hash_text(value, "candidate_hash")
-        if self.candidate_universe_hash != _canonical_hash({"candidate_ids": tuple(sorted(candidate_hashes))}):
+        if self.candidate_universe_hash != candidate_universe_hash(candidate_hashes):
             raise ValueError("candidate universe hash is inconsistent")
-        if self.candidate_definition_hash != _canonical_hash({"candidate_hashes": dict(sorted(candidate_hashes.items()))}):
+        if self.candidate_definition_hash != candidate_definition_hash(candidate_hashes):
             raise ValueError("candidate definition hash is inconsistent")
         for cluster in self.cluster_fingerprints:
             if entries[cluster].cluster_fingerprint != cluster or not assessments[cluster]:
@@ -532,3 +532,24 @@ class StrategyMappingArtifact:
 def _canonical_hash(value: object) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def candidate_universe_hash(candidate_ids: Mapping[str, object] | tuple[str, ...] | list[str]) -> str:
+    ids = tuple(candidate_ids)
+    if any(not isinstance(item, str) or not item for item in ids):
+        raise ValueError("candidate ids must be nonempty canonical strings")
+    if not ids or len(set(ids)) != len(ids):
+        raise ValueError("candidate ids must be nonempty and unique")
+    for item in ids:
+        _text(item, "candidate id")
+    return _canonical_hash({"candidate_ids": tuple(sorted(ids))})
+
+
+def candidate_definition_hash(candidate_hashes: Mapping[str, str]) -> str:
+    normalized = dict(candidate_hashes)
+    if not normalized:
+        raise ValueError("candidate hashes cannot be empty")
+    for candidate_id, value in normalized.items():
+        _text(candidate_id, "candidate id")
+        _hash_text(value, "candidate hash")
+    return _canonical_hash({"candidate_hashes": dict(sorted(normalized.items()))})

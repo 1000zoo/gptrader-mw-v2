@@ -79,7 +79,11 @@ from src.domain.ports.regime_selection_state_repository_port import ConcurrentSe
 from src.domain.regime.model import ClusterAssignment, RegimeModelArtifact  # noqa: E402
 from src.domain.regime.selection import SelectionArtifactSnapshot  # noqa: E402
 from src.domain.regime.temporal import is_regime_boundary  # noqa: E402
-from src.domain.regime.mapping import StrategyMappingArtifact  # noqa: E402
+from src.domain.regime.mapping import (  # noqa: E402
+    StrategyMappingArtifact,
+    candidate_definition_hash as mapping_candidate_definition_hash,
+    candidate_universe_hash as mapping_candidate_universe_hash,
+)
 from src.infrastructure.regime import SklearnRegimeModel  # noqa: E402
 from src.infrastructure.regime.json_regime_artifact_repository import (  # noqa: E402
     mapping_artifact_hash,
@@ -988,7 +992,7 @@ class _RegimeCandidateBundle:
     candidate: SchedulerBacktestCandidate
     scheduler: TradeScheduler
     guard: DefensiveGuard
-    definition_hash: str
+    audited_candidate_definition_hash: str
     guard_hash: str
     signal_attempts: int = 0
     skipped_by_guard: int = 0
@@ -1066,6 +1070,7 @@ def _build_regime_bundle(
     order_execution: BacktestOrderExecution,
     feature_provider,
     initial_equity: Decimal,
+    audited_candidate_definition_hash: str,
 ) -> _RegimeCandidateBundle:
     generator = GuardedSignalGenerator(
         inner=CompositeSignalGenerator(build_strategies(candidate)),
@@ -1102,7 +1107,7 @@ def _build_regime_bundle(
         candidate=candidate,
         scheduler=scheduler,
         guard=DefensiveGuard(candidate.guard, initial_equity=initial_equity),
-        definition_hash=candidate_definition_hash(payload),
+        audited_candidate_definition_hash=audited_candidate_definition_hash,
         guard_hash=candidate_definition_hash(payload["guard"]),
     )
 
@@ -1157,6 +1162,8 @@ def run_scheduler_driven_regime_backtest(
     if actual_mode:
         if model_artifact is None or mapping_artifact is None or assignment_provider is not None or artifact_snapshot is not None:
             raise ValueError("actual artifact mode requires exactly model_artifact and mapping_artifact")
+        if model_artifact.symbol != symbol.pair:
+            raise ValueError("regime model symbol must match replay symbol")
         validate_model_mapping_artifact_pair(model_artifact, mapping_artifact)
         if model_artifact.training_end_at > start_at:
             raise ValueError("regime model training_end_at cannot follow replay start_at")
@@ -1167,6 +1174,14 @@ def run_scheduler_driven_regime_backtest(
             for episode_start in assessment.effective_episode_starts
         ):
             raise ValueError("mapping evidence episode overlaps replay start_at")
+        minimum_mapping_start = model_artifact.training_end_at + timedelta(days=7)
+        if any(
+            episode_start < minimum_mapping_start
+            for cluster_assessments in mapping_artifact.candidate_assessments.values()
+            for assessment in cluster_assessments.values()
+            for episode_start in assessment.effective_episode_starts
+        ):
+            raise ValueError("mapping evidence violates the model-fit purge interval")
         artifact_snapshot = SelectionArtifactSnapshot.from_mapping_artifact(
             mapping_artifact,
             mapping_artifact_hash=mapping_artifact_hash(mapping_artifact),
@@ -1189,6 +1204,14 @@ def run_scheduler_driven_regime_backtest(
                 candidate, symbol=symbol, initial_equity=initial_equity
             ):
                 raise ValueError(f"candidate definition hash mismatch: {candidate_id}")
+        audited_candidate_hashes = dict(sorted(mapping_artifact.candidate_hashes.items()))
+    else:
+        audited_candidate_hashes = {
+            candidate_id: _audited_candidate_hash(
+                candidate, symbol=symbol, initial_equity=initial_equity
+            )
+            for candidate_id, candidate in sorted(by_id.items())
+        }
     assert artifact_snapshot is not None
     mapped = {item for item in artifact_snapshot.cluster_strategy_mapping.values() if item is not None}
     if not mapped.issubset(by_id):
@@ -1222,6 +1245,7 @@ def run_scheduler_driven_regime_backtest(
             order_execution=order_execution,
             feature_provider=feature_provider,
             initial_equity=initial_equity,
+            audited_candidate_definition_hash=audited_candidate_hashes[item.candidate_id],
         )
         for item in resolved
     }
@@ -1229,6 +1253,7 @@ def run_scheduler_driven_regime_backtest(
     selection_scheduler = RegimeSelectionScheduler(
         SelectStrategyUseCase(), selection_repository, now=lambda: start_at
     )
+    opened_times = tuple(candle.opened_at for candle in selected.candles)
     closed_times = tuple(candle.closed_at for candle in selected.candles)
     start_index = bisect_left(closed_times, start_at)
     if start_index < required_context - 1:
@@ -1249,10 +1274,9 @@ def run_scheduler_driven_regime_backtest(
 
     def assignment_at(boundary_at: datetime) -> ClusterAssignment:
         window_start = boundary_at - timedelta(days=7)
-        window = tuple(
-            candle for candle in selected.candles
-            if window_start <= candle.opened_at and candle.closed_at <= boundary_at
-        )
+        left = bisect_left(opened_times, window_start)
+        right = bisect_left(opened_times, boundary_at)
+        window = selected.candles[left:right]
         if actual_mode:
             vector = ChartFeatureExtractor().extract(window, boundary_at)
             return SklearnRegimeModel().assign(model_artifact, (vector,))[0]
@@ -1357,7 +1381,7 @@ def run_scheduler_driven_regime_backtest(
                                 margin=(entry.average_price * entry.executed_quantity) / bundle.candidate.leverage,
                                 opened_at=boundary,
                                 owner_strategy_profile_id=profile,
-                                owner_candidate_definition_hash=bundle.definition_hash,
+                                owner_candidate_definition_hash=bundle.audited_candidate_definition_hash,
                                 owner_guard_hash=bundle.guard_hash,
                                 owner_leverage=bundle.candidate.leverage,
                                 owner_max_holding_bars=bundle.candidate.max_holding_bars,
@@ -1408,17 +1432,8 @@ def run_scheduler_driven_regime_backtest(
     gross = sum((item.gross_pnl for item in trades), Decimal("0"))
     net = sum((item.net_pnl for item in trades), Decimal("0"))
     fees = sum((item.fee_paid for item in trades), Decimal("0"))
-    manifest = candidate_manifest(list(resolved))
-    reported_candidate_hashes = (
-        dict(sorted(mapping_artifact.candidate_hashes.items()))
-        if actual_mode
-        else {key: bundles[key].definition_hash for key in sorted(bundles)}
-    )
-    reported_universe_hash = (
-        mapping_artifact.candidate_universe_hash
-        if actual_mode
-        else manifest["candidate_universe_hash"]
-    )
+    reported_definition_hash = mapping_candidate_definition_hash(audited_candidate_hashes)
+    reported_universe_hash = mapping_candidate_universe_hash(audited_candidate_hashes)
     return {
         "engine": "scheduler_driven_regime_selection",
         "symbol": symbol.pair,
@@ -1442,7 +1457,8 @@ def run_scheduler_driven_regime_backtest(
         "cash_transition_count": transition_counts["cash"],
         "artifact_transition_count": transition_counts["artifact"],
         "actual_turnover_notional": str(turnover),
-        "candidate_definition_hashes": reported_candidate_hashes,
+        "candidate_definition_hashes": audited_candidate_hashes,
+        "candidate_definition_hash": reported_definition_hash,
         "candidate_universe_hash": reported_universe_hash,
         "model_artifact_hash": artifact_snapshot.model_artifact_hash,
         "mapping_artifact_hash": artifact_snapshot.mapping_artifact_hash,
@@ -1454,7 +1470,10 @@ def run_scheduler_driven_regime_backtest(
         "feature_provenance": getattr(feature_provider, "feature_provenance", {}),
         "required_warmup_candles": required_context,
         "assignment_source": "artifact" if actual_mode else "scripted",
-        "signal_discontinuity_count": 0,
+        "signal_discontinuity_count": (
+            transition_counts["strategy"] + transition_counts["cash"]
+        ),
+        "signal_discontinuity_definition": "active_signal_generator_identity_changes_v1",
     }
 
 

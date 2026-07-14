@@ -126,13 +126,19 @@ def _actual_artifact_pair(candidates):
         )
         for candidate in candidates
     }
-    assessments = {
-        cluster: {
-            candidate_id: replace(item, candidate_hash=hashes[candidate_id])
-            for candidate_id, item in rows.items()
+    first_cluster = model.fingerprints[0]
+    winner = mapping.candidate_assessments[first_cluster]["alpha"]
+    winner_entry = mapping.entries[first_cluster]
+    assessments = {}
+    entries = {}
+    for cluster, rows in mapping.candidate_assessments.items():
+        assessments[cluster] = {
+            "alpha": replace(
+                winner, cluster_fingerprint=cluster, candidate_hash=hashes["alpha"]
+            ),
+            "beta": replace(rows["beta"], candidate_hash=hashes["beta"]),
         }
-        for cluster, rows in mapping.candidate_assessments.items()
-    }
+        entries[cluster] = replace(winner_entry, cluster_fingerprint=cluster)
     mapping = replace(
         mapping,
         candidate_hashes=hashes,
@@ -143,6 +149,7 @@ def _actual_artifact_pair(candidates):
             {"candidate_hashes": dict(sorted(hashes.items()))}
         ),
         candidate_assessments=assessments,
+        entries=entries,
     )
     return model, mapping
 
@@ -174,6 +181,8 @@ def test_regime_replay_confirms_cluster_before_switching_strategy(monkeypatch) -
     assert result["selection_events"][1]["active_strategy_profile_id"] == "strategy-x"
     assert result["selection_events"][-1]["active_strategy_profile_id"] == "strategy-y"
     assert provider.calls == [start, start + timedelta(hours=4), start + timedelta(hours=8)]
+    assert result["signal_discontinuity_count"] == 1
+    assert result["signal_discontinuity_definition"] == "active_signal_generator_identity_changes_v1"
 
 
 def test_regime_replay_cash_blocks_entries_but_owner_position_still_exits(monkeypatch) -> None:
@@ -202,6 +211,7 @@ def test_regime_replay_cash_blocks_entries_but_owner_position_still_exits(monkey
     assert result["trades"][0]["exit_reason"] == "take_profit"
     assert result["trades"][0]["owner_strategy_profile_id"] == "strategy-x"
     assert result["transition_counts"]["cash"] == 1
+    assert result["signal_discontinuity_count"] == 1
 
 
 def test_regime_replay_same_strategy_cluster_transition_reuses_bundle(monkeypatch) -> None:
@@ -232,6 +242,7 @@ def test_regime_replay_same_strategy_cluster_transition_reuses_bundle(monkeypatc
     assert builds == ["strategy-x"]
     assert result["transition_counts"]["cluster"] == 1
     assert result["transition_counts"]["strategy"] == 0
+    assert result["signal_discontinuity_count"] == 0
 
 
 def test_regime_replay_requires_start_on_four_hour_boundary() -> None:
@@ -321,11 +332,13 @@ def test_regime_replay_actual_artifacts_extract_exact_prior_week_and_assign(
 ) -> None:
     import scripts.scheduler_driven_scalping_backtest as module
 
-    class AlwaysWait:
+    class AlwaysLong:
         def evaluate(self, context):
-            return StrategyResult("wait", Signal.wait())
+            return StrategyResult(
+                "long", Signal(SignalDirection.LONG, Decimal("1"))
+            )
 
-    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysWait(),))
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysLong(),))
     candidates = (_regime_candidate("alpha"), _regime_candidate("beta"))
     model, mapping = _actual_artifact_pair(candidates)
     start = datetime(2026, 7, 6, tzinfo=timezone.utc)
@@ -346,16 +359,31 @@ def test_regime_replay_actual_artifacts_extract_exact_prior_week_and_assign(
     monkeypatch.setattr(module.ChartFeatureExtractor, "extract", spy_extract)
     monkeypatch.setattr(module.SklearnRegimeModel, "assign", spy_assign)
     result = run_scheduler_driven_regime_backtest(
-        _regime_market(start, hours=1, context_minutes=7 * 24 * 60, vary=True),
-        start_at=start, end_at=start + timedelta(hours=1), candidates=candidates,
+        _regime_market(start, hours=5, context_minutes=7 * 24 * 60, vary=True),
+        start_at=start, end_at=start + timedelta(hours=5), candidates=candidates,
         model=model, mapping=mapping,
     )
 
-    assert extracted == [(10080, start - timedelta(days=7), start, start)]
-    assert len(assigned) == 1
+    assert extracted == [
+        (10080, start - timedelta(days=7), start, start),
+        (
+            10080,
+            start - timedelta(days=7) + timedelta(hours=4),
+            start + timedelta(hours=4),
+            start + timedelta(hours=4),
+        ),
+    ]
+    assert len(assigned) == 2
     assert result["assignment_source"] == "artifact"
     assert result["selection_events"][0]["boundary_at"] == start.isoformat()
     assert result["candidate_definition_hashes"] == dict(mapping.candidate_hashes)
+    assert result["trade_count"] == 1
+    trade = result["trades"][0]
+    assert trade["owner_candidate_definition_hash"] == result[
+        "candidate_definition_hashes"
+    ][trade["owner_strategy_profile_id"]]
+    assert result["candidate_universe_hash"] == mapping.candidate_universe_hash
+    assert result["candidate_definition_hash"] == mapping.candidate_definition_hash
 
 
 def test_regime_replay_rejects_future_fitted_model() -> None:
@@ -390,6 +418,50 @@ def test_regime_replay_rejects_mapping_episode_overlapping_start() -> None:
         )
 
 
+def test_regime_replay_accepts_exact_model_mapping_purge_boundary() -> None:
+    candidates = (_regime_candidate("alpha"), _regime_candidate("beta"))
+    model, mapping = _actual_artifact_pair(candidates)
+    assert min(
+        start
+        for rows in mapping.candidate_assessments.values()
+        for assessment in rows.values()
+        for start in assessment.effective_episode_starts
+    ) == model.training_end_at + timedelta(days=7)
+
+
+def test_regime_replay_rejects_mapping_one_minute_short_of_purge() -> None:
+    from tests.infrastructure.regime.test_json_regime_artifact_repository import _mapping, _model
+
+    start = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    model = replace(
+        _model(), training_end_at=datetime(2025, 12, 29, 0, 1, tzinfo=timezone.utc)
+    )
+    mapping = _mapping(model)
+    candidates = (_regime_candidate("alpha"), _regime_candidate("beta"))
+
+    with pytest.raises(ValueError, match="purge interval"):
+        run_scheduler_driven_regime_backtest(
+            _regime_market(start, hours=1), start_at=start,
+            end_at=start + timedelta(hours=1), candidates=candidates,
+            model=model, mapping=mapping,
+        )
+
+
+def test_regime_replay_rejects_model_symbol_before_replay_work() -> None:
+    from tests.infrastructure.regime.test_json_regime_artifact_repository import _mapping, _model
+
+    start = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    model = replace(_model(), symbol="ETHUSDT")
+    mapping = _mapping(model)
+    with pytest.raises(ValueError, match="model symbol"):
+        run_scheduler_driven_regime_backtest(
+            _regime_market(start, hours=1), start_at=start,
+            end_at=start + timedelta(hours=1),
+            candidates=(_regime_candidate("alpha"), _regime_candidate("beta")),
+            model=model, mapping=mapping,
+        )
+
+
 def test_regime_replay_rejects_candidate_hash_mismatch() -> None:
     candidates = (_regime_candidate("alpha"), _regime_candidate("beta"))
     model, mapping = _actual_artifact_pair(candidates)
@@ -402,6 +474,29 @@ def test_regime_replay_rejects_candidate_hash_mismatch() -> None:
             end_at=start + timedelta(hours=1), candidates=(changed, candidates[1]),
             model=model, mapping=mapping,
         )
+
+
+def test_regime_replay_candidate_audit_hash_fields_match_across_modes(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    class AlwaysWait:
+        def evaluate(self, context):
+            return StrategyResult("wait", Signal.wait())
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysWait(),))
+    candidates = (_regime_candidate("alpha"), _regime_candidate("beta"))
+    _, mapping = _actual_artifact_pair(candidates)
+    start = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    scripted = run_scheduler_driven_regime_backtest(
+        _regime_market(start, hours=1), start_at=start,
+        end_at=start + timedelta(hours=1), candidates=candidates,
+        model=_ScriptedAssignments({start: "cluster"}),
+        mapping=_selection_snapshot({"cluster": "alpha"}),
+    )
+
+    assert scripted["candidate_definition_hashes"] == dict(mapping.candidate_hashes)
+    assert scripted["candidate_universe_hash"] == mapping.candidate_universe_hash
+    assert scripted["candidate_definition_hash"] == mapping.candidate_definition_hash
 
 
 def test_deferred_strategy_registry_is_complete_and_evidence_exists() -> None:
