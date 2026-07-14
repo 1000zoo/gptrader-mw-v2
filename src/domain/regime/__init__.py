@@ -24,6 +24,11 @@ from src.domain.regime.mapping import (
     episode_months_touched,
     has_sufficient_calendar_block_coverage,
 )
+from src.domain.regime.selection import (
+    RegimeSelectionState,
+    SelectStrategyResult,
+    SelectionEventType,
+)
 
 __all__ = [
     "CHART_FEATURE_REGISTRY_V1",
@@ -46,4 +51,7 @@ __all__ = [
     "derive_mapping_rejection_reasons",
     "episode_months_touched",
     "has_sufficient_calendar_block_coverage",
+    "RegimeSelectionState",
+    "SelectStrategyResult",
+    "SelectionEventType",
 ]
