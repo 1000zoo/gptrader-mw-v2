@@ -149,7 +149,9 @@ class RegimeSelectionState:
         _nonnegative_integer(self.state_version, "state_version")
         if type(self.new_entries_enabled) is not bool:
             raise ValueError("new_entries_enabled must be a strict boolean")
-        if not is_regime_boundary(self.last_boundary_at):
+        if not isinstance(self.last_boundary_at, datetime) or not is_regime_boundary(
+            self.last_boundary_at
+        ):
             raise ValueError("last_boundary_at must be a four-hour UTC boundary")
 
         has_pending = self.pending_confirmation_count > 0

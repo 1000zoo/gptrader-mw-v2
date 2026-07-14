@@ -471,6 +471,23 @@ def test_invalid_boundary_type_fails_with_value_error(boundary):
         _select(boundary=boundary)
 
 
+@pytest.mark.parametrize("boundary", ["2026-07-13T00:00:00Z", 123, None])
+def test_persisted_selection_state_rejects_invalid_boundary_type(boundary):
+    with pytest.raises(ValueError, match="last_boundary_at must be a four-hour UTC boundary"):
+        RegimeSelectionState(
+            symbol="BTCUSDT",
+            artifact_version=_snapshot().artifact_identity,
+            current_cluster_fingerprint="a",
+            active_strategy_profile_id="strategy-x",
+            pending_cluster_fingerprint=None,
+            pending_confirmation_count=0,
+            consecutive_low_confidence_count=0,
+            new_entries_enabled=True,
+            last_boundary_at=boundary,
+            state_version=1,
+        )
+
+
 @pytest.mark.parametrize(
     "values",
     [
