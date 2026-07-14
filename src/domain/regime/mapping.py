@@ -240,6 +240,8 @@ class BootstrapConfig:
     confidence: Decimal = Decimal("0.95")
     resamples: int = 2000
     random_seed: int = 20260714
+    bootstrap_missingness_policy: str = "common_uniform_rank_coupled_calendar_blocks_v1"
+    insufficient_evidence_lcb_policy: str = "zero_nonselectable_v1"
 
     def __post_init__(self) -> None:
         if self.block_length_weeks != 2:
@@ -250,6 +252,28 @@ class BootstrapConfig:
             raise ValueError("bootstrap resamples must be positive")
         if not isinstance(self.random_seed, int) or isinstance(self.random_seed, bool):
             raise ValueError("bootstrap random_seed must be an integer")
+        if self.bootstrap_missingness_policy != "common_uniform_rank_coupled_calendar_blocks_v1":
+            raise ValueError("unsupported bootstrap missingness policy")
+        if self.insufficient_evidence_lcb_policy != "zero_nonselectable_v1":
+            raise ValueError("unsupported insufficient-evidence LCB policy")
+
+
+def episode_months_touched(starts: tuple[datetime, ...]) -> frozenset[tuple[int, int]]:
+    """Return calendar months intersecting exact half-open seven-day episodes."""
+    months: set[tuple[int, int]] = set()
+    for start in starts:
+        if start.tzinfo is not timezone.utc:
+            raise ValueError("effective episode starts must use canonical UTC")
+        end = start + timedelta(days=7)
+        cursor = datetime(start.year, start.month, 1, tzinfo=timezone.utc)
+        while cursor < end:
+            months.add((cursor.year, cursor.month))
+            cursor = (
+                datetime(cursor.year + 1, 1, 1, tzinfo=timezone.utc)
+                if cursor.month == 12
+                else datetime(cursor.year, cursor.month + 1, 1, tzinfo=timezone.utc)
+            )
+    return frozenset(months)
 
 
 def derive_mapping_rejection_reasons(
@@ -302,6 +326,7 @@ class CandidateMappingAssessment:
     weekly_episode_count: int
     distinct_month_count: int
     closed_trade_count: int
+    effective_episode_starts: tuple[datetime, ...]
     observed_mean: Decimal
     corrected_lower_bound: Decimal
     has_sufficient_consecutive_blocks: bool
@@ -315,6 +340,17 @@ class CandidateMappingAssessment:
         _hash_text(self.candidate_hash, "candidate_hash")
         if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in (self.weekly_episode_count, self.distinct_month_count, self.closed_trade_count)):
             raise ValueError("assessment counts must be nonnegative integers")
+        starts = tuple(self.effective_episode_starts)
+        if starts != tuple(sorted(set(starts))) or any(
+            start.tzinfo is not timezone.utc or start.weekday() != 0 or start.time() != datetime.min.time()
+            for start in starts
+        ):
+            raise ValueError("effective episode starts must be unique sorted canonical Mondays")
+        if self.weekly_episode_count != len(starts):
+            raise ValueError("weekly episode count must match effective episode starts")
+        if self.distinct_month_count != len(episode_months_touched(starts)):
+            raise ValueError("distinct month count must match touched episode months")
+        object.__setattr__(self, "effective_episode_starts", starts)
         if (
             not isinstance(self.observed_mean, Decimal)
             or not isinstance(self.corrected_lower_bound, Decimal)
@@ -374,6 +410,7 @@ class StrategyMappingArtifact:
     candidate_universe_hash: str
     candidate_hashes: Mapping[str, str]
     data_provenance_hash: str
+    common_initial_equity: Decimal
     cluster_fingerprints: tuple[str, ...]
     entries: Mapping[str, StrategyMappingEntry]
     candidate_assessments: Mapping[str, Mapping[str, CandidateMappingAssessment]]
@@ -388,6 +425,8 @@ class StrategyMappingArtifact:
             _text(getattr(self, field), field)
         if self.profit_factor_zero_loss_policy != "positive_infinity_when_profit_positive_else_zero":
             raise ValueError("unsupported profit factor zero-loss policy")
+        if not isinstance(self.common_initial_equity, Decimal) or not self.common_initial_equity.is_finite() or self.common_initial_equity <= 0:
+            raise ValueError("common initial equity must be a finite positive Decimal")
         if not self.cluster_fingerprints or tuple(sorted(set(self.cluster_fingerprints))) != self.cluster_fingerprints:
             raise ValueError("cluster fingerprints must be unique, nonempty, and sorted")
         entries = dict(self.entries)
@@ -429,9 +468,6 @@ class StrategyMappingArtifact:
                 )
                 if item.rejection_reasons != derived_reasons or item.eligible != (not derived_reasons):
                     raise ValueError("candidate assessment does not match derived eligibility")
-            counts = {(item.weekly_episode_count, item.distinct_month_count) for item in assessments[cluster].values()}
-            if len(counts) != 1:
-                raise ValueError("candidate assessment episode counts are inconsistent")
             eligible = [item for item in assessments[cluster].values() if item.eligible]
             entry = entries[cluster]
             if eligible:
@@ -446,12 +482,12 @@ class StrategyMappingArtifact:
                 ):
                     raise ValueError("strategy entry does not match the deterministic eligible winner")
             else:
-                first = next(iter(assessments[cluster].values()))
                 reasons = tuple(reason for reason in MAPPING_REJECTION_ORDER if any(reason in item.rejection_reasons for item in assessments[cluster].values()))
+                cluster_starts = tuple(sorted({start for item in assessments[cluster].values() for start in item.effective_episode_starts}))
                 if not (
                     entry.decision == "cash" and entry.strategy_profile_id is None
-                    and entry.weekly_episode_count == first.weekly_episode_count
-                    and entry.distinct_month_count == first.distinct_month_count
+                    and entry.weekly_episode_count == len(cluster_starts)
+                    and entry.distinct_month_count == len(episode_months_touched(cluster_starts))
                     and entry.closed_trade_count == 0 and entry.corrected_lower_bound == 0
                     and entry.metrics == {name: Decimal(0) for name in MAPPING_METRIC_NAMES}
                     and entry.rejection_reasons == reasons

@@ -11,7 +11,7 @@ from src.application.usecases.regime.build_strategy_mapping_usecase import (
     BuildStrategyMappingUseCase,
     corrected_lower_bound,
 )
-from src.domain.regime.mapping import WeeklyStrategyEvidence
+from src.domain.regime.mapping import WeeklyStrategyEvidence, episode_months_touched
 
 
 UTC = timezone.utc
@@ -129,11 +129,19 @@ def test_metrics_use_documented_conservative_rules() -> None:
     assert metrics["return_without_best_episode"] == sum(map(Decimal, values[:-1])) / Decimal(8)
 
 
+def test_expected_shortfall_uses_exact_worst_ceil_ten_percent_not_cutoff_ties() -> None:
+    values = ["-.20", "-.10", "-.10", "-.10"] + [".01"] * 16
+    artifact = _build(_rows({"candidate": values}, trades_per_week=2))
+    metrics = artifact.candidate_assessments["cluster-a"]["candidate"].metrics
+    assert metrics["conservative_10th_percentile"] == Decimal("-.10")
+    assert metrics["expected_shortfall"] == Decimal("-.15")
+
+
 def test_exact_minimum_episode_month_and_trade_boundaries_are_eligible() -> None:
     rows = _rows(
         {"boundary": [".01"] * 8},
         trades_per_week=4,
-        start=datetime(2026, 1, 26, tzinfo=UTC),
+        start=datetime(2026, 1, 5, tzinfo=UTC),
     )
     artifact = _build(rows)
     assessment = artifact.candidate_assessments["cluster-a"]["boundary"]
@@ -142,6 +150,17 @@ def test_exact_minimum_episode_month_and_trade_boundaries_are_eligible() -> None
     assert assessment.closed_trade_count == 32
     assert assessment.eligible
     assert artifact.entries["cluster-a"].decision == "strategy"
+
+
+def test_touched_month_helper_crosses_year_and_includes_partial_end_month() -> None:
+    assert episode_months_touched((datetime(2025, 12, 29, tzinfo=UTC),)) == {
+        (2025, 12),
+        (2026, 1),
+    }
+    assert episode_months_touched((datetime(2026, 2, 23, tzinfo=UTC),)) == {
+        (2026, 2),
+        (2026, 3),
+    }
 
 
 def test_command_hash_expectations_reject_silent_merges() -> None:
@@ -158,9 +177,38 @@ def test_command_hash_expectations_reject_silent_merges() -> None:
 def test_winner_uses_lcb_then_median_mean_and_candidate_id(monkeypatch) -> None:
     import src.application.usecases.regime.build_strategy_mapping_usecase as module
 
-    monkeypatch.setattr(module, "_family_corrected_lower_bounds", lambda *a, **k: {"a": Decimal(".01"), "b": Decimal(".01")})
+    monkeypatch.setattr(module, "_rank_coupled_calendar_family_corrected_lower_bounds", lambda *a, **k: {"a": Decimal(".01"), "b": Decimal(".01")})
     artifact = _build(_rows({"b": [".02"] * 12, "a": [".02"] * 12}, trades_per_week=3))
     assert artifact.entries["cluster-a"].strategy_profile_id == "a"
+
+
+def test_winner_priority_is_lcb_then_median_then_mean_then_id(monkeypatch) -> None:
+    import src.application.usecases.regime.build_strategy_mapping_usecase as module
+
+    monkeypatch.setattr(module, "_rank_coupled_calendar_family_corrected_lower_bounds", lambda *a, **k: {"low-metrics": Decimal(".02"), "high-metrics": Decimal(".01")})
+    artifact = _build(_rows({"low-metrics": [".01"] * 12, "high-metrics": [".03"] * 12}, trades_per_week=3))
+    assert artifact.entries["cluster-a"].strategy_profile_id == "low-metrics"
+
+    monkeypatch.setattr(module, "_rank_coupled_calendar_family_corrected_lower_bounds", lambda *a, **k: {"high-median": Decimal(".01"), "low-median": Decimal(".01")})
+    artifact = _build(_rows({"high-median": [".02"] * 12, "low-median": [".01"] * 12}, trades_per_week=3))
+    assert artifact.entries["cluster-a"].strategy_profile_id == "high-median"
+
+    monkeypatch.setattr(module, "_rank_coupled_calendar_family_corrected_lower_bounds", lambda *a, **k: {"high-mean": Decimal(".01"), "low-mean": Decimal(".01")})
+    artifact = _build(_rows({"high-mean": [".02"] * 11 + [".14"], "low-mean": [".02"] * 12}, trades_per_week=3))
+    assert artifact.entries["cluster-a"].strategy_profile_id == "high-mean"
+
+    monkeypatch.setattr(module, "_rank_coupled_calendar_family_corrected_lower_bounds", lambda *a, **k: {"a": Decimal(".01"), "b": Decimal(".01")})
+    artifact = _build(_rows({"b": [".02"] * 12, "a": [".02"] * 12}, trades_per_week=3))
+    assert artifact.entries["cluster-a"].strategy_profile_id == "a"
+
+
+def test_identical_block_sets_share_rank_coupled_calendar_selections() -> None:
+    from src.application.usecases.regime.build_strategy_mapping_usecase import _rank_coupled_selected_starts
+
+    uniforms = (0.0, 0.24, 0.5, 0.999999)
+    first = _rank_coupled_selected_starts((0, 1, 2, 3), uniforms, 4)
+    second = _rank_coupled_selected_starts((0, 1, 2, 3), uniforms, 4)
+    assert first == second == (0, 0, 2, 3)
 
 
 def test_noisy_extra_candidate_cannot_improve_existing_corrected_lcb() -> None:
@@ -172,6 +220,46 @@ def test_noisy_extra_candidate_cannot_improve_existing_corrected_lcb() -> None:
 def test_input_order_does_not_change_artifact() -> None:
     rows = _rows({"a": [".01"] * 12, "b": [".02"] * 12}, trades_per_week=3)
     assert _build(rows) == _build(list(reversed(rows)))
+
+
+def test_missing_candidate_episode_does_not_reduce_other_candidate_evidence() -> None:
+    rows = _rows({"complete": [".01"] * 8, "missing": [".02"] * 8}, trades_per_week=4)
+    missing_start = rows[-1]["episode_start_at"]
+    rows = [row for row in rows if not (row["candidate_id"] == "missing" and row["episode_start_at"] == missing_start)]
+    artifact = _build(rows)
+    complete = artifact.candidate_assessments["cluster-a"]["complete"]
+    missing = artifact.candidate_assessments["cluster-a"]["missing"]
+    assert complete.weekly_episode_count == 8
+    assert len(complete.effective_episode_starts) == 8
+    assert missing.weekly_episode_count == 7
+    assert len(missing.effective_episode_starts) == 7
+    assert "minimum_weekly_episodes" not in complete.rejection_reasons
+    assert "minimum_weekly_episodes" in missing.rejection_reasons
+
+
+def test_absent_candidate_in_cluster_gets_zero_evidence_audit() -> None:
+    rows = _rows({"a": [".01"] * 2}, cluster="cluster-a") + _rows(
+        {"b": [".01"] * 2},
+        cluster="cluster-b",
+        start=datetime(2026, 1, 19, tzinfo=UTC),
+    )
+    artifact = _build(rows)
+    absent = artifact.candidate_assessments["cluster-a"]["b"]
+    assert absent.weekly_episode_count == 0
+    assert absent.effective_episode_starts == ()
+    assert absent.corrected_lower_bound == 0
+    assert not absent.eligible
+
+
+def test_all_rows_must_share_exact_initial_equity() -> None:
+    rows = _rows({"a": [".01"] * 2, "b": [".01"] * 2})
+    rows[-1]["initial_equity"] = "20000"
+    rows[-1]["net_pnl"] = "200"
+    rows[-1]["final_equity"] = "20200"
+    rows[-1]["trades"] = [{"net_pnl": "50", "holding_bars": 10}] * 4
+    with pytest.raises(ValueError, match="common initial equity"):
+        _build(rows)
+    assert _build(_rows({"a": [".01"] * 2})).common_initial_equity == Decimal("10000")
 
 
 def test_globally_consecutive_weeks_may_be_assigned_to_alternating_clusters() -> None:
@@ -270,6 +358,7 @@ def test_artifact_rederives_eligibility_from_persisted_evidence_fields() -> None
         weekly_episode_count=1,
         distinct_month_count=1,
         closed_trade_count=0,
+        effective_episode_starts=(datetime(2026, 2, 2, tzinfo=UTC),),
     )
     forged_entry = replace(
         artifact.entries[cluster],
@@ -347,7 +436,7 @@ def test_task5_no_provider_rows_are_consumed_with_null_feature_identity(monkeypa
     "mutation, message",
     [
         (lambda rows: rows.append(dict(rows[0])), "duplicate"),
-        (lambda rows: rows.pop(), "rectangular"),
+        (lambda rows: rows[0].__setitem__("episode_start_at", rows[1]["episode_start_at"]), "duplicate|seven days"),
         (lambda rows: rows[0].__setitem__("episode_end_at", "2026-01-13T00:00:00+00:00"), "seven days"),
         (lambda rows: rows[0].__setitem__("data_hash", "mismatch"), "data[_ ]hash"),
     ],
