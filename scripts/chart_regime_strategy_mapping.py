@@ -887,7 +887,7 @@ def _chronological_block_stability(
     matched_label_series = []
     max_distance = 0.0
     for index, artifact in enumerate(block_artifacts):
-        block_means = np.asarray(artifact.means)
+        block_means = _project_centroids_to_primary_coordinates(artifact, primary)
         distances = np.linalg.norm(primary_means[:, None, :] - block_means[None, :, :], axis=2)
         rows, columns = linear_sum_assignment(distances)
         component_to_primary = {
@@ -913,6 +913,24 @@ def _chronological_block_stability(
         for fingerprint in primary.fingerprints
     )
     return max_distance, prevalence_drift, profiles
+
+
+def _project_centroids_to_primary_coordinates(block_artifact, primary_artifact) -> np.ndarray:
+    if block_artifact.feature_names != primary_artifact.feature_names:
+        raise ValueError("centroid projection requires identical feature profiles")
+    block_standardized = np.asarray(block_artifact.means, dtype=float)
+    raw_feature_units = (
+        block_standardized * np.asarray(block_artifact.scales, dtype=float)
+        + np.asarray(block_artifact.medians, dtype=float)
+    )
+    clipped_to_primary = np.clip(
+        raw_feature_units,
+        np.asarray(primary_artifact.lower_bounds, dtype=float),
+        np.asarray(primary_artifact.upper_bounds, dtype=float),
+    )
+    return (
+        clipped_to_primary - np.asarray(primary_artifact.medians, dtype=float)
+    ) / np.asarray(primary_artifact.scales, dtype=float)
 
 
 def _default_evaluate_models(
@@ -1122,66 +1140,91 @@ def _mapping_report(artifact) -> dict[str, object]:
     }
 
 
-def _strategy_feature_requirements(strategy: object) -> dict[str, tuple[str, ...]]:
+def _combine_requirement_alternatives(
+    groups: Sequence[tuple[dict[str, tuple[str, ...]], ...]],
+) -> tuple[dict[str, tuple[str, ...]], ...]:
+    combined = ({},)
+    for alternatives in groups:
+        expanded = []
+        for left in combined:
+            for right in alternatives:
+                merged = dict(left)
+                for name, sources in right.items():
+                    merged[name] = tuple(sorted(set(merged.get(name, ())) | set(sources)))
+                expanded.append(merged)
+        combined = tuple(expanded)
+    unique = {
+        tuple((name, tuple(sources)) for name, sources in sorted(item.items())): item
+        for item in combined
+    }
+    return tuple(unique[key] for key in sorted(unique))
+
+
+def _strategy_feature_requirements(
+    strategy: object,
+) -> tuple[dict[str, tuple[str, ...]], ...]:
     direct = getattr(strategy, "required_features", None)
     if isinstance(direct, Mapping):
-        return {name: tuple(sources) for name, sources in direct.items()}
+        return ({name: tuple(sources) for name, sources in direct.items()},)
     inner = getattr(strategy, "inner", None)
     if inner is not None:
         return _strategy_feature_requirements(inner)
     children = getattr(strategy, "children", ())
     if children:
-        combined = {}
-        for child in children:
-            combined.update(_strategy_feature_requirements(child))
-        return combined
+        return _combine_requirement_alternatives(
+            tuple(_strategy_feature_requirements(child) for child in children)
+        )
     name = type(strategy).__name__
     if name == "FlowExhaustionReversalStrategy":
-        return {
+        return ({
             "taker_imbalance": tuple(strategy.taker_imbalance_sources),
             "cvd_delta": tuple(strategy.cvd_delta_sources),
-        }
+        },)
     if name in {"OpenInterestImpulseStrategy", "OpenInterestDivergenceStrategy"}:
-        return {
+        return ({
             "open_interest_change_ratio_5m": ("metrics",),
             "taker_long_short_volume_ratio": ("metrics",),
-        }
+        },)
     if name == "PositioningCrowdingReversalStrategy":
-        return {
+        return ({
             "top_trader_position_long_short_ratio": ("metrics",),
             "global_long_short_ratio": ("metrics",),
             "taker_long_short_volume_ratio": ("metrics",),
-        }
+        },)
     if name == "GlobalRatioShockReversalStrategy":
-        return {"global_long_short_change_5m": ("metrics",)}
+        return ({"global_long_short_change_5m": ("metrics",)},)
     if name == "PremiumFundingReversionStrategy":
-        return {
+        flow = {
             "taker_imbalance": tuple(strategy.taker_imbalance_sources),
             "cvd_delta": tuple(strategy.cvd_delta_sources),
-            "premium_index": tuple(strategy.premium_sources),
-            "mark_price": tuple(strategy.mark_sources),
-            "index_price": tuple(strategy.index_sources),
         }
+        return (
+            {**flow, "premium_index": tuple(strategy.premium_sources)},
+            {
+                **flow,
+                "mark_price": tuple(strategy.mark_sources),
+                "index_price": tuple(strategy.index_sources),
+            },
+        )
     if name == "SessionOpeningRangeStrategy":
-        return {
+        return ({
             "taker_imbalance": tuple(strategy.taker_imbalance_sources),
             "cvd_delta": tuple(strategy.cvd_delta_sources),
             "trade_intensity": tuple(strategy.trade_intensity_sources),
-        }
-    return {}
+        },)
+    return ({},)
 
 
 def _candidate_feature_requirements(
     candidate: SchedulerBacktestCandidate,
-) -> dict[str, tuple[str, ...]]:
-    combined = {}
+) -> tuple[dict[str, tuple[str, ...]], ...]:
     try:
         strategies = build_strategies(candidate)
     except ValueError:
-        return {}
-    for strategy in strategies:
-        combined.update(_strategy_feature_requirements(strategy))
-    return dict(sorted(combined.items()))
+        return ({},)
+    return _combine_requirement_alternatives(
+        tuple(_strategy_feature_requirements(strategy) for strategy in strategies)
+    )
 
 
 def _mapping_feature_coverage(
@@ -1194,15 +1237,18 @@ def _mapping_feature_coverage(
     reports = {}
     cache = {}
     for candidate in candidates:
-        requirements = _candidate_feature_requirements(candidate)
-        signature = tuple((name, sources) for name, sources in requirements.items())
+        alternatives = _candidate_feature_requirements(candidate)
+        signature = tuple(
+            tuple((name, sources) for name, sources in sorted(requirements.items()))
+            for requirements in alternatives
+        )
         valid[candidate.candidate_id] = set()
         episode_reports = []
         for episode in episodes:
             key = (signature, episode.start_at)
             if key not in cache:
                 expected = 7 * 24 * 60
-                if not requirements:
+                if alternatives == ({},):
                     cache[key] = (True, expected, None)
                 elif provider is None:
                     cache[key] = (False, 0, "market feature provider unavailable")
@@ -1214,19 +1260,25 @@ def _mapping_feature_coverage(
                             continue
                         as_of = candle.closed_at
                         feature_set = provider.load_features(market.symbol, market.timeframe, as_of)
-                        missing = []
-                        for feature_name, allowed_sources in requirements.items():
-                            value = feature_set.get(feature_name)
-                            if (
-                                value is None
-                                or value.source not in allowed_sources
-                                or value.available_at > as_of
-                            ):
-                                missing.append(feature_name)
-                        if missing:
+                        missing_by_alternative = []
+                        for requirements in alternatives:
+                            missing = []
+                            for feature_name, allowed_sources in requirements.items():
+                                value = feature_set.get(feature_name)
+                                if (
+                                    value is None
+                                    or value.source not in allowed_sources
+                                    or value.available_at > as_of
+                                ):
+                                    missing.append(feature_name)
+                            missing_by_alternative.append(missing)
+                        if all(missing_by_alternative):
                             missing_reason = (
-                                f"missing point-in-time fields at {as_of.isoformat()}: "
-                                + ",".join(sorted(missing))
+                                f"missing point-in-time alternatives at {as_of.isoformat()}: "
+                                + " OR ".join(
+                                    ",".join(sorted(missing))
+                                    for missing in missing_by_alternative
+                                )
                             )
                             break
                         available += 1
@@ -1242,14 +1294,44 @@ def _mapping_feature_coverage(
                 "rejection_reason": reason,
             })
         reports[candidate.candidate_id] = {
-            "required_fields": {
-                name: list(sources) for name, sources in requirements.items()
-            },
+            "required_alternatives": [
+                {name: list(sources) for name, sources in requirements.items()}
+                for requirements in alternatives
+            ],
             "eligible_episode_count": len(valid[candidate.candidate_id]),
             "rejected_episode_count": len(episodes) - len(valid[candidate.candidate_id]),
             "episodes": episode_reports,
         }
     return valid, reports
+
+
+def _run_mapping_coverage_filtered_evidence(
+    market: MarketSnapshot,
+    *,
+    episodes: tuple[WeeklyEpisode, ...],
+    assignments: Mapping[datetime, str],
+    candidates: tuple[SchedulerBacktestCandidate, ...],
+    valid_episodes: Mapping[str, set[datetime]],
+    market_feature_provider: object | None,
+) -> list[dict[str, object]]:
+    rows = []
+    for episode in episodes:
+        eligible = tuple(
+            candidate for candidate in candidates
+            if episode.start_at in valid_episodes[candidate.candidate_id]
+        )
+        if not eligible:
+            continue
+        rows.extend(
+            run_mapping_episodes(
+                market,
+                episodes=(episode,),
+                assignments={episode.anchor_at: assignments[episode.anchor_at]},
+                candidates=eligible,
+                market_feature_provider=market_feature_provider,
+            )
+        )
+    return rows
 
 
 def _default_build_mappings(
@@ -1280,19 +1362,11 @@ def _default_build_mappings(
     valid_episodes, feature_coverage = _mapping_feature_coverage(
         prepared["market"], episodes, resolved_candidates, prepared.get("provider")
     )
-    evidence = []
-    for episode in episodes:
-        episode_rows = run_mapping_episodes(
-            prepared["market"],
-            episodes=(episode,),
-            assignments={episode.anchor_at: reference[episode.anchor_at]},
-            candidates=resolved_candidates,
-            market_feature_provider=prepared.get("provider"),
-        )
-        evidence.extend(
-            row for row in episode_rows
-            if episode.start_at in valid_episodes[row["candidate_id"]]
-        )
+    evidence = _run_mapping_coverage_filtered_evidence(
+        prepared["market"], episodes=episodes, assignments=reference,
+        candidates=resolved_candidates, valid_episodes=valid_episodes,
+        market_feature_provider=prepared.get("provider"),
+    )
     if not evidence:
         return {
             "selected": {}, "_artifacts": {},
@@ -1537,6 +1611,7 @@ def _default_replay_test(
         candidate=adopted,
         market_feature_provider=provider,
         include_deferred=bool(context["include_deferred"]),
+        include_trade_details=True,
         force_close_at_end=True,
     )
     results["adopted_fixed"] = {
@@ -1559,6 +1634,7 @@ def _default_replay_test(
             candidate=selected,
             market_feature_provider=provider,
             include_deferred=bool(context["include_deferred"]),
+            include_trade_details=True,
             force_close_at_end=True,
         )
         results["train_selected_fixed"] = {
@@ -1575,7 +1651,8 @@ def _default_replay_test(
             minutes=required_warmup_candles((manual_router,), provider)
         ),
         start_at=test.start_at, end_at=test.end_at, candidate=manual_router,
-        market_feature_provider=provider, force_close_at_end=True,
+        market_feature_provider=provider, include_trade_details=True,
+        force_close_at_end=True,
     )
     results["manual_regime_router"] = {
         "status": "ok",

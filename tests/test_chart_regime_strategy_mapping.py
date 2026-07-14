@@ -26,6 +26,8 @@ from scripts.chart_regime_strategy_mapping import _gmm_bic, _gmm_parameter_count
 from scripts.chart_regime_strategy_mapping import _chronological_block_stability
 from scripts.chart_regime_strategy_mapping import _manual_router_candidate
 from scripts.chart_regime_strategy_mapping import _mapping_feature_coverage
+from scripts.chart_regime_strategy_mapping import _project_centroids_to_primary_coordinates
+from scripts.chart_regime_strategy_mapping import _run_mapping_coverage_filtered_evidence
 from scripts.scheduler_driven_scalping_backtest import (
     FEE_RATE,
     SchedulerBacktestCandidate,
@@ -103,7 +105,76 @@ def test_mapping_feature_coverage_rejects_partial_point_in_time_episode() -> Non
     assert valid["flow"] == set()
     assert report["flow"]["eligible_episode_count"] == 0
     assert report["flow"]["episodes"][0]["available_minutes"] < 10080
-    assert "missing point-in-time fields" in report["flow"]["episodes"][0]["rejection_reason"]
+    assert "missing point-in-time alternatives" in report["flow"]["episodes"][0]["rejection_reason"]
+
+
+def test_premium_strategy_accepts_either_premium_or_complete_basis_alternative() -> None:
+    from src.domain.market_feature import MarketFeatureSet, MarketFeatureValue
+
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    episodes = tuple(build_weekly_episodes(start, start + timedelta(days=7)))
+    market = _minute_market(start, 1, warmup_minutes=0)
+    candidate = SchedulerBacktestCandidate(
+        candidate_id="premium",
+        strategies=(StrategyCandidateSpec("premium_funding", {}),),
+        take_profit_ratio=Decimal("0.01"), stop_loss_ratio=Decimal("0.01"),
+        equity_ratio=Decimal("0.1"), leverage=Decimal("2"), candle_limit=1,
+    )
+
+    class Provider:
+        def __init__(self, extra):
+            self.extra = extra
+
+        def load_features(self, symbol, timeframe, as_of):
+            fields = {
+                "taker_imbalance": "aggTrades",
+                "cvd_delta": "aggTrades",
+                **self.extra,
+            }
+            return MarketFeatureSet(
+                symbol, timeframe, as_of,
+                tuple(MarketFeatureValue(name, Decimal("1"), source, as_of, as_of) for name, source in fields.items()),
+            )
+
+    premium_valid, _ = _mapping_feature_coverage(
+        market, episodes, (candidate,), Provider({"premium_index": "premiumIndexKlines"})
+    )
+    basis_valid, _ = _mapping_feature_coverage(
+        market, episodes, (candidate,), Provider({"mark_price": "markPriceKlines", "index_price": "indexPriceKlines"})
+    )
+    incomplete, report = _mapping_feature_coverage(
+        market, episodes, (candidate,), Provider({"mark_price": "markPriceKlines"})
+    )
+    assert premium_valid["premium"] == {start}
+    assert basis_valid["premium"] == {start}
+    assert incomplete["premium"] == set()
+    assert "premium_index" in report["premium"]["episodes"][0]["rejection_reason"]
+    assert "index_price" in report["premium"]["episodes"][0]["rejection_reason"]
+
+
+def test_coverage_invalid_candidates_are_never_backtested(monkeypatch) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    episodes = tuple(build_weekly_episodes(start, start + timedelta(days=14)))
+    valid_candidate, invalid_candidate = _candidate("valid"), _candidate("invalid")
+    calls = []
+
+    def capture(_market, *, candidates, episodes, **_kwargs):
+        calls.append(([item.candidate_id for item in candidates], episodes[0].start_at))
+        return []
+
+    monkeypatch.setattr(module, "run_mapping_episodes", capture)
+    rows = _run_mapping_coverage_filtered_evidence(
+        _minute_market(start, 2, warmup_minutes=0),
+        episodes=episodes,
+        assignments={episode.anchor_at: "cluster" for episode in episodes},
+        candidates=(valid_candidate, invalid_candidate),
+        valid_episodes={"valid": {episodes[0].start_at}, "invalid": set()},
+        market_feature_provider=None,
+    )
+    assert rows == []
+    assert calls == [(["valid"], episodes[0].start_at)]
 
 
 def _fixture_walk_forward_dependencies(test_return: str = "0.01"):
@@ -320,6 +391,30 @@ def test_chronological_stability_refits_disjoint_time_blocks() -> None:
     assert len(profiles) == 2
 
 
+def test_block_centroids_are_projected_into_primary_standardized_coordinates() -> None:
+    import numpy as np
+    from dataclasses import replace
+    from src.domain.regime.model import RegimeModelConfig
+    from src.infrastructure.regime.sklearn_regime_model import SklearnRegimeModel
+
+    anchors = [datetime(2021, 1, 1, tzinfo=timezone.utc) + timedelta(hours=4 * index) for index in range(90)]
+    artifact = SklearnRegimeModel().fit(RegimeModelConfig("kmeans", 3), _regime_vectors(anchors))
+    assert np.allclose(_project_centroids_to_primary_coordinates(artifact, artifact), artifact.means)
+
+    shifted = replace(
+        artifact,
+        medians=tuple(value + 5 for value in artifact.medians),
+        scales=tuple(value * 2 for value in artifact.scales),
+    )
+    raw = np.asarray(shifted.means) * np.asarray(shifted.scales) + np.asarray(shifted.medians)
+    expected = (
+        np.clip(raw, artifact.lower_bounds, artifact.upper_bounds) - np.asarray(artifact.medians)
+    ) / np.asarray(artifact.scales)
+    actual = _project_centroids_to_primary_coordinates(shifted, artifact)
+    assert np.allclose(actual, expected)
+    assert not np.allclose(actual, shifted.means)
+
+
 def test_default_model_mapping_and_replay_stages_execute_end_to_end(monkeypatch, tmp_path: Path) -> None:
     import scripts.chart_regime_strategy_mapping as module
 
@@ -345,7 +440,16 @@ def test_default_model_mapping_and_replay_stages_execute_end_to_end(monkeypatch,
         return rows
 
     monkeypatch.setattr(module, "run_mapping_episodes", evidence)
-    monkeypatch.setattr(module, "run_scheduler_driven_backtest", lambda *args, **kwargs: {"return_ratio": "0", "max_drawdown_ratio": "0", "trade_count": 0})
+    fixed_calls = []
+
+    def fixed_replay(*args, **kwargs):
+        fixed_calls.append(kwargs)
+        return {
+            "return_ratio": "0", "max_drawdown_ratio": "0", "trade_count": 1,
+            "trades": [{"net_pnl": "1", "owner_strategy_profile_id": kwargs["candidate"].candidate_id}],
+        }
+
+    monkeypatch.setattr(module, "run_scheduler_driven_backtest", fixed_replay)
     replay_calls = []
 
     def replay(*args, **kwargs):
@@ -401,6 +505,8 @@ def test_default_model_mapping_and_replay_stages_execute_end_to_end(monkeypatch,
     assert payload["pipeline_events"][-1] == "reports_written"
     assert payload["mapping_artifacts"]["gmm"]["candidate_assessments"]
     assert "cash_contribution" in payload["continuous_diagnostics"]["gmm_dynamic"]
+    assert all(call["include_trade_details"] is True for call in fixed_calls)
+    assert payload["continuous_diagnostics"]["adopted_fixed"]["concentration"]["top_5_positive_trade_pnl_share"] == "1"
     assert all((tmp_path / name).is_file() for name in (
         "result.json", "result.md", "result-model.json", "result-mapping.json"
     ))
