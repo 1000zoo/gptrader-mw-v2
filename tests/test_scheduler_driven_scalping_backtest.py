@@ -41,6 +41,8 @@ from src.domain.strategy.implementations.microstructure_alpha_strategy import (
     OpenInterestImpulseStrategy,
     PositioningCrowdingReversalStrategy,
 )
+from src.domain.strategy import StrategyResult
+from src.domain.signal import Signal
 
 
 def test_deferred_strategy_registry_is_complete_and_evidence_exists() -> None:
@@ -285,6 +287,95 @@ def test_scheduler_driven_backtest_uses_scheduler_path_without_external_io() -> 
     assert result["scheduler_path"] == "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute"
     assert result["signal_count"] == 39
     assert result["trade_count"] == 0
+
+
+def test_scheduler_backtest_default_output_matches_explicit_legacy_options() -> None:
+    market = _flat_market()
+    kwargs = {
+        "start_at": market.candles[0].opened_at,
+        "end_at": market.candles[-1].closed_at,
+        "include_deferred": True,
+    }
+
+    implicit = run_scheduler_driven_backtest(market, **kwargs)
+    explicit = run_scheduler_driven_backtest(
+        market,
+        **kwargs,
+        initial_equity=Decimal("10000"),
+        include_trade_details=False,
+        force_close_at_end=True,
+    )
+
+    assert implicit == explicit
+    assert "trades" not in implicit
+
+
+def test_scheduler_backtest_can_emit_forced_close_trade_details(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    class AlwaysLong:
+        def evaluate(self, context):
+            return StrategyResult(
+                name="always-long",
+                signal=Signal(SignalDirection.LONG, Decimal("1")),
+            )
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysLong(),))
+    market = _flat_market()
+    candidate = SchedulerBacktestCandidate(
+        candidate_id="weekly-test-candidate",
+        strategies=(StrategyCandidateSpec("unused", {}),),
+        take_profit_ratio=Decimal("0.5"),
+        stop_loss_ratio=Decimal("0.5"),
+        equity_ratio=Decimal("0.1"),
+        leverage=Decimal("2"),
+        candle_limit=1,
+    )
+
+    forced = run_scheduler_driven_backtest(
+        market,
+        start_at=market.opened_at,
+        end_at=market.closed_at,
+        candidate=candidate,
+        initial_equity=Decimal("1234"),
+        include_trade_details=True,
+        force_close_at_end=True,
+    )
+    left_open = run_scheduler_driven_backtest(
+        market,
+        start_at=market.opened_at,
+        end_at=market.closed_at,
+        candidate=candidate,
+        initial_equity=Decimal("1234"),
+        include_trade_details=True,
+        force_close_at_end=False,
+    )
+
+    assert forced["scheduler_path"] == "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute"
+    assert forced["trade_count"] == 1
+    assert forced["trades"][-1]["exit_reason"] == "end_of_data"
+    assert Decimal(forced["trades"][-1]["fee_paid"]) > 0
+    assert forced["trades"][-1]["entry_at"] is not None
+    assert forced["trades"][-1]["exit_at"] is not None
+    assert left_open["trade_count"] == 0
+    assert left_open["trades"] == []
+    assert left_open["net_pnl"] == "0"
+    assert left_open["position_open_at_end"] is True
+    assert forced["position_open_at_end"] is False
+
+
+@pytest.mark.parametrize("initial_equity", (Decimal("0"), Decimal("-1"), Decimal("NaN"), True))
+def test_scheduler_backtest_rejects_invalid_initial_equity(initial_equity) -> None:
+    market = _flat_market()
+
+    with pytest.raises((TypeError, ValueError), match="initial_equity"):
+        run_scheduler_driven_backtest(
+            market,
+            start_at=market.opened_at,
+            end_at=market.closed_at,
+            initial_equity=initial_equity,
+            include_deferred=True,
+        )
 
 
 def test_scheduler_driven_backtest_accepts_non_btc_symbol() -> None:

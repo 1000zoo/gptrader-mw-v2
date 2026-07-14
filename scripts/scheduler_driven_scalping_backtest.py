@@ -187,6 +187,7 @@ class BacktestPosition:
     opened_index: int
     entry_fee: Decimal
     margin: Decimal
+    opened_at: datetime | None = None
 
     @property
     def notional(self) -> Decimal:
@@ -205,6 +206,8 @@ class BacktestTrade:
     fee_paid: Decimal
     exit_reason: str
     holding_bars: int
+    entry_at: datetime | None = None
+    exit_at: datetime | None = None
 
 
 class BacktestMarketSnapshot:
@@ -674,7 +677,17 @@ def run_scheduler_driven_backtest(
     symbol: Symbol = SYMBOL,
     market_feature_provider: MarketFeatureProviderPort | None = None,
     include_deferred: bool = False,
+    initial_equity: Decimal = INITIAL_EQUITY,
+    include_trade_details: bool = False,
+    force_close_at_end: bool = True,
 ) -> dict[str, object]:
+    if (
+        not isinstance(initial_equity, Decimal)
+        or isinstance(initial_equity, bool)
+        or not initial_equity.is_finite()
+        or initial_equity <= Decimal("0")
+    ):
+        raise ValueError("initial_equity must be a finite positive Decimal")
     candidate = candidate or default_candidate()
     ensure_candidate_ids_allowed(
         (candidate.candidate_id,),
@@ -693,7 +706,7 @@ def run_scheduler_driven_backtest(
         inner=CompositeSignalGenerator(build_strategies(candidate)),
         config=candidate.guard,
     )
-    guard = DefensiveGuard(candidate.guard)
+    guard = DefensiveGuard(candidate.guard, initial_equity=initial_equity)
     scheduler = TradeScheduler(
         execute_trade_usecase=ExecuteTradeUseCase(
             market_data=market_data,
@@ -720,7 +733,7 @@ def run_scheduler_driven_backtest(
             market_feature_provider=feature_provider,
         ),
     )
-    equity = INITIAL_EQUITY
+    equity = initial_equity
     peak = equity
     max_drawdown = Decimal("0")
     open_position: BacktestPosition | None = None
@@ -778,12 +791,21 @@ def run_scheduler_driven_backtest(
             opened_index=index,
             entry_fee=entry.average_price * entry.executed_quantity * FEE_RATE,
             margin=(entry.average_price * entry.executed_quantity) / candidate.leverage,
+            opened_at=selected.candles[index].closed_at,
         )
         guard.record_entry(index=index)
 
-    if open_position is not None:
+    if open_position is not None and force_close_at_end:
         final_price = _exit_fill_price(selected.candles[-1].close_price, open_position.direction)
-        trades.append(close_trade(open_position, final_price, "end_of_data", len(selected.candles) - 1))
+        trades.append(
+            close_trade(
+                open_position,
+                final_price,
+                "end_of_data",
+                len(selected.candles) - 1,
+                exit_at=selected.candles[-1].closed_at,
+            )
+        )
         equity += trades[-1].net_pnl
 
     days = Decimal(str((end_at - start_at).total_seconds())) / Decimal("86400")
@@ -798,11 +820,11 @@ def run_scheduler_driven_backtest(
         else Decimal("0")
     )
     average_net_trade_expectancy_ratio = (
-        (net_pnl / Decimal(len(trades))) / INITIAL_EQUITY
+        (net_pnl / Decimal(len(trades))) / initial_equity
         if trades
         else Decimal("0")
     )
-    return {
+    result = {
         "engine": "scheduler_driven",
         "candidate_id": candidate.candidate_id,
         "symbol": symbol.pair,
@@ -817,9 +839,9 @@ def run_scheduler_driven_backtest(
         "end_at": end_at.isoformat(),
         "trade_count": len(trades),
         "trades_per_day": str(Decimal(len(trades)) / days if days else Decimal("0")),
-        "daily_return_ratio": str((net_pnl / INITIAL_EQUITY) / days if days else Decimal("0")),
+        "daily_return_ratio": str((net_pnl / initial_equity) / days if days else Decimal("0")),
         "net_win_rate": str(Decimal(wins) / Decimal(len(trades)) if trades else Decimal("0")),
-        "return_ratio": str(net_pnl / INITIAL_EQUITY),
+        "return_ratio": str(net_pnl / initial_equity),
         "gross_pnl": str(gross_pnl),
         "net_pnl": str(net_pnl),
         "fee_paid": str(fee_paid),
@@ -840,6 +862,10 @@ def run_scheduler_driven_backtest(
         ),
         "future_feature_access_count": 0,
     }
+    if include_trade_details:
+        result["trades"] = [_trade_payload(trade) for trade in trades]
+        result["position_open_at_end"] = open_position is not None and not force_close_at_end
+    return result
 
 
 def run_train_test_search(
@@ -1031,15 +1057,15 @@ class SchedulerBacktestFixedTpSl:
 
 
 class DefensiveGuard:
-    def __init__(self, config: DefensiveGuardConfig) -> None:
+    def __init__(self, config: DefensiveGuardConfig, *, initial_equity: Decimal) -> None:
         self.config = config
         self.last_entry_index: int | None = None
         self.pause_until_index = -1
         self.consecutive_losses = 0
         self.daily_trade_count = 0
         self.daily_start_index = 0
-        self.daily_start_equity = INITIAL_EQUITY
-        self.peak_equity = INITIAL_EQUITY
+        self.daily_start_equity = initial_equity
+        self.peak_equity = initial_equity
 
     def allows_entry(self, *, index: int, equity: Decimal) -> bool:
         if index - self.daily_start_index >= 1440:
@@ -2496,14 +2522,14 @@ def maybe_close_position(
     candle = market.candles[index]
     if position.direction is SignalDirection.LONG:
         if candle.low_price <= position.stop_loss:
-            return close_trade(position, _exit_fill_price(position.stop_loss, position.direction), "stop_loss", index)
+            return close_trade(position, _exit_fill_price(position.stop_loss, position.direction), "stop_loss", index, exit_at=candle.closed_at)
         if candle.high_price >= position.take_profit:
-            return close_trade(position, _exit_fill_price(position.take_profit, position.direction), "take_profit", index)
+            return close_trade(position, _exit_fill_price(position.take_profit, position.direction), "take_profit", index, exit_at=candle.closed_at)
     else:
         if candle.high_price >= position.stop_loss:
-            return close_trade(position, _exit_fill_price(position.stop_loss, position.direction), "stop_loss", index)
+            return close_trade(position, _exit_fill_price(position.stop_loss, position.direction), "stop_loss", index, exit_at=candle.closed_at)
         if candle.low_price <= position.take_profit:
-            return close_trade(position, _exit_fill_price(position.take_profit, position.direction), "take_profit", index)
+            return close_trade(position, _exit_fill_price(position.take_profit, position.direction), "take_profit", index, exit_at=candle.closed_at)
     if (
         max_holding_bars is not None
         and index - position.opened_index >= max_holding_bars
@@ -2513,11 +2539,19 @@ def maybe_close_position(
             _exit_fill_price(candle.close_price, position.direction),
             "max_holding_time",
             index,
+            exit_at=candle.closed_at,
         )
     return None
 
 
-def close_trade(position: BacktestPosition, exit_price: Decimal, reason: str, index: int) -> BacktestTrade:
+def close_trade(
+    position: BacktestPosition,
+    exit_price: Decimal,
+    reason: str,
+    index: int,
+    *,
+    exit_at: datetime | None = None,
+) -> BacktestTrade:
     if position.direction is SignalDirection.LONG:
         gross_pnl = (exit_price - position.entry_price) * position.quantity
     else:
@@ -2535,7 +2569,26 @@ def close_trade(position: BacktestPosition, exit_price: Decimal, reason: str, in
         fee_paid=fee_paid,
         exit_reason=reason,
         holding_bars=index - position.opened_index,
+        entry_at=position.opened_at,
+        exit_at=exit_at,
     )
+
+
+def _trade_payload(trade: BacktestTrade) -> dict[str, object]:
+    return {
+        "entry_at": trade.entry_at.isoformat() if trade.entry_at is not None else None,
+        "exit_at": trade.exit_at.isoformat() if trade.exit_at is not None else None,
+        "entry_price": str(trade.entry_price),
+        "exit_price": str(trade.exit_price),
+        "direction": trade.direction.value,
+        "quantity": str(trade.quantity),
+        "margin": str(trade.margin),
+        "gross_pnl": str(trade.gross_pnl),
+        "net_pnl": str(trade.net_pnl),
+        "fee_paid": str(trade.fee_paid),
+        "exit_reason": trade.exit_reason,
+        "holding_bars": trade.holding_bars,
+    }
 
 
 def _entry_fill_price(price: Decimal, direction: SignalDirection) -> Decimal:
