@@ -7,6 +7,11 @@ from sklearn.cluster import KMeans
 from sklearn.mixture import GaussianMixture
 from sklearn.preprocessing import RobustScaler
 
+from src.application.usecases.regime.fit_regime_model_usecase import (
+    FitRegimeModelCommand,
+    FitRegimeModelUseCase,
+)
+
 from src.domain.regime.chart_features import (
     CHART_FEATURE_REGISTRY_V1,
     CHART_FEATURE_SCHEMA_VERSION,
@@ -116,7 +121,8 @@ def test_array_only_inference_matches_fitted_sklearn_winners(config):
     assignments = engine.assign(artifact, vectors)
     indices = tuple(FEATURE_NAMES.index(name) for name in artifact.feature_names)
     raw = np.asarray([tuple(vector.values.values()) for vector in vectors])[:, indices]
-    scaled = RobustScaler().fit_transform(raw)
+    clipped = np.clip(raw, artifact.lower_bounds, artifact.upper_bounds)
+    scaled = RobustScaler().fit_transform(clipped)
 
     if config.model_type == "kmeans":
         estimator = KMeans(n_clusters=3, random_state=config.random_seed, n_init=20).fit(scaled)
@@ -173,6 +179,10 @@ def test_fit_rejects_constant_and_unknown_inputs_and_assign_rejects_schema_misma
         ({"model_type": "kmeans", "cluster_count": 3, "covariance_type": "diag"}, "None"),
         ({"model_type": "gmm", "cluster_count": 3}, "diag or tied"),
         ({"model_type": "gmm", "cluster_count": 3, "covariance_type": "diag", "regularization": 0.0}, "positive"),
+        ({"model_type": "kmeans", "cluster_count": True}, "cluster count.*integer"),
+        ({"model_type": "kmeans", "cluster_count": 3, "random_seed": True}, "random seed.*integer"),
+        ({"model_type": "kmeans", "cluster_count": 3, "random_seed": -1}, "random seed.*between"),
+        ({"model_type": "kmeans", "cluster_count": 3, "random_seed": 2**32}, "random seed.*between"),
     ],
 )
 def test_model_config_validation(kwargs, message):
@@ -207,3 +217,117 @@ def test_tied_gmm_artifact_rejects_contradictory_shared_covariances():
 
     with pytest.raises(ValueError, match="shared covariance"):
         replace(artifact, covariances=tuple(contradictory))
+
+
+def test_fit_persists_train_quantile_clipping_before_robust_scaling():
+    vectors = _vectors()
+    artifact = SklearnRegimeModel().fit(RegimeModelConfig("kmeans", 3), vectors)
+    indices = tuple(FEATURE_NAMES.index(name) for name in artifact.feature_names)
+    raw = np.asarray([tuple(vector.values.values()) for vector in vectors])[:, indices]
+    expected_lower = np.quantile(raw, 0.005, axis=0)
+    expected_upper = np.quantile(raw, 0.995, axis=0)
+    clipped = np.clip(raw, expected_lower, expected_upper)
+    scaler = RobustScaler().fit(clipped)
+
+    np.testing.assert_allclose(artifact.lower_bounds, expected_lower)
+    np.testing.assert_allclose(artifact.upper_bounds, expected_upper)
+    np.testing.assert_allclose(artifact.medians, scaler.center_)
+    np.testing.assert_allclose(artifact.scales, scaler.scale_)
+
+
+def test_validation_outlier_cannot_change_train_only_clipping_or_scaler():
+    train = _vectors()
+    config = RegimeModelConfig("kmeans", 3)
+    expected = SklearnRegimeModel().fit(config, train)
+    validation = _vectors(1, start_offset=len(train))[0]
+    outlier_values = {name: 1e15 for name in FEATURE_NAMES}
+    validation = replace(validation, values=outlier_values)
+
+    actual = FitRegimeModelUseCase(SklearnRegimeModel()).execute(
+        FitRegimeModelCommand(config, train, (validation,))
+    ).artifact
+
+    assert actual.lower_bounds == expected.lower_bounds
+    assert actual.upper_bounds == expected.upper_bounds
+    assert actual.medians == expected.medians
+    assert actual.scales == expected.scales
+
+
+@pytest.mark.parametrize("field", ["lower_bounds", "upper_bounds"])
+def test_artifact_rejects_zero_width_clipping_bounds(field):
+    artifact = SklearnRegimeModel().fit(RegimeModelConfig("kmeans", 3), _vectors())
+    changes = {field: artifact.upper_bounds if field == "lower_bounds" else artifact.lower_bounds}
+    with pytest.raises(ValueError, match="clipping bounds.*positive width"):
+        replace(artifact, **changes)
+
+
+@pytest.mark.parametrize("config", [
+    RegimeModelConfig("kmeans", 3),
+    RegimeModelConfig("gmm", 3, covariance_type="diag"),
+])
+def test_assignment_clips_outlier_with_persisted_train_bounds(config):
+    vectors = _vectors()
+    engine = SklearnRegimeModel()
+    artifact = engine.fit(config, vectors)
+    outlier = _vectors(1, start_offset=len(vectors))[0]
+    outlier_values = dict(outlier.values)
+    outlier_values.update({name: 1e12 for name in artifact.feature_names})
+    outlier = replace(outlier, values=outlier_values)
+    assignments = engine.assign(artifact, (outlier,))
+
+    capped_values = dict(outlier.values)
+    capped_values.update(dict(zip(artifact.feature_names, artifact.upper_bounds)))
+    capped = replace(outlier, values=capped_values)
+    assert assignments == engine.assign(artifact, (capped,))
+
+
+@pytest.mark.parametrize("bad_value", [-1.0, 0.0, 5e-7])
+def test_diag_gmm_artifact_rejects_invalid_covariance_on_load(bad_value):
+    artifact = SklearnRegimeModel().fit(
+        RegimeModelConfig("gmm", 3, covariance_type="diag", regularization=1e-6),
+        _vectors(),
+    )
+    covariances = [list(row) for row in artifact.covariances]
+    covariances[0][0] = bad_value
+    with pytest.raises(ValueError, match="covariance.*regularization floor"):
+        replace(artifact, covariances=tuple(tuple(row) for row in covariances))
+
+
+@pytest.mark.parametrize("kind", ["asymmetric", "indefinite", "below_floor"])
+def test_tied_gmm_artifact_rejects_invalid_covariance_on_load(kind):
+    artifact = SklearnRegimeModel().fit(
+        RegimeModelConfig("gmm", 3, covariance_type="tied", regularization=1e-6),
+        _vectors(),
+    )
+    width = len(artifact.feature_names)
+    matrix = np.eye(width)
+    if kind == "asymmetric":
+        matrix[0, 1] = 0.5
+    elif kind == "indefinite":
+        matrix[0, 0] = -1.0
+    else:
+        matrix[0, 0] = 5e-7
+    repeated = tuple(tuple(matrix.reshape(-1)) for _ in range(artifact.config.cluster_count))
+    with pytest.raises(ValueError, match="covariance"):
+        replace(artifact, covariances=repeated)
+
+
+@pytest.mark.parametrize("field", ["means", "covariances", "weights"])
+def test_artifact_fingerprint_rejects_component_parameter_tampering(field):
+    config = RegimeModelConfig("gmm", 3, covariance_type="diag")
+    artifact = SklearnRegimeModel().fit(config, _vectors())
+    if field == "means":
+        rows = [list(row) for row in artifact.means]
+        rows[0][0] += 0.01
+        changes = {field: tuple(tuple(row) for row in rows)}
+    elif field == "covariances":
+        rows = [list(row) for row in artifact.covariances]
+        rows[0][0] += 0.01
+        changes = {field: tuple(tuple(row) for row in rows)}
+    else:
+        weights = list(artifact.weights)
+        weights[0] += 0.01
+        weights[1] -= 0.01
+        changes = {field: tuple(weights)}
+    with pytest.raises(ValueError, match="fingerprint"):
+        replace(artifact, **changes)

@@ -1,6 +1,4 @@
 from collections import Counter
-import hashlib
-import json
 import math
 import warnings
 
@@ -21,6 +19,7 @@ from src.domain.regime.model import (
     ClusterAssignment,
     RegimeModelArtifact,
     RegimeModelConfig,
+    component_fingerprint,
 )
 
 
@@ -72,17 +71,40 @@ class SklearnRegimeModel:
         _validate_family_cap(selected_names)
         selected_indices = tuple(_REGISTRY_NAMES.index(name) for name in selected_names)
         matrix = all_values[:, selected_indices]
-        scaler = RobustScaler().fit(matrix)
+        lower_bounds = np.quantile(matrix, 0.005, axis=0)
+        upper_bounds = np.quantile(matrix, 0.995, axis=0)
+        if (
+            not np.isfinite(lower_bounds).all()
+            or not np.isfinite(upper_bounds).all()
+            or np.any(lower_bounds >= upper_bounds)
+        ):
+            raise ValueError("training clipping bounds must be finite with positive width")
+        clipped = np.clip(matrix, lower_bounds, upper_bounds)
+        scaler = RobustScaler().fit(clipped)
         medians = np.asarray(scaler.center_, dtype=float)
         scales = np.asarray(scaler.scale_, dtype=float)
         if not np.isfinite(medians).all() or not np.isfinite(scales).all() or np.any(scales <= 0):
             raise ValueError("fitted robust scaler has invalid parameters")
-        scaled = (matrix - medians) / scales
+        scaled = (clipped - medians) / scales
 
         if config.model_type == "kmeans":
-            parameters = self._fit_kmeans(config, scaled)
+            fitted_parameters = self._fit_kmeans(config, scaled)
         else:
-            parameters = self._fit_gmm(config, scaled)
+            fitted_parameters = self._fit_gmm(config, scaled)
+
+        parameters = []
+        for mean, weight, covariance, threshold in fitted_parameters:
+            mean_tuple = tuple(float(value) for value in mean)
+            covariance_tuple = tuple(float(value) for value in covariance)
+            fingerprint = component_fingerprint(
+                model_type=config.model_type,
+                feature_schema_version=vectors[0].schema_version,
+                feature_names=selected_names,
+                mean=mean_tuple,
+                covariance=() if config.model_type == "kmeans" else covariance_tuple,
+                weight=None if config.model_type == "kmeans" else float(weight),
+            )
+            parameters.append((fingerprint, mean_tuple, float(weight), covariance_tuple, float(threshold)))
 
         records = sorted(parameters, key=lambda item: item[0])
         fingerprints = tuple(item[0] for item in records)
@@ -99,6 +121,8 @@ class SklearnRegimeModel:
             feature_schema_version=vectors[0].schema_version,
             config=config,
             feature_names=selected_names,
+            lower_bounds=tuple(float(value) for value in lower_bounds),
+            upper_bounds=tuple(float(value) for value in upper_bounds),
             medians=tuple(float(value) for value in medians),
             scales=tuple(float(value) for value in scales),
             weights=weights,
@@ -124,7 +148,8 @@ class SklearnRegimeModel:
             raise ValueError("assignment vector schema does not match artifact")
         indices = tuple(_REGISTRY_NAMES.index(name) for name in artifact.feature_names)
         matrix = np.asarray([tuple(vector.values.values()) for vector in vectors], dtype=float)[:, indices]
-        scaled = (matrix - np.asarray(artifact.medians)) / np.asarray(artifact.scales)
+        clipped = np.clip(matrix, artifact.lower_bounds, artifact.upper_bounds)
+        scaled = (clipped - np.asarray(artifact.medians)) / np.asarray(artifact.scales)
         if artifact.config.model_type == "kmeans":
             probabilities, distances = _kmeans_probabilities(scaled, np.asarray(artifact.means))
         else:
@@ -146,7 +171,7 @@ class SklearnRegimeModel:
         return tuple(assignments)
 
     @staticmethod
-    def _fit_kmeans(config: RegimeModelConfig, scaled: np.ndarray) -> list[tuple[str, np.ndarray, float, tuple[()], float]]:
+    def _fit_kmeans(config: RegimeModelConfig, scaled: np.ndarray) -> list[tuple[np.ndarray, float, tuple[()], float]]:
         with warnings.catch_warnings():
             warnings.simplefilter("error", ConvergenceWarning)
             try:
@@ -167,12 +192,11 @@ class SklearnRegimeModel:
         for component in range(config.cluster_count):
             threshold = float(np.quantile(distances[labels == component, component], 0.99))
             weight = float(counts[component] / len(labels))
-            fingerprint = _fingerprint("kmeans", centers[component], (), weight)
-            records.append((fingerprint, centers[component], weight, (), threshold))
+            records.append((centers[component], weight, (), threshold))
         return records
 
     @staticmethod
-    def _fit_gmm(config: RegimeModelConfig, scaled: np.ndarray) -> list[tuple[str, np.ndarray, float, tuple[float, ...], float]]:
+    def _fit_gmm(config: RegimeModelConfig, scaled: np.ndarray) -> list[tuple[np.ndarray, float, tuple[float, ...], float]]:
         with warnings.catch_warnings():
             warnings.simplefilter("error", ConvergenceWarning)
             try:
@@ -201,8 +225,7 @@ class SklearnRegimeModel:
                 regularization=config.regularization,
             )
             flattened = tuple(float(value) for value in covariance.reshape(-1))
-            fingerprint = _fingerprint("gmm", means[component], flattened, float(weights[component]))
-            records.append((fingerprint, means[component], float(weights[component]), flattened, 0.0))
+            records.append((means[component], float(weights[component]), flattened, 0.0))
         return records
 
 
@@ -253,21 +276,6 @@ def _validate_covariance(
             raise ValueError("gmm tied covariance must have finite eigenvalues")
         if float(np.min(eigenvalues)) + tolerance < regularization:
             raise ValueError("gmm covariance is below the configured regularization floor")
-
-
-def _fingerprint(model_type: str, mean: np.ndarray, covariance: tuple[float, ...], weight: float) -> str:
-    payload = {
-        "model_type": model_type,
-        "mean": [_quantized(value) for value in mean],
-        "covariance": [_quantized(value) for value in covariance],
-        "weight": _quantized(weight),
-    }
-    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:24]
-
-
-def _quantized(value: float) -> str:
-    return format(float(value), ".12g")
 
 
 def _kmeans_probabilities(scaled: np.ndarray, means: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

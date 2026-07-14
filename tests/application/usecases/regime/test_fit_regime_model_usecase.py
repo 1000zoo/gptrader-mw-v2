@@ -11,7 +11,12 @@ from src.domain.regime.chart_features import (
     CHART_FEATURE_SCHEMA_VERSION,
     ChartFeatureVector,
 )
-from src.domain.regime.model import ClusterAssignment, RegimeModelArtifact, RegimeModelConfig
+from src.domain.regime.model import (
+    ClusterAssignment,
+    RegimeModelArtifact,
+    RegimeModelConfig,
+    component_fingerprint,
+)
 
 
 def _vector(index: int, *, symbol: str = "BTCUSDT") -> ChartFeatureVector:
@@ -32,18 +37,33 @@ class RecordingEngine:
 
     def fit(self, config, vectors):
         self.fitted_anchors = tuple(vector.anchor_at for vector in vectors)
+        feature_names = ("return_4h", "rv_1d")
+        components = []
+        for mean in ((0.0, 0.0), (1.0, 1.0), (2.0, 2.0)):
+            fingerprint = component_fingerprint(
+                model_type="kmeans",
+                feature_schema_version=CHART_FEATURE_SCHEMA_VERSION,
+                feature_names=feature_names,
+                mean=mean,
+                covariance=(),
+                weight=None,
+            )
+            components.append((fingerprint, mean))
+        components.sort()
         return RegimeModelArtifact(
             artifact_version="regime-model-v1",
             symbol="BTCUSDT",
             feature_schema_version=CHART_FEATURE_SCHEMA_VERSION,
             config=config,
-            feature_names=("return_4h", "rv_1d"),
+            feature_names=feature_names,
+            lower_bounds=(-1.0, -1.0),
+            upper_bounds=(3.0, 3.0),
             medians=(0.0, 0.0),
             scales=(1.0, 1.0),
             weights=(1 / 3, 1 / 3, 1 / 3),
-            means=((0.0, 0.0), (1.0, 1.0), (2.0, 2.0)),
+            means=tuple(mean for _, mean in components),
             covariances=(),
-            fingerprints=("a", "b", "c"),
+            fingerprints=tuple(fingerprint for fingerprint, _ in components),
             training_start_at=vectors[0].anchor_at,
             training_end_at=vectors[-1].anchor_at,
             distance_thresholds=(1.0, 1.0, 1.0),
@@ -51,7 +71,7 @@ class RecordingEngine:
 
     def assign(self, artifact, vectors):
         self.assigned_anchors = tuple(vector.anchor_at for vector in vectors)
-        return tuple(ClusterAssignment("a", 0.8, 0.2, 0.1) for _ in vectors)
+        return tuple(ClusterAssignment(artifact.fingerprints[0], 0.8, 0.2, 0.1) for _ in vectors)
 
 
 def test_fit_uses_only_cluster_fit_vectors_and_validation_only_for_inference():
