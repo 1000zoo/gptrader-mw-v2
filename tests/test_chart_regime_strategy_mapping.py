@@ -25,6 +25,7 @@ from scripts.chart_regime_strategy_mapping import (
     write_walk_forward_reports,
 )
 from scripts.chart_regime_strategy_mapping import _canonical_hash
+from scripts.chart_regime_strategy_mapping import _normalize_bounded_metric
 from scripts.chart_regime_strategy_mapping import _gmm_bic, _gmm_parameter_count
 from scripts.chart_regime_strategy_mapping import _chronological_block_stability
 from scripts.chart_regime_strategy_mapping import _manual_router_candidate
@@ -456,6 +457,14 @@ def test_gmm_bic_counts_diag_and_tied_parameters_exactly() -> None:
     assert _gmm_parameter_count(3, 4, "diag") == 2 + 12 + 12
     assert _gmm_parameter_count(3, 4, "tied") == 2 + 12 + 10
     assert _gmm_bic(-100.0, 50, 24) == pytest.approx(200 + 24 * __import__("math").log(50))
+
+
+def test_numeric_metric_bound_normalizes_only_machine_scale_roundoff() -> None:
+    normalized, audit = _normalize_bounded_metric(1.0 + 5e-16, "seed_nmi", 0.0, 1.0)
+    assert normalized == 1.0
+    assert audit == {"raw": 1.0 + 5e-16, "normalized": 1.0, "clamped": True}
+    with pytest.raises(ValueError, match="seed_nmi.*outside"):
+        _normalize_bounded_metric(1.0 + 1e-8, "seed_nmi", 0.0, 1.0)
 
 
 def test_manual_router_is_a_distinct_public_factory_candidate() -> None:
@@ -1030,6 +1039,12 @@ def test_block_centroids_are_projected_into_primary_standardized_coordinates() -
 def test_default_model_mapping_and_replay_stages_execute_end_to_end(monkeypatch, tmp_path: Path) -> None:
     import scripts.chart_regime_strategy_mapping as module
 
+    monkeypatch.setattr(
+        module,
+        "normalized_mutual_info_score",
+        lambda *_args, **_kwargs: 1.0 + 5e-16,
+    )
+
     cluster_anchors = [BTCUSDT_FIRST_FOLD.cluster_fit.start_at + timedelta(hours=4 * index) for index in range(90)]
     mapping_anchors = [episode.anchor_at for episode in build_weekly_episodes(BTCUSDT_FIRST_FOLD.mapping_fit.start_at, BTCUSDT_FIRST_FOLD.mapping_fit.end_at)]
     validation_anchors = [BTCUSDT_FIRST_FOLD.validation.start_at + timedelta(hours=4 * index) for index in range(12)]
@@ -1104,6 +1119,11 @@ def test_default_model_mapping_and_replay_stages_execute_end_to_end(monkeypatch,
     assert any(
         len(item.get("evidence", {}).get("chronological_block_refits", ())) == 2
         for item in payload["model_candidates"] if item.get("eligible")
+    )
+    assert all(
+        audit["nmi"] == {"raw": 1.0 + 5e-16, "normalized": 1.0, "clamped": True}
+        for item in payload["model_candidates"] if item.get("eligible")
+        for audit in item["evidence"]["seed_metric_normalization"]
     )
     assert all(
         "incompatible feature profiles" not in " ".join(item.get("rejection_reasons", ()))

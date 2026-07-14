@@ -892,6 +892,29 @@ def _gmm_bic(log_likelihood: float, sample_count: int, parameter_count: int) -> 
     return float(-2 * log_likelihood + parameter_count * math.log(sample_count))
 
 
+def _normalize_bounded_metric(
+    value: float,
+    name: str,
+    minimum: float,
+    maximum: float,
+    *,
+    tolerance: float = 1e-12,
+) -> tuple[float, dict[str, object]]:
+    raw = float(value)
+    if not math.isfinite(raw):
+        raise ValueError(f"{name} must be finite")
+    if raw < minimum - tolerance or raw > maximum + tolerance:
+        raise ValueError(
+            f"{name}={raw!r} is outside [{minimum}, {maximum}] beyond tolerance {tolerance}"
+        )
+    normalized = min(max(raw, minimum), maximum)
+    return normalized, {
+        "raw": raw,
+        "normalized": normalized,
+        "clamped": normalized != raw,
+    }
+
+
 def _chronological_block_stability(
     engine: SklearnRegimeModel,
     primary,
@@ -1003,6 +1026,7 @@ def _default_evaluate_models(
     evidences = []
     evidence_by_id = {}
     chronological_profiles_by_id = {}
+    seed_metric_audits_by_id = {}
     for config_id, seed_artifacts in sorted(structural.items()):
         primary = seed_artifacts[0]
         seed_assignments = [engine.assign(artifact, mapping_vectors) for artifact in seed_artifacts]
@@ -1012,8 +1036,36 @@ def _default_evaluate_models(
         for vector, label in zip(mapping_vectors, primary_labels):
             month_sets[label].add((vector.anchor_at.year, vector.anchor_at.month))
         month_counts = tuple(len(month_sets[fp]) for fp in primary.fingerprints)
-        aris = [adjusted_rand_score(primary_labels, [item.fingerprint for item in values]) for values in seed_assignments[1:]]
-        nmis = [normalized_mutual_info_score(primary_labels, [item.fingerprint for item in values]) for values in seed_assignments[1:]]
+        aris = []
+        nmis = []
+        metric_audits = []
+        primary_label_hash = _canonical_hash(primary_labels)
+        for seed_index, values in enumerate(seed_assignments[1:], start=1):
+            comparison_labels = [item.fingerprint for item in values]
+            comparison_hash = _canonical_hash(comparison_labels)
+            try:
+                ari, ari_audit = _normalize_bounded_metric(
+                    adjusted_rand_score(primary_labels, comparison_labels),
+                    "seed_ari", -1.0, 1.0,
+                )
+                nmi, nmi_audit = _normalize_bounded_metric(
+                    normalized_mutual_info_score(primary_labels, comparison_labels),
+                    "seed_nmi", 0.0, 1.0,
+                )
+            except ValueError as error:
+                raise ValueError(
+                    f"{config_id} seed_index={seed_index} primary_labels={primary_label_hash} "
+                    f"comparison_labels={comparison_hash}: {error}"
+                ) from error
+            aris.append(ari)
+            nmis.append(nmi)
+            metric_audits.append({
+                "seed_index": seed_index,
+                "primary_label_hash": primary_label_hash,
+                "comparison_label_hash": comparison_hash,
+                "ari": ari_audit,
+                "nmi": nmi_audit,
+            })
         try:
             matched_centroid_distance, prevalence_drift, chronological_profiles = (
                 _chronological_block_stability(
@@ -1026,6 +1078,7 @@ def _default_evaluate_models(
             )
             continue
         chronological_profiles_by_id[config_id] = chronological_profiles
+        seed_metric_audits_by_id[config_id] = metric_audits
         low_confidence = sum(
             1
             for item in seed_assignments[0]
@@ -1089,6 +1142,7 @@ def _default_evaluate_models(
                 "distinct_calendar_month_counts": list(evidence_by_id[item.artifact_id].distinct_calendar_month_counts),
                 "seed_ari": evidence_by_id[item.artifact_id].seed_ari,
                 "seed_nmi": evidence_by_id[item.artifact_id].seed_nmi,
+                "seed_metric_normalization": seed_metric_audits_by_id[item.artifact_id],
                 "matched_centroid_distance": evidence_by_id[item.artifact_id].matched_centroid_distance,
                 "prevalence_drift": evidence_by_id[item.artifact_id].prevalence_drift,
                 "low_confidence_rate": evidence_by_id[item.artifact_id].low_confidence_rate,
