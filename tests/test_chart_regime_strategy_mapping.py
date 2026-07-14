@@ -1,11 +1,23 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
+import hashlib
+from io import BytesIO
 
 import pytest
 
 from scripts.chart_regime_strategy_mapping import (
+    BTCUSDT_FIRST_FOLD,
+    PRODUCTION_WALK_FORWARD_GRID,
+    WalkForwardDependencies,
+    WalkForwardGrid,
+    WalkForwardInputs,
+    parse_walk_forward_args,
+    run_chart_regime_walk_forward,
     run_mapping_episodes,
     run_scheduler_driven_regime_backtest,
+    write_walk_forward_reports,
 )
 from scripts.chart_regime_strategy_mapping import _canonical_hash
 from scripts.scheduler_driven_scalping_backtest import (
@@ -23,7 +35,269 @@ def test_mapping_module_exposes_scheduler_driven_regime_replay() -> None:
     )
 
     assert run_scheduler_driven_regime_backtest is canonical_replay
+
+
+def _fixture_walk_forward_dependencies(test_return: str = "0.01"):
+    def prepare(context):
+        return {"provenance": {"archives": [{"sha256": "a" * 64}]}}
+
+    def features(context, prepared):
+        return {"schema": "btc-chart-regime-ohclv-v1", "vectors": [1, 2, 3]}
+
+    def models(context, features):
+        return {
+            "selected": {"kmeans": {"artifact_hash": "b" * 64}, "gmm": {"artifact_hash": "c" * 64}},
+            "candidates": [{"config_id": "bad", "eligible": False, "rejection_reasons": ["unstable"]}],
+        }
+
+    def mappings(context, prepared, features, models):
+        return {
+            "selected": {"kmeans": {"artifact_hash": "d" * 64}, "gmm": {"artifact_hash": "e" * 64}},
+            "mapping_metrics": {"weekly_episode_count": 8},
+        }
+
+    def validation(context, prepared, features, models, mappings):
+        return {"score": "0.02", "selected_family": "kmeans"}
+
+    def test(context, prepared, features, models, mappings, validation):
+        return {
+            name: {"status": "cash" if name == "cash" else "ok", "continuous_metrics": {"return_ratio": test_return}}
+            for name in ("cash", "adopted_fixed", "train_selected_fixed", "manual_regime_router", "kmeans_dynamic", "gmm_dynamic")
+        }
+
+    return WalkForwardDependencies(prepare, features, models, mappings, validation, test)
+
+
+def test_walk_forward_freezes_artifacts_before_test_and_has_required_baselines() -> None:
+    events = []
+    payload = run_chart_regime_walk_forward(
+        BTCUSDT_FIRST_FOLD,
+        candidates=(_candidate("candidate-a"),),
+        dependencies=_fixture_walk_forward_dependencies(),
+        progress=events.append,
+    )
+    assert events.index("mapping_frozen") < events.index("first_test_classification")
+    assert "test_result" not in events[:events.index("mapping_frozen")]
+    assert set(payload["comparisons"]) == {
+        "cash", "adopted_fixed", "train_selected_fixed", "manual_regime_router",
+        "kmeans_dynamic", "gmm_dynamic",
+    }
+    assert payload["leakage_audit"]["frozen_before_test"] is True
+    assert all(
+        access["stage"] == "test_result"
+        for access in payload["data_access_audit"]
+        if access["interval"] == "test"
+    )
+
+
+def test_walk_forward_report_records_grid_provenance_and_rejections() -> None:
+    payload = run_chart_regime_walk_forward(
+        BTCUSDT_FIRST_FOLD,
+        candidates=(_candidate("candidate-a"),),
+        dependencies=_fixture_walk_forward_dependencies(),
+    )
+    assert payload["feature_schema_version"] == "btc-chart-regime-ohclv-v1"
+    assert payload["candidate_universe_hash"]
+    assert payload["candidate_definition_hash"]
+    assert payload["data_provenance"]
+    assert payload["rejected_model_configurations"][0]["config_id"] == "bad"
+    assert payload["configuration_grid"]["cluster_counts"] == [3, 4, 5, 6, 7, 8]
+
+
+def test_frozen_selection_hashes_do_not_depend_on_test_outcome() -> None:
+    first = run_chart_regime_walk_forward(
+        BTCUSDT_FIRST_FOLD, candidates=(_candidate("a"),),
+        dependencies=_fixture_walk_forward_dependencies("0.1"),
+    )
+    changed = run_chart_regime_walk_forward(
+        BTCUSDT_FIRST_FOLD, candidates=(_candidate("a"),),
+        dependencies=_fixture_walk_forward_dependencies("-0.9"),
+    )
+    assert first["frozen_artifact_hashes"] == changed["frozen_artifact_hashes"]
+    assert first["comparisons"] != changed["comparisons"]
+
+
+def test_test_interval_is_not_passed_to_any_scoring_stage() -> None:
+    dependencies = _fixture_walk_forward_dependencies()
+    seen = []
+
+    def wrap(function, *, test_stage=False):
+        def call(context, *args):
+            seen.append((test_stage, set(context)))
+            return function(context, *args)
+        return call
+
+    guarded = WalkForwardDependencies(
+        wrap(dependencies.prepare_data),
+        wrap(dependencies.build_cluster_features),
+        wrap(dependencies.evaluate_models),
+        wrap(dependencies.build_mappings),
+        wrap(dependencies.validate),
+        wrap(dependencies.replay_test, test_stage=True),
+    )
+    run_chart_regime_walk_forward(
+        BTCUSDT_FIRST_FOLD, candidates=(_candidate("a"),), dependencies=guarded
+    )
+    assert all("test" not in keys for is_test, keys in seen if not is_test)
+    assert "test" in seen[-1][1]
+
+
+def test_walk_forward_candidate_duplicates_dedupe_but_conflicts_fail_before_data() -> None:
+    calls = []
+    dependencies = _fixture_walk_forward_dependencies()
+
+    def prepare(context):
+        calls.append("data")
+        return dependencies.prepare_data(context)
+
+    guarded = replace(dependencies, prepare_data=prepare)
+    candidate = _candidate("same")
+    payload = run_chart_regime_walk_forward(
+        BTCUSDT_FIRST_FOLD,
+        candidates=(candidate, candidate),
+        dependencies=guarded,
+    )
+    assert payload["candidate_ids"] == ["same"]
+    assert calls == ["data"]
+
+    calls.clear()
+    with pytest.raises(ValueError, match="conflicting candidate definition"):
+        run_chart_regime_walk_forward(
+            BTCUSDT_FIRST_FOLD,
+            candidates=(candidate, _candidate("same", equity_ratio="0.2")),
+            dependencies=guarded,
+        )
+    assert calls == []
+
+
+def test_walk_forward_fold_grid_and_cli_contract(tmp_path: Path) -> None:
+    assert BTCUSDT_FIRST_FOLD.mapping_fit.start_at - BTCUSDT_FIRST_FOLD.cluster_fit.end_at == timedelta(days=7)
+    assert BTCUSDT_FIRST_FOLD.validation.start_at - BTCUSDT_FIRST_FOLD.mapping_fit.end_at == timedelta(days=7)
+    assert BTCUSDT_FIRST_FOLD.test.start_at - BTCUSDT_FIRST_FOLD.validation.end_at == timedelta(days=7)
+    assert PRODUCTION_WALK_FORWARD_GRID.gmm_covariance_types == ("diag", "tied")
+    assert PRODUCTION_WALK_FORWARD_GRID.gmm_probability_mins
+    args = parse_walk_forward_args(["--symbol", "BTCUSDT", "--candidate-group", "all", "--output-json", str(tmp_path / "x.json"), "--output-markdown", str(tmp_path / "x.md")])
+    assert args.output_model.name == "x-model.json"
+    assert args.output_mapping.name == "x-mapping.json"
+
+
+def test_atomic_walk_forward_reports_preserve_previous_files_on_render_failure(tmp_path: Path) -> None:
+    json_path, md_path = tmp_path / "report.json", tmp_path / "report.md"
+    write_walk_forward_reports({"comparisons": {}, "symbol": "BTCUSDT"}, json_path, md_path)
+    before = (json_path.read_bytes(), md_path.read_bytes())
+    with pytest.raises(ValueError):
+        write_walk_forward_reports({"bad": float("nan")}, json_path, md_path)
+    assert (json_path.read_bytes(), md_path.read_bytes()) == before
+
+
+def test_cached_archive_is_verified_against_remote_checksum(monkeypatch, tmp_path: Path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    archive = tmp_path / "BTCUSDT-1m-2026-01.zip"
+    archive.write_bytes(b"verified archive")
+    expected = hashlib.sha256(archive.read_bytes()).hexdigest()
+    monkeypatch.setattr(module, "urlopen", lambda *args, **kwargs: BytesIO(f"{expected}  {archive.name}\n".encode("ascii")))
+    actual, remote, source = module._ensure_archive(archive, "https://example.test/archive.zip")
+    assert (actual, remote) == (expected, expected)
+    assert source.endswith(".CHECKSUM")
+
+    monkeypatch.setattr(module, "urlopen", lambda *args, **kwargs: BytesIO(("0" * 64 + "  bad.zip\n").encode("ascii")))
+    with pytest.raises(ValueError, match="checksum mismatch"):
+        module._ensure_archive(archive, "https://example.test/archive.zip")
+
+
+def _regime_vectors(anchors):
+    names = tuple(spec.name for spec in CHART_FEATURE_REGISTRY_V1)
+    vectors = []
+    for index, anchor in enumerate(anchors):
+        cluster = index % 3
+        values = {
+            name: float(cluster * 25 + __import__("math").sin((index + 1) * (column + 1) * 0.37) + column * 0.071)
+            for column, name in enumerate(names)
+        }
+        vectors.append(ChartFeatureVector("BTCUSDT", anchor, anchor - timedelta(days=7), CHART_FEATURE_SCHEMA_VERSION, values))
+    return tuple(vectors)
+
+
+def test_default_model_mapping_and_replay_stages_execute_end_to_end(monkeypatch, tmp_path: Path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    cluster_anchors = [BTCUSDT_FIRST_FOLD.cluster_fit.start_at + timedelta(hours=4 * index) for index in range(90)]
+    mapping_anchors = [episode.anchor_at for episode in build_weekly_episodes(BTCUSDT_FIRST_FOLD.mapping_fit.start_at, BTCUSDT_FIRST_FOLD.mapping_fit.end_at)]
+    validation_anchors = [BTCUSDT_FIRST_FOLD.validation.start_at + timedelta(hours=4 * index) for index in range(12)]
+    candidate = _candidate("candidate-a")
+
+    def evidence(_market, *, episodes, assignments, candidates, **_kwargs):
+        rows = []
+        for episode in episodes:
+            for item in candidates:
+                rows.append({
+                    "cluster_fingerprint": assignments[episode.anchor_at],
+                    "candidate_id": item.candidate_id,
+                    "episode_start_at": episode.start_at.isoformat(),
+                    "episode_end_at": episode.end_at.isoformat(),
+                    "initial_equity": "10000", "final_equity": "10000", "net_pnl": "0", "return_ratio": "0",
+                    "trade_count": 0, "trades": [], "candidate_hash": "a" * 64,
+                    "market_context_hash": "b" * 64, "data_hash": _canonical_hash({"episode": episode.start_at.isoformat()}),
+                    "feature_cache_hash": None, "feature_provenance": {}, "feature_config_hash": None,
+                })
+        return rows
+
+    monkeypatch.setattr(module, "run_mapping_episodes", evidence)
+    monkeypatch.setattr(module, "run_scheduler_driven_backtest", lambda *args, **kwargs: {"return_ratio": "0", "max_drawdown_ratio": "0", "trade_count": 0})
+    replay_calls = []
+
+    def replay(*args, **kwargs):
+        mapping = kwargs["mapping_artifact"]
+        policy = mapping.selection_confidence_thresholds
+        replay_calls.append((kwargs["start_at"], mapping_artifact_hash(mapping)))
+        score = (
+            Decimal(str(policy.gmm_probability_min + policy.gmm_margin_min))
+            if policy.model_type == "gmm" else Decimal("0")
+        )
+        return {"return_ratio": str(score), "max_drawdown_ratio": "0", "trade_count": 0, "turnover": "0"}
+
+    from src.infrastructure.regime.json_regime_artifact_repository import mapping_artifact_hash
+    monkeypatch.setattr(module, "run_scheduler_driven_regime_backtest", replay)
+    market = _minute_market(BTCUSDT_FIRST_FOLD.mapping_fit.start_at, 1)
+    inputs = WalkForwardInputs(
+        market=market,
+        cluster_fit_vectors=_regime_vectors(cluster_anchors),
+        mapping_vectors=_regime_vectors(mapping_anchors),
+        validation_vectors=_regime_vectors(validation_anchors),
+        data_provenance={"fixture": "default-stage-e2e"},
+    )
+    grid = WalkForwardGrid(
+        cluster_counts=(3,), model_types=("kmeans", "gmm"),
+        gmm_covariance_types=("diag",), seeds=(20260714, 20260715, 20260716),
+        bootstrap_resamples=(10,), confidence_levels=(0.90,),
+    )
+    payload = run_chart_regime_walk_forward(
+        BTCUSDT_FIRST_FOLD,
+        candidates=(candidate,),
+        inputs=inputs,
+        fixture_grid=grid,
+        output_json=tmp_path / "result.json",
+        output_markdown=tmp_path / "result.md",
+        output_model=tmp_path / "result-model.json",
+        output_mapping=tmp_path / "result-mapping.json",
+    )
+    assert set(payload["selected_models"]) == {"kmeans", "gmm"}
+    assert set(payload["mapping_artifacts"]) == {"kmeans", "gmm"}
+    assert payload["mapping_metrics"]["evidence_rows"] == 26
+    assert payload["comparisons"]["kmeans_dynamic"]["status"] == "ok"
+    assert payload["validation"]["selected_config_id"] == "gmm:p0.75:m0.2"
+    selected_hash = next(
+        row["mapping_artifact_hash"] for row in payload["validation"]["candidates"]
+        if row["config_id"] == "gmm:p0.75:m0.2"
+    )
+    assert (BTCUSDT_FIRST_FOLD.test.start_at, selected_hash) in replay_calls
+    assert payload["pipeline_events"][-1] == "reports_written"
+    assert all((tmp_path / name).is_file() for name in (
+        "result.json", "result.md", "result-model.json", "result-mapping.json"
+    ))
 from src.domain.regime import build_weekly_episodes
+from src.domain.regime import CHART_FEATURE_REGISTRY_V1, CHART_FEATURE_SCHEMA_VERSION, ChartFeatureVector
 
 
 def _minute_market(
