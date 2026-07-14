@@ -28,6 +28,7 @@ from scripts.chart_regime_strategy_mapping import _canonical_hash
 from scripts.chart_regime_strategy_mapping import _normalize_bounded_metric
 from scripts.chart_regime_strategy_mapping import _gmm_bic, _gmm_parameter_count
 from scripts.chart_regime_strategy_mapping import _chronological_block_stability
+from scripts.chart_regime_strategy_mapping import _continuous_diagnostics
 from scripts.chart_regime_strategy_mapping import _manual_router_candidate
 from scripts.chart_regime_strategy_mapping import _mapping_feature_coverage
 from scripts.chart_regime_strategy_mapping import _project_centroids_to_primary_coordinates
@@ -465,6 +466,90 @@ def test_numeric_metric_bound_normalizes_only_machine_scale_roundoff() -> None:
     assert audit == {"raw": 1.0 + 5e-16, "normalized": 1.0, "clamped": True}
     with pytest.raises(ValueError, match="seed_nmi.*outside"):
         _normalize_bounded_metric(1.0 + 1e-8, "seed_nmi", 0.0, 1.0)
+
+
+def test_fixed_diagnostics_reconstruct_and_verify_round_trip_turnover() -> None:
+    turnover = Decimal("2") * (Decimal("100") + Decimal("110"))
+    comparisons = {
+        "adopted_fixed": {
+            "status": "ok",
+            "continuous_metrics": {
+                "trade_count": 1,
+                "trades": [{
+                    "quantity": "2", "entry_price": "100", "exit_price": "110",
+                    "fee_paid": str(turnover * FEE_RATE), "net_pnl": "1",
+                }],
+            },
+        },
+        "manual_regime_router": {
+            "status": "ok",
+            "continuous_metrics": {"trade_count": 0, "trades": []},
+        },
+    }
+    diagnostics = _continuous_diagnostics(comparisons, test_minutes=100)
+    fixed = diagnostics["adopted_fixed"]
+    assert fixed["actual_turnover_notional"] == {
+        "availability": "measured",
+        "value": "420",
+        "source": "reconstructed_trade_legs",
+        "convention": "sum(quantity * (entry_price + exit_price))",
+    }
+    assert fixed["confidence"]["availability"] == "not_applicable"
+    assert fixed["transitions"]["counts"] is None
+    manual = diagnostics["manual_regime_router"]
+    assert manual["actual_turnover_notional"]["availability"] == "measured"
+    assert manual["actual_turnover_notional"]["value"] == "0"
+    assert manual["confidence"]["availability"] == "not_applicable"
+
+    comparisons["adopted_fixed"]["continuous_metrics"]["trades"][0]["fee_paid"] = "0"
+    with pytest.raises(ValueError, match="fee_paid.*turnover"):
+        _continuous_diagnostics(comparisons, test_minutes=100)
+
+
+def test_fixed_diagnostics_reject_trade_count_without_trade_ledger() -> None:
+    with pytest.raises(ValueError, match="trade_count.*trade ledger"):
+        _continuous_diagnostics(
+            {
+                "adopted_fixed": {
+                    "status": "ok",
+                    "continuous_metrics": {"trade_count": 1, "trades": []},
+                },
+            },
+            test_minutes=100,
+        )
+
+
+def test_cash_and_unavailable_diagnostic_availability_is_explicit() -> None:
+    diagnostics = _continuous_diagnostics(
+        {
+            "cash": {"status": "cash", "continuous_metrics": {}},
+            "train_selected_fixed": {
+                "status": "cash",
+                "rejection_reasons": ["not evaluated: no eligible model"],
+                "continuous_metrics": {},
+            },
+            "kmeans_dynamic": {
+                "status": "cash",
+                "rejection_reasons": ["no frozen eligible artifact"],
+                "continuous_metrics": {},
+            },
+        },
+        test_minutes=123,
+    )
+    cash = diagnostics["cash"]
+    assert cash["availability"] == "measured"
+    assert cash["cash_contribution"] == {
+        "availability": "measured", "cash_bars": 123,
+        "cash_bar_share": "1", "entries_while_cash": 0,
+    }
+    assert cash["actual_turnover_notional"]["value"] == "0"
+    for name in ("train_selected_fixed", "kmeans_dynamic"):
+        item = diagnostics[name]
+        assert item["availability"] == "not_evaluated"
+        assert item["actual_turnover_notional"]["value"] is None
+        assert item["confidence"]["diagnostics"] is None
+        assert item["transitions"]["counts"] is None
+        assert item["reason"]
 
 
 def test_manual_router_is_a_distinct_public_factory_candidate() -> None:
@@ -1073,7 +1158,11 @@ def test_default_model_mapping_and_replay_stages_execute_end_to_end(monkeypatch,
         fixed_calls.append(kwargs)
         return {
             "return_ratio": "0", "max_drawdown_ratio": "0", "trade_count": 1,
-            "trades": [{"net_pnl": "1", "owner_strategy_profile_id": kwargs["candidate"].candidate_id}],
+            "trades": [{
+                "quantity": "1", "entry_price": "100", "exit_price": "100",
+                "fee_paid": str(Decimal("200") * FEE_RATE), "net_pnl": "1",
+                "owner_strategy_profile_id": kwargs["candidate"].candidate_id,
+            }],
         }
 
     monkeypatch.setattr(module, "run_scheduler_driven_backtest", fixed_replay)

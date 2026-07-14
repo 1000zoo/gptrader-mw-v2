@@ -1623,15 +1623,50 @@ def _cash_comparison(reason: str | None = None) -> dict[str, object]:
     return result
 
 
-def _continuous_diagnostics(comparisons: Mapping[str, object]) -> dict[str, object]:
+def _continuous_diagnostics(
+    comparisons: Mapping[str, object], *, test_minutes: int
+) -> dict[str, object]:
+    if test_minutes <= 0:
+        raise ValueError("Test diagnostic minutes must be positive")
     report = {}
     for name in COMPARISON_NAMES:
         comparison = comparisons.get(name, {})
         metrics = comparison.get("continuous_metrics", {}) if isinstance(comparison, Mapping) else {}
         if not isinstance(metrics, Mapping):
             metrics = {}
+        status = comparison.get("status", "missing") if isinstance(comparison, Mapping) else "missing"
+        reasons = comparison.get("rejection_reasons", ()) if isinstance(comparison, Mapping) else ()
+        reason = "; ".join(str(item) for item in reasons) or None
         trades = metrics.get("trades", ())
         trades = trades if isinstance(trades, (tuple, list)) else ()
+        comparison_type = (
+            "cash_baseline" if name == "cash"
+            else "dynamic_selector" if name.endswith("_dynamic")
+            else "fixed_scheduler"
+        )
+        if name != "cash" and status != "ok":
+            report[name] = {
+                "comparison_type": comparison_type,
+                "status": status,
+                "availability": "not_evaluated",
+                "reason": reason or "comparison was not evaluated",
+                "cash_contribution": {
+                    "availability": "not_evaluated", "cash_bars": None,
+                    "cash_bar_share": None, "entries_while_cash": None,
+                },
+                "confidence": {
+                    "availability": "not_evaluated", "assignment_count": None,
+                    "diagnostics": None,
+                },
+                "transitions": {"availability": "not_evaluated", "counts": None},
+                "actual_turnover_notional": {
+                    "availability": "not_evaluated", "value": None,
+                    "source": None, "convention": None,
+                },
+                "signal_discontinuity_count": None,
+                "concentration": {"availability": "not_evaluated", "value": None},
+            }
+            continue
         positive = sorted(
             (Decimal(str(item.get("net_pnl", "0"))) for item in trades if Decimal(str(item.get("net_pnl", "0"))) > 0),
             reverse=True,
@@ -1644,8 +1679,89 @@ def _continuous_diagnostics(comparisons: Mapping[str, object]) -> dict[str, obje
         total_bars = int(metrics.get("cash_bars", 0)) + sum(
             int(value) for value in metrics.get("time_in_cluster_bars", {}).values()
         ) if isinstance(metrics.get("time_in_cluster_bars", {}), Mapping) else int(metrics.get("cash_bars", 0))
+        concentration = {
+            "availability": "measured",
+            "top_5_positive_trade_pnl_share": (
+                str(sum(positive[:5], Decimal(0)) / positive_total) if positive_total else "0"
+            ),
+            "strategy_trade_shares": {
+                owner: str(Decimal(count) / Decimal(len(trades)))
+                for owner, count in sorted(owners.items())
+            } if trades else {},
+            "single_fold_return_share": "1" if trades else "0",
+        }
+        if comparison_type == "cash_baseline":
+            report[name] = {
+                "comparison_type": comparison_type, "status": status,
+                "availability": "measured", "reason": None,
+                "cash_contribution": {
+                    "availability": "measured", "cash_bars": test_minutes,
+                    "cash_bar_share": "1", "entries_while_cash": 0,
+                },
+                "confidence": {"availability": "not_applicable", "assignment_count": None, "diagnostics": None},
+                "transitions": {"availability": "not_applicable", "counts": None},
+                "actual_turnover_notional": {
+                    "availability": "measured", "value": "0",
+                    "source": "explicit_cash_baseline",
+                    "convention": "sum(quantity * (entry_price + exit_price))",
+                },
+                "signal_discontinuity_count": None,
+                "concentration": concentration,
+            }
+            continue
+        if comparison_type == "fixed_scheduler":
+            declared_trade_count = int(metrics.get("trade_count", len(trades)))
+            if declared_trade_count != len(trades):
+                raise ValueError(
+                    f"{name} trade_count does not match the available trade ledger"
+                )
+            turnover = Decimal("0")
+            fees = Decimal("0")
+            for trade in trades:
+                if not isinstance(trade, Mapping):
+                    raise ValueError(f"{name} trade diagnostics must be mappings")
+                try:
+                    quantity = Decimal(str(trade["quantity"]))
+                    entry_price = Decimal(str(trade["entry_price"]))
+                    exit_price = Decimal(str(trade["exit_price"]))
+                    fee_paid = Decimal(str(trade["fee_paid"]))
+                except (KeyError, InvalidOperation) as error:
+                    raise ValueError(f"{name} trade lacks turnover accounting fields") from error
+                if any(not value.is_finite() for value in (quantity, entry_price, exit_price, fee_paid)):
+                    raise ValueError(f"{name} trade turnover accounting must be finite")
+                if quantity < 0 or entry_price <= 0 or exit_price <= 0 or fee_paid < 0:
+                    raise ValueError(f"{name} trade turnover accounting is outside its valid domain")
+                turnover += quantity * (entry_price + exit_price)
+                fees += fee_paid
+            expected_fees = turnover * FEE_RATE
+            tolerance = max(Decimal("1e-8"), abs(expected_fees) * Decimal("1e-10"))
+            if abs(fees - expected_fees) > tolerance:
+                raise ValueError(
+                    f"{name} fee_paid does not reconcile with reconstructed turnover"
+                )
+            report[name] = {
+                "comparison_type": comparison_type, "status": status,
+                "availability": "measured", "reason": None,
+                "cash_contribution": {
+                    "availability": "not_applicable", "cash_bars": None,
+                    "cash_bar_share": None, "entries_while_cash": None,
+                },
+                "confidence": {"availability": "not_applicable", "assignment_count": None, "diagnostics": None},
+                "transitions": {"availability": "not_applicable", "counts": None},
+                "actual_turnover_notional": {
+                    "availability": "measured", "value": _decimal_text(turnover),
+                    "source": "reconstructed_trade_legs",
+                    "convention": "sum(quantity * (entry_price + exit_price))",
+                },
+                "signal_discontinuity_count": None,
+                "concentration": concentration,
+            }
+            continue
         report[name] = {
+            "comparison_type": comparison_type, "status": status,
+            "availability": "measured", "reason": None,
             "cash_contribution": {
+                "availability": "measured",
                 "cash_bars": int(metrics.get("cash_bars", 0)),
                 "cash_bar_share": (
                     str(Decimal(int(metrics.get("cash_bars", 0))) / Decimal(total_bars))
@@ -1654,22 +1770,19 @@ def _continuous_diagnostics(comparisons: Mapping[str, object]) -> dict[str, obje
                 "entries_while_cash": int(metrics.get("entries_while_cash", 0)),
             },
             "confidence": {
+                "availability": "measured",
                 "assignment_count": len(metrics.get("confidence_diagnostics", ())),
                 "diagnostics": metrics.get("confidence_diagnostics", ()),
             },
-            "transitions": metrics.get("transition_counts", {}),
-            "actual_turnover_notional": metrics.get("actual_turnover_notional", "0"),
-            "signal_discontinuity_count": metrics.get("signal_discontinuity_count", 0),
-            "concentration": {
-                "top_5_positive_trade_pnl_share": (
-                    str(sum(positive[:5], Decimal(0)) / positive_total) if positive_total else "0"
-                ),
-                "strategy_trade_shares": {
-                    owner: str(Decimal(count) / Decimal(len(trades)))
-                    for owner, count in sorted(owners.items())
-                } if trades else {},
-                "single_fold_return_share": "1" if trades else "0",
+            "transitions": {"availability": "measured", "counts": metrics.get("transition_counts", {})},
+            "actual_turnover_notional": {
+                "availability": "measured",
+                "value": str(metrics.get("actual_turnover_notional", "0")),
+                "source": "dynamic_engine_report",
+                "convention": "engine-reported executed notional",
             },
+            "signal_discontinuity_count": metrics.get("signal_discontinuity_count", 0),
+            "concentration": concentration,
         }
     return report
 
@@ -2079,7 +2192,10 @@ def run_chart_regime_walk_forward(
         "validation": validation,
         "frozen_artifact_hashes": {"model": model_frozen, "mapping": mapping_frozen},
         "comparisons": comparisons,
-        "continuous_diagnostics": _continuous_diagnostics(comparisons),
+        "continuous_diagnostics": _continuous_diagnostics(
+            comparisons,
+            test_minutes=int((fold.test.end_at - fold.test.start_at).total_seconds() // 60),
+        ),
         "pipeline_events": events,
         "data_access_audit": access_audit,
         "leakage_audit": {
