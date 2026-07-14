@@ -4,6 +4,8 @@ from decimal import Decimal
 from pathlib import Path
 import hashlib
 from io import BytesIO
+import subprocess
+import sys
 
 import pytest
 
@@ -35,6 +37,20 @@ def test_mapping_module_exposes_scheduler_driven_regime_replay() -> None:
     )
 
     assert run_scheduler_driven_regime_backtest is canonical_replay
+
+
+def test_chart_regime_cli_help_runs_as_a_direct_script() -> None:
+    root = Path(__file__).resolve().parents[1]
+    completed = subprocess.run(
+        [sys.executable, str(root / "scripts" / "chart_regime_strategy_mapping.py"), "--help"],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "Leakage-safe BTCUSDT regime walk-forward" in completed.stdout
 
 
 def _fixture_walk_forward_dependencies(test_return: str = "0.01"):

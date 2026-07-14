@@ -6,6 +6,7 @@ import math
 import argparse
 import csv
 import os
+import sys
 import tempfile
 import zipfile
 import numpy as np
@@ -19,6 +20,10 @@ from pathlib import Path
 from io import TextIOWrapper
 from typing import Callable, Mapping, Sequence
 from urllib.request import urlopen
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from scripts.deferred_strategy_registry import (
     ensure_candidate_group_allowed,
