@@ -12,6 +12,8 @@ class ConcurrentSelectionStateError(RuntimeError):
 
 
 class RegimeSelectionStateRepositoryPort(Protocol):
+    """Stores decisions keyed by symbol, boundary, and evaluated artifact identity."""
+
     def load(self, symbol: str) -> RegimeSelectionState | None:
         ...
 

@@ -28,7 +28,12 @@ _STATE_KEYS = {
     "state_version",
     "pending_artifact_version",
 }
-_RESULT_KEYS = {"expected_state_version", "state", "events"}
+_RESULT_KEYS = {
+    "evaluated_artifact_identity",
+    "expected_state_version",
+    "state",
+    "events",
+}
 
 
 class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
@@ -72,7 +77,7 @@ class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
 
         symbol = _canonical_symbol(result.state.symbol)
         boundary_at = _utc_iso(result.state.last_boundary_at)
-        artifact_version = result.state.artifact_version
+        evaluated_artifact_identity = result.evaluated_artifact_identity
         result_json = _encode_result(result)
         decision_hash = _sha256(result_json)
         events_json = _canonical_json([event.value for event in result.events])
@@ -84,12 +89,12 @@ class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
             connection.execute("BEGIN IMMEDIATE")
             prior = connection.execute(
                 """
-                SELECT expected_version, committed_version, result_json,
-                       decision_hash, events_json
+                SELECT symbol, boundary_at, artifact_version, expected_version,
+                       committed_version, result_json, decision_hash, events_json
                 FROM regime_selection_events
                 WHERE symbol = ? AND boundary_at = ? AND artifact_version = ?
                 """,
-                (symbol, boundary_at, artifact_version),
+                (symbol, boundary_at, evaluated_artifact_identity),
             ).fetchone()
             if prior is not None:
                 original = _result_from_event_row(prior)
@@ -127,7 +132,7 @@ class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
                 (
                     symbol,
                     boundary_at,
-                    artifact_version,
+                    evaluated_artifact_identity,
                     expected,
                     result.state.state_version,
                     result_json,
@@ -186,8 +191,8 @@ class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT expected_version, committed_version, result_json,
-                       decision_hash, events_json
+                SELECT symbol, boundary_at, artifact_version, expected_version,
+                       committed_version, result_json, decision_hash, events_json
                 FROM regime_selection_events
                 WHERE symbol = ?
                 ORDER BY boundary_at ASC, event_id ASC
@@ -286,6 +291,7 @@ def _encode_state(state: RegimeSelectionState) -> str:
 def _encode_result(result: SelectStrategyResult) -> str:
     return _canonical_json(
         {
+            "evaluated_artifact_identity": result.evaluated_artifact_identity,
             "events": [event.value for event in result.events],
             "expected_state_version": result.expected_state_version,
             "state": _state_to_payload(result.state),
@@ -333,6 +339,7 @@ def _decode_result(result_json: str) -> SelectStrategyResult:
     try:
         events = tuple(SelectionEventType(value) for value in events_payload)
         return SelectStrategyResult(
+            evaluated_artifact_identity=payload["evaluated_artifact_identity"],
             expected_state_version=payload["expected_state_version"],
             state=_decode_state(payload["state"]),
             events=events,
@@ -366,10 +373,13 @@ def _result_from_event_row(row: sqlite3.Row) -> SelectStrategyResult:
     if events_payload != [event.value for event in result.events]:
         raise ValueError("selection decision events do not match result")
     if (
-        result.expected_state_version != row["expected_version"]
+        result.state.symbol != row["symbol"]
+        or _utc_iso(result.state.last_boundary_at) != row["boundary_at"]
+        or result.evaluated_artifact_identity != row["artifact_version"]
+        or result.expected_state_version != row["expected_version"]
         or result.state.state_version != row["committed_version"]
     ):
-        raise ValueError("selection decision row does not match its payload")
+        raise ValueError("selection decision coordinate row does not match its payload")
     return result
 
 

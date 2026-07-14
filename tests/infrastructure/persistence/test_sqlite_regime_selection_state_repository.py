@@ -25,6 +25,7 @@ def _result(
     expected: int = 0,
     boundary: datetime = START,
     artifact: str = ARTIFACT_1,
+    evaluated_artifact: str | None = None,
     cluster: str | None = "cluster-a",
     strategy: str | None = "strategy-a",
     pending_cluster: str | None = None,
@@ -50,6 +51,9 @@ def _result(
             pending_artifact_version=pending_artifact,
         ),
         events=events,
+        evaluated_artifact_identity=(
+            artifact if evaluated_artifact is None else evaluated_artifact
+        ),
     )
 
 
@@ -81,6 +85,7 @@ def test_same_boundary_different_pending_artifact_is_a_conflict(tmp_path):
         pending_cluster="cluster-a",
         pending_count=1,
         pending_artifact=ARTIFACT_2,
+        evaluated_artifact=ARTIFACT_2,
         entries=False,
         events=(SelectionEventType.ENTRY_SUSPENDED,),
     )
@@ -89,12 +94,50 @@ def test_same_boundary_different_pending_artifact_is_a_conflict(tmp_path):
         pending_cluster="cluster-a",
         pending_count=1,
         pending_artifact="c" * 64,
+        evaluated_artifact=ARTIFACT_2,
         entries=False,
         events=(SelectionEventType.ENTRY_SUSPENDED,),
     )
 
     with pytest.raises(ValueError, match="conflicting boundary commit"):
         repository.commit(0, conflicting)
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [
+        _result(
+            evaluated_artifact=ARTIFACT_2,
+            pending_cluster="cluster-a",
+            pending_count=1,
+            pending_artifact=ARTIFACT_2,
+            entries=False,
+            events=(SelectionEventType.ENTRY_SUSPENDED,),
+        ),
+        _result(
+            evaluated_artifact=ARTIFACT_2,
+            low_count=1,
+            entries=False,
+            events=(SelectionEventType.ENTRY_SUSPENDED,),
+        ),
+    ],
+    ids=("replacement-first-high", "replacement-low"),
+)
+def test_replacement_observation_is_keyed_by_evaluated_artifact(tmp_path, decision):
+    path = tmp_path / "selection.sqlite3"
+    repository = SqliteRegimeSelectionStateRepository(path)
+
+    committed = repository.commit(0, decision)
+    retry = repository.commit(0, decision)
+
+    with sqlite3.connect(path) as connection:
+        stored_artifact = connection.execute(
+            "SELECT artifact_version FROM regime_selection_events"
+        ).fetchone()[0]
+    assert committed.state.artifact_version == ARTIFACT_1
+    assert committed.evaluated_artifact_identity == ARTIFACT_2
+    assert stored_artifact == ARTIFACT_2
+    assert retry == committed
 
 
 def test_stale_state_version_cannot_increment_pending_confirmation_twice(tmp_path):
@@ -118,6 +161,20 @@ def test_stale_state_version_cannot_increment_pending_confirmation_twice(tmp_pat
         repository.commit(0, different_boundary_from_same_prior)
 
     assert repository.load("BTCUSDT") == first.state
+
+
+def test_historical_exact_retry_returns_original_without_reverting_latest_state(tmp_path):
+    repository = SqliteRegimeSelectionStateRepository(tmp_path / "selection.sqlite3")
+    first = _result()
+    second = _result(expected=1, boundary=START + timedelta(hours=4))
+    repository.commit(0, first)
+    repository.commit(1, second)
+
+    retry = repository.commit(0, first)
+
+    assert retry == first
+    assert repository.load("BTCUSDT") == second.state
+    assert repository.list_events("BTCUSDT") == first.events + second.events
 
 
 def test_reopen_roundtrips_all_state_fields_and_flattens_events_in_order(tmp_path):
@@ -311,6 +368,46 @@ def test_retry_detects_tampered_existing_decision_before_idempotency(tmp_path):
         )
 
     with pytest.raises(ValueError, match="decision.*integrity"):
+        repository.commit(0, decision)
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "query_symbol"),
+    [
+        ("symbol", "ETHUSDT", "ETHUSDT"),
+        ("boundary_at", "2026-07-13T04:00:00+00:00", "BTCUSDT"),
+        ("artifact_version", ARTIFACT_2, "BTCUSDT"),
+        ("expected_version", 1, "BTCUSDT"),
+        ("committed_version", 2, "BTCUSDT"),
+    ],
+)
+def test_list_events_rejects_tampered_coordinate_columns(
+    tmp_path, column, value, query_symbol
+):
+    path = tmp_path / "selection.sqlite3"
+    repository = SqliteRegimeSelectionStateRepository(path)
+    repository.commit(0, _result())
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            f"UPDATE regime_selection_events SET {column} = ?",
+            (value,),
+        )
+
+    with pytest.raises(ValueError, match="decision.*row|coordinate"):
+        repository.list_events(query_symbol)
+
+
+def test_retry_rejects_tampered_coordinate_columns_before_idempotency(tmp_path):
+    path = tmp_path / "selection.sqlite3"
+    repository = SqliteRegimeSelectionStateRepository(path)
+    decision = _result()
+    repository.commit(0, decision)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE regime_selection_events SET committed_version = 2"
+        )
+
+    with pytest.raises(ValueError, match="decision.*row|coordinate"):
         repository.commit(0, decision)
 
 

@@ -275,11 +275,13 @@ class SelectStrategyResult:
     expected_state_version: int
     state: RegimeSelectionState
     events: tuple[SelectionEventType, ...]
+    evaluated_artifact_identity: str
 
     def __post_init__(self) -> None:
         expected = _nonnegative_integer(
             self.expected_state_version, "expected_state_version"
         )
+        _sha256(self.evaluated_artifact_identity, "evaluated_artifact_identity")
         if self.state.state_version != expected + 1:
             raise ValueError("proposed state version must increment expected state version")
         events = tuple(self.events)

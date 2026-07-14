@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -123,6 +124,7 @@ def _select(
 def test_initial_high_confidence_selects_mapped_strategy_immediately():
     result = _select()
 
+    assert result.evaluated_artifact_identity == _snapshot().artifact_identity
     assert result.expected_state_version == 0
     assert result.state.active_strategy_profile_id == "strategy-x"
     assert result.state.current_cluster_fingerprint == "a"
@@ -231,6 +233,7 @@ def test_second_matching_artifact_confirmation_commits_replacement():
     result = _select(previous=first.state, artifact="artifact-v2")
 
     assert result.state.artifact_version == _snapshot("artifact-v2").artifact_identity
+    assert result.evaluated_artifact_identity == _snapshot("artifact-v2").artifact_identity
     assert result.state.pending_artifact_version is None
     assert result.state.new_entries_enabled
     assert result.events == (SelectionEventType.ARTIFACT_REPLACED,)
@@ -262,6 +265,29 @@ def test_low_between_artifact_confirmations_resets_candidate():
 
     restarted = _select(previous=low.state, artifact="artifact-v2")
     assert restarted.state.pending_confirmation_count == 1
+
+
+def test_replacement_low_records_evaluated_artifact_without_committing_it():
+    previous = _state(artifact="artifact-v1")
+    replacement = _snapshot("artifact-v2")
+
+    result = _select(
+        previous=previous,
+        snapshot=replacement,
+        assignment=_assignment(dominant=0.6, second=0.4),
+    )
+
+    assert result.evaluated_artifact_identity == replacement.artifact_identity
+    assert result.state.artifact_version == previous.artifact_version
+    assert result.state.pending_artifact_version is None
+
+
+@pytest.mark.parametrize("identity", ["not-a-hash", "A" * 64, "a" * 63, " a" * 32])
+def test_result_rejects_noncanonical_evaluated_artifact_identity(identity):
+    result = _select()
+
+    with pytest.raises(ValueError, match="evaluated_artifact_identity"):
+        replace(result, evaluated_artifact_identity=identity)
 
 
 def test_different_target_artifact_resets_candidate_even_for_same_cluster():

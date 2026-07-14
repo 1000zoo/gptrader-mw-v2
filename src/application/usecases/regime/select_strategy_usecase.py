@@ -76,7 +76,12 @@ class SelectStrategyUseCase:
         else:
             state, events = _low_confidence_transition(command)
 
-        return SelectStrategyResult(expected_version, state, events)
+        return SelectStrategyResult(
+            expected_state_version=expected_version,
+            state=state,
+            events=events,
+            evaluated_artifact_identity=command.artifact_snapshot.artifact_identity,
+        )
 
 
 def _is_high_confidence(
