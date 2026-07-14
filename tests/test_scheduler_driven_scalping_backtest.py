@@ -25,6 +25,7 @@ from scripts.scheduler_driven_scalping_backtest import (
     run_walk_forward_search,
     summarize_walk_forward_results,
     run_scheduler_driven_backtest,
+    run_scheduler_driven_regime_backtest,
     write_candidate_manifest,
 )
 from src.domain.market import Candle, MarketSnapshot, Symbol, Timeframe
@@ -43,6 +44,149 @@ from src.domain.strategy.implementations.microstructure_alpha_strategy import (
 )
 from src.domain.strategy import StrategyResult
 from src.domain.signal import Signal
+from src.domain.regime.model import ClusterAssignment
+from src.domain.regime.selection import (
+    SelectionArtifactSnapshot,
+    SelectionConfidenceThresholds,
+)
+
+
+class _ScriptedAssignments:
+    def __init__(self, assignments):
+        self.assignments = assignments
+        self.calls = []
+
+    def assignment_at(self, boundary_at, candles):
+        self.calls.append(boundary_at)
+        return ClusterAssignment(
+            fingerprint=self.assignments[boundary_at],
+            dominant_probability=1.0,
+            second_probability=0.0,
+            distance=0.0,
+        )
+
+
+def _selection_snapshot(mapping):
+    return SelectionArtifactSnapshot(
+        model_artifact_hash="a" * 64,
+        mapping_artifact_hash="b" * 64,
+        cluster_strategy_mapping=mapping,
+        model_type="kmeans",
+        confidence_thresholds=SelectionConfidenceThresholds(
+            model_type="kmeans",
+            kmeans_max_standardized_distances={key: 1.0 for key in mapping},
+        ),
+    )
+
+
+def _regime_market(start, hours=9, *, profit_at=None):
+    candles = []
+    for index in range(-1, hours * 60):
+        opened = start + timedelta(minutes=index)
+        profit = profit_at is not None and opened == profit_at
+        candles.append(Candle(
+            symbol=Symbol("BTC", "USDT"), timeframe=Timeframe(1, "m"),
+            opened_at=opened, closed_at=opened + timedelta(minutes=1),
+            open_price=Decimal("100"),
+            high_price=Decimal("102") if profit else Decimal("100"),
+            low_price=Decimal("100"), close_price=Decimal("100"), volume=Decimal("1"),
+        ))
+    return MarketSnapshot(tuple(candles))
+
+
+def _regime_candidate(candidate_id="strategy-x"):
+    return SchedulerBacktestCandidate(
+        candidate_id=candidate_id,
+        strategies=(StrategyCandidateSpec("unused", {}),),
+        take_profit_ratio=Decimal("0.01"), stop_loss_ratio=Decimal("0.5"),
+        equity_ratio=Decimal("0.1"), leverage=Decimal("2"), candle_limit=1,
+    )
+
+
+def test_regime_replay_confirms_cluster_before_switching_strategy(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    class AlwaysWait:
+        def evaluate(self, context):
+            return StrategyResult("wait", Signal.wait())
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysWait(),))
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    provider = _ScriptedAssignments({
+        start: "cluster-a",
+        start + timedelta(hours=4): "cluster-b",
+        start + timedelta(hours=8): "cluster-b",
+    })
+    result = run_scheduler_driven_regime_backtest(
+        _regime_market(start), start_at=start, end_at=start + timedelta(hours=9),
+        candidates=(_regime_candidate("strategy-x"), _regime_candidate("strategy-y")),
+        model=provider,
+        mapping=_selection_snapshot({"cluster-a": "strategy-x", "cluster-b": "strategy-y"}),
+    )
+
+    assert [row["type"] for row in result["selection_events"]] == [
+        "classification", "classification", "cluster_transition", "strategy_transition"
+    ]
+    assert result["selection_events"][1]["active_strategy_profile_id"] == "strategy-x"
+    assert result["selection_events"][-1]["active_strategy_profile_id"] == "strategy-y"
+    assert provider.calls == [start, start + timedelta(hours=4), start + timedelta(hours=8)]
+
+
+def test_regime_replay_cash_blocks_entries_but_owner_position_still_exits(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    class AlwaysLong:
+        def evaluate(self, context):
+            return StrategyResult("long", Signal(SignalDirection.LONG, Decimal("1")))
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysLong(),))
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    result = run_scheduler_driven_regime_backtest(
+        _regime_market(start, profit_at=start + timedelta(hours=8)),
+        start_at=start, end_at=start + timedelta(hours=9),
+        candidates=(_regime_candidate(),),
+        assignment_provider=_ScriptedAssignments({
+            start: "cluster-a", start + timedelta(hours=4): "cluster-b",
+            start + timedelta(hours=8): "cluster-b",
+        }),
+        artifact_snapshot=_selection_snapshot({"cluster-a": "strategy-x", "cluster-b": None}),
+    )
+
+    assert result["entries_while_cash"] == 0
+    assert result["trade_count"] == 1
+    assert result["trades"][0]["exit_reason"] == "take_profit"
+    assert result["trades"][0]["owner_strategy_profile_id"] == "strategy-x"
+    assert result["transition_counts"]["cash"] == 1
+
+
+def test_regime_replay_same_strategy_cluster_transition_reuses_bundle(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    class AlwaysWait:
+        def evaluate(self, context):
+            return StrategyResult("wait", Signal.wait())
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysWait(),))
+    original = module._build_regime_bundle
+    builds = []
+    monkeypatch.setattr(
+        module, "_build_regime_bundle",
+        lambda candidate, **kwargs: builds.append(candidate.candidate_id) or original(candidate, **kwargs),
+    )
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    result = run_scheduler_driven_regime_backtest(
+        _regime_market(start), start_at=start, end_at=start + timedelta(hours=9),
+        candidates=(_regime_candidate(),),
+        assignment_provider=_ScriptedAssignments({
+            start: "cluster-a", start + timedelta(hours=4): "cluster-b",
+            start + timedelta(hours=8): "cluster-b",
+        }),
+        artifact_snapshot=_selection_snapshot({"cluster-a": "strategy-x", "cluster-b": "strategy-x"}),
+    )
+
+    assert builds == ["strategy-x"]
+    assert result["transition_counts"]["cluster"] == 1
+    assert result["transition_counts"]["strategy"] == 0
 
 
 def test_deferred_strategy_registry_is_complete_and_evidence_exists() -> None:

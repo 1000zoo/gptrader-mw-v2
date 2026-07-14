@@ -28,6 +28,7 @@ from scripts.scheduler_driven_scalping_backtest import (
     microstructure_alpha_candidates,
     multi_frequency_candidates,
     run_scheduler_driven_backtest,
+    run_scheduler_driven_regime_backtest,
     validate_unique_candidate_ids,
 )
 from src.domain.market import MarketSnapshot, Symbol

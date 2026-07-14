@@ -3,7 +3,10 @@ from decimal import Decimal
 
 import pytest
 
-from scripts.chart_regime_strategy_mapping import run_mapping_episodes
+from scripts.chart_regime_strategy_mapping import (
+    run_mapping_episodes,
+    run_scheduler_driven_regime_backtest,
+)
 from scripts.chart_regime_strategy_mapping import _canonical_hash
 from scripts.scheduler_driven_scalping_backtest import (
     FEE_RATE,
@@ -12,6 +15,14 @@ from scripts.scheduler_driven_scalping_backtest import (
     feature_provider_config_hash,
 )
 from src.domain.market import Candle, MarketSnapshot, Symbol, Timeframe
+
+
+def test_mapping_module_exposes_scheduler_driven_regime_replay() -> None:
+    from scripts.scheduler_driven_scalping_backtest import (
+        run_scheduler_driven_regime_backtest as canonical_replay,
+    )
+
+    assert run_scheduler_driven_regime_backtest is canonical_replay
 from src.domain.regime import build_weekly_episodes
 
 

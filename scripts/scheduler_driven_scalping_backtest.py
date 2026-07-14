@@ -4,12 +4,13 @@ import argparse
 from bisect import bisect_left
 import hashlib
 import json
+import math
 import sys
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Protocol
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,6 +73,18 @@ from src.infrastructure.market_feature import (  # noqa: E402
     InMemoryMarketFeatureProvider,
 )
 from src.observability.logging import configure_runtime_logging  # noqa: E402
+from src.application.services.chart_feature_extractor import ChartFeatureExtractor  # noqa: E402
+from src.application.usecases.regime import SelectStrategyCommand, SelectStrategyUseCase  # noqa: E402
+from src.domain.ports.regime_selection_state_repository_port import ConcurrentSelectionStateError  # noqa: E402
+from src.domain.regime.model import ClusterAssignment, RegimeModelArtifact  # noqa: E402
+from src.domain.regime.selection import SelectionArtifactSnapshot  # noqa: E402
+from src.domain.regime.mapping import StrategyMappingArtifact  # noqa: E402
+from src.infrastructure.regime import SklearnRegimeModel  # noqa: E402
+from src.infrastructure.regime.json_regime_artifact_repository import (  # noqa: E402
+    mapping_artifact_hash,
+    model_artifact_hash,
+)
+from src.interfaces.scheduler import RegimeSelectionScheduler  # noqa: E402
 
 
 SYMBOL = Symbol("BTC", "USDT")
@@ -188,6 +201,11 @@ class BacktestPosition:
     entry_fee: Decimal
     margin: Decimal
     opened_at: datetime | None = None
+    owner_strategy_profile_id: str | None = None
+    owner_candidate_definition_hash: str | None = None
+    owner_guard_hash: str | None = None
+    owner_leverage: Decimal | None = None
+    owner_max_holding_bars: int | None = None
 
     @property
     def notional(self) -> Decimal:
@@ -208,6 +226,11 @@ class BacktestTrade:
     holding_bars: int
     entry_at: datetime | None = None
     exit_at: datetime | None = None
+    owner_strategy_profile_id: str | None = None
+    owner_candidate_definition_hash: str | None = None
+    owner_guard_hash: str | None = None
+    owner_leverage: Decimal | None = None
+    owner_max_holding_bars: int | None = None
 
 
 class BacktestMarketSnapshot:
@@ -760,7 +783,7 @@ def run_scheduler_driven_backtest(
                 open_position,
                 selected,
                 index,
-                max_holding_bars=candidate.max_holding_bars,
+                max_holding_bars=open_position.owner_max_holding_bars,
             )
             if closed is not None:
                 trades.append(closed)
@@ -812,6 +835,11 @@ def run_scheduler_driven_backtest(
             entry_fee=entry.average_price * entry.executed_quantity * FEE_RATE,
             margin=(entry.average_price * entry.executed_quantity) / candidate.leverage,
             opened_at=selected.candles[index].closed_at,
+            owner_strategy_profile_id=candidate.candidate_id,
+            owner_candidate_definition_hash=candidate_definition_hash(candidate_payload(candidate)),
+            owner_guard_hash=candidate_definition_hash(candidate_payload(candidate)["guard"]),
+            owner_leverage=candidate.leverage,
+            owner_max_holding_bars=candidate.max_holding_bars,
         )
         guard.record_entry(index=index)
 
@@ -904,6 +932,501 @@ def run_scheduler_driven_backtest(
             feature_provenance=feature_provenance,
         )
     return result
+
+
+class RegimeAssignmentProvider(Protocol):
+    def assignment_at(
+        self, boundary_at: datetime, candles: tuple[object, ...]
+    ) -> ClusterAssignment: ...
+
+
+class _ReplaySelectionRepository:
+    """Invocation-local, optimistic/idempotent selector state store."""
+
+    def __init__(self) -> None:
+        self.state = None
+        self.commits: dict[tuple[str, datetime, str], object] = {}
+
+    def load(self, symbol: str):
+        if self.state is not None and self.state.symbol != symbol:
+            return None
+        return self.state
+
+    def find_committed_result(self, symbol, boundary_at, evaluated_artifact_identity):
+        return self.commits.get((symbol, boundary_at, evaluated_artifact_identity))
+
+    def commit(self, expected_state_version, result):
+        current = 0 if self.state is None else self.state.state_version
+        if current != expected_state_version:
+            raise ConcurrentSelectionStateError("stale replay selection state")
+        key = (
+            result.state.symbol,
+            result.state.last_boundary_at,
+            result.evaluated_artifact_identity,
+        )
+        existing = self.commits.get(key)
+        if existing is not None:
+            if existing.selection_input_hash != result.selection_input_hash:
+                raise ValueError("conflicting boundary commit")
+            return existing
+        self.state = result.state
+        self.commits[key] = result
+        return result
+
+    def list_events(self, symbol):
+        return tuple(
+            event
+            for result in self.commits.values()
+            if result.state.symbol == symbol
+            for event in result.events
+        )
+
+
+@dataclass
+class _RegimeCandidateBundle:
+    candidate: SchedulerBacktestCandidate
+    scheduler: TradeScheduler
+    guard: DefensiveGuard
+    definition_hash: str
+    guard_hash: str
+    signal_attempts: int = 0
+    skipped_by_guard: int = 0
+
+
+def _audited_candidate_hash(
+    candidate: SchedulerBacktestCandidate, *, symbol: Symbol, initial_equity: Decimal
+) -> str:
+    behavior = {
+        "candidate_id": candidate.candidate_id,
+        "take_profit_ratio": candidate.take_profit_ratio,
+        "stop_loss_ratio": candidate.stop_loss_ratio,
+        "equity_ratio": candidate.equity_ratio,
+        "leverage": candidate.leverage,
+        "candle_limit": candidate.candle_limit,
+        "max_holding_bars": candidate.max_holding_bars,
+        "strategies": [
+            {"kind": spec.kind, "params": spec.params} for spec in candidate.strategies
+        ],
+        "guard": {
+            "min_minutes_between_entries": candidate.guard.min_minutes_between_entries,
+            "pause_minutes_after_loss": candidate.guard.pause_minutes_after_loss,
+            "max_daily_loss_ratio": candidate.guard.max_daily_loss_ratio,
+            "max_daily_trades": candidate.guard.max_daily_trades,
+            "max_consecutive_losses": candidate.guard.max_consecutive_losses,
+            "max_peak_drawdown_ratio": candidate.guard.max_peak_drawdown_ratio,
+            "min_signal_confidence": candidate.guard.min_signal_confidence,
+            "min_1m_range_ratio": candidate.guard.min_1m_range_ratio,
+            "max_1m_range_ratio": candidate.guard.max_1m_range_ratio,
+        },
+    }
+    payload = {
+        "engine_version": BACKTEST_ENGINE_VERSION,
+        "symbol": symbol.pair,
+        "initial_equity": initial_equity,
+        "fee_rate_per_side": FEE_RATE,
+        "slippage_rate_per_side": SLIPPAGE_RATE,
+        "account_risk": {
+            "base_risk_ratio": Decimal("0.02"),
+            "max_total_exposure_ratio": Decimal("1"),
+            "max_symbol_exposure_ratio": Decimal("1"),
+        },
+        "candidate": behavior,
+    }
+
+    def canonical(value):
+        if isinstance(value, Decimal):
+            if not value.is_finite():
+                raise ValueError("candidate definition contains a nonfinite Decimal")
+            return {"$decimal": "0" if value == 0 else format(value.normalize(), "f")}
+        if isinstance(value, Mapping):
+            return {key: canonical(item) for key, item in value.items()}
+        if isinstance(value, (tuple, list)):
+            return [canonical(item) for item in value]
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError("candidate definition contains a nonfinite float")
+            return value
+        if value is None or isinstance(value, (str, int, bool)):
+            return value
+        raise TypeError(f"unsupported candidate definition value: {type(value).__name__}")
+
+    encoded = json.dumps(
+        canonical(payload), ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _build_regime_bundle(
+    candidate: SchedulerBacktestCandidate,
+    *,
+    market_data: CursorMarketData,
+    signal_log: InMemorySignalLogRepository,
+    order_execution: BacktestOrderExecution,
+    feature_provider,
+    initial_equity: Decimal,
+) -> _RegimeCandidateBundle:
+    generator = GuardedSignalGenerator(
+        inner=CompositeSignalGenerator(build_strategies(candidate)),
+        config=candidate.guard,
+    )
+    close = ClosePositionUseCase(order_execution)
+    scheduler = TradeScheduler(
+        execute_trade_usecase=ExecuteTradeUseCase(
+            market_data=market_data,
+            signal_generator=generator,
+            signal_log_repository=signal_log,
+            order_execution=order_execution,
+            position_sizing_strategy=SchedulerBacktestSizing(
+                equity_ratio=candidate.equity_ratio, leverage=candidate.leverage
+            ),
+            take_profit_stop_loss_strategy=SchedulerBacktestFixedTpSl(
+                take_profit_ratio=candidate.take_profit_ratio,
+                stop_loss_ratio=candidate.stop_loss_ratio,
+            ),
+            market_feature_provider=feature_provider,
+        ),
+        close_position_usecase=close,
+        sync_position_usecase=SyncPositionUseCase(order_execution),
+        manage_open_position_usecase=ManageOpenPositionUseCase(
+            market_data=market_data,
+            signal_generator=generator,
+            signal_log_repository=signal_log,
+            close_position_usecase=close,
+            market_feature_provider=feature_provider,
+        ),
+    )
+    payload = candidate_payload(candidate)
+    return _RegimeCandidateBundle(
+        candidate=candidate,
+        scheduler=scheduler,
+        guard=DefensiveGuard(candidate.guard, initial_equity=initial_equity),
+        definition_hash=candidate_definition_hash(payload),
+        guard_hash=candidate_definition_hash(payload["guard"]),
+    )
+
+
+def run_scheduler_driven_regime_backtest(
+    market: MarketSnapshot,
+    *,
+    start_at: datetime,
+    end_at: datetime,
+    candidates: tuple[SchedulerBacktestCandidate, ...] | list[SchedulerBacktestCandidate],
+    model: RegimeModelArtifact | RegimeAssignmentProvider | object | None = None,
+    mapping: StrategyMappingArtifact | SelectionArtifactSnapshot | None = None,
+    model_artifact: RegimeModelArtifact | None = None,
+    mapping_artifact: StrategyMappingArtifact | None = None,
+    assignment_provider: RegimeAssignmentProvider | object | None = None,
+    artifact_snapshot: SelectionArtifactSnapshot | None = None,
+    symbol: Symbol = SYMBOL,
+    market_feature_provider: MarketFeatureProviderPort | None = None,
+    include_deferred: bool = False,
+    initial_equity: Decimal = INITIAL_EQUITY,
+) -> dict[str, object]:
+    """Replay the production four-hour selector and only its active strategy bundle."""
+    for value, name in ((start_at, "start_at"), (end_at, "end_at")):
+        if value.tzinfo is not timezone.utc:
+            raise ValueError(f"{name} must use canonical UTC")
+    if end_at <= start_at:
+        raise ValueError("end_at must be after start_at")
+    if market.symbol != symbol:
+        raise ValueError("symbol must match the execution market symbol")
+    if market.timeframe != TIMEFRAME:
+        raise ValueError("execution market timeframe must be exactly 1m")
+    if not isinstance(initial_equity, Decimal) or not initial_equity.is_finite() or initial_equity <= 0:
+        raise ValueError("initial_equity must be a finite positive Decimal")
+
+    if model is not None or mapping is not None:
+        if model_artifact is not None or mapping_artifact is not None or assignment_provider is not None or artifact_snapshot is not None:
+            raise ValueError("model/mapping aliases cannot be mixed with explicit artifact/provider arguments")
+        if isinstance(model, RegimeModelArtifact):
+            model_artifact = model
+            if not isinstance(mapping, StrategyMappingArtifact):
+                raise ValueError("a regime model artifact requires a strategy mapping artifact")
+            mapping_artifact = mapping
+        else:
+            assignment_provider = model
+            if not isinstance(mapping, SelectionArtifactSnapshot):
+                raise ValueError("a scripted model requires a SelectionArtifactSnapshot mapping")
+            artifact_snapshot = mapping
+
+    resolved = validate_unique_candidate_ids(candidates)
+    if not resolved:
+        raise ValueError("at least one candidate is required")
+    ensure_candidate_ids_allowed(
+        tuple(item.candidate_id for item in resolved), include_deferred=include_deferred
+    )
+    by_id = {item.candidate_id: item for item in resolved}
+    actual_mode = model_artifact is not None or mapping_artifact is not None
+    if actual_mode:
+        if model_artifact is None or mapping_artifact is None or assignment_provider is not None or artifact_snapshot is not None:
+            raise ValueError("actual artifact mode requires exactly model_artifact and mapping_artifact")
+        model_hash = model_artifact_hash(model_artifact)
+        if model_hash != mapping_artifact.regime_model_artifact_hash:
+            raise ValueError("mapping regime model artifact hash mismatch")
+        artifact_snapshot = SelectionArtifactSnapshot.from_mapping_artifact(
+            mapping_artifact,
+            mapping_artifact_hash=mapping_artifact_hash(mapping_artifact),
+        )
+        if set(by_id) != set(mapping_artifact.candidate_hashes):
+            raise ValueError("candidates must exactly match the audited mapping universe")
+        for candidate_id, candidate in by_id.items():
+            if mapping_artifact.candidate_hashes[candidate_id] != _audited_candidate_hash(
+                candidate, symbol=symbol, initial_equity=initial_equity
+            ):
+                raise ValueError(f"candidate definition hash mismatch: {candidate_id}")
+    else:
+        if assignment_provider is None or artifact_snapshot is None:
+            raise ValueError("scripted mode requires assignment_provider and artifact_snapshot")
+    assert artifact_snapshot is not None
+    mapped = {item for item in artifact_snapshot.cluster_strategy_mapping.values() if item is not None}
+    if not mapped.issubset(by_id):
+        raise ValueError("every mapped strategy must have exactly one candidate")
+
+    required_context = max(item.candle_limit for item in resolved)
+    context_start = start_at - timedelta(
+        days=7 if actual_mode else 0, minutes=required_context
+    )
+    selected_candles = _candles_between(market.candles, context_start, end_at)
+    selected = BacktestMarketSnapshot(selected_candles)
+    if selected.candles[0].opened_at != context_start:
+        raise ValueError("market does not contain enough classification and warmup context")
+    market_data = CursorMarketData(selected)
+    feature_provider = market_feature_provider or EmptyMarketFeatureProvider()
+    signal_log = InMemorySignalLogRepository()
+    order_execution = BacktestOrderExecution(market_data)
+    bundles = {
+        item.candidate_id: _build_regime_bundle(
+            item,
+            market_data=market_data,
+            signal_log=signal_log,
+            order_execution=order_execution,
+            feature_provider=feature_provider,
+            initial_equity=initial_equity,
+        )
+        for item in resolved
+    }
+    selection_repository = _ReplaySelectionRepository()
+    selection_scheduler = RegimeSelectionScheduler(
+        SelectStrategyUseCase(), selection_repository, now=lambda: start_at
+    )
+    closed_times = tuple(candle.closed_at for candle in selected.candles)
+    start_index = bisect_left(closed_times, start_at)
+    if start_index < required_context - 1:
+        raise ValueError("market does not contain enough candidate warmup")
+
+    equity = initial_equity
+    peak = initial_equity
+    max_drawdown = Decimal("0")
+    open_position: BacktestPosition | None = None
+    trades: list[BacktestTrade] = []
+    equity_curve = []
+    selection_events = []
+    confidence_diagnostics = []
+    time_in_cluster_bars: dict[str, int] = {}
+    cash_bars = entry_suspended_bars = entries_while_cash = 0
+    transition_counts = {key: 0 for key in ("cluster", "strategy", "cash", "artifact")}
+    turnover = Decimal("0")
+
+    def assignment_at(boundary_at: datetime) -> ClusterAssignment:
+        window_start = boundary_at - timedelta(days=7)
+        window = tuple(
+            candle for candle in selected.candles
+            if window_start <= candle.opened_at and candle.closed_at <= boundary_at
+        )
+        if actual_mode:
+            vector = ChartFeatureExtractor().extract(window, boundary_at)
+            return SklearnRegimeModel().assign(model_artifact, (vector,))[0]
+        method = getattr(assignment_provider, "assignment_at", None)
+        assignment = method(boundary_at, window) if method is not None else assignment_provider(boundary_at, window)
+        if not isinstance(assignment, ClusterAssignment):
+            raise ValueError("assignment provider must return ClusterAssignment")
+        return assignment
+
+    for index in range(start_index, len(selected.candles)):
+        market_data.cursor = index
+        candle = selected.candles[index]
+        boundary = candle.closed_at
+        if start_at <= boundary < end_at and boundary.minute == 0 and boundary.second == 0 and boundary.microsecond == 0 and boundary.hour % 4 == 0:
+            assignment = assignment_at(boundary)
+            if assignment.fingerprint not in artifact_snapshot.cluster_strategy_mapping:
+                raise ValueError("assignment provider emitted an unknown cluster")
+            scheduled = selection_scheduler.run_selection(
+                "regime-research-replay",
+                symbol.pair,
+                lambda previous, assignment=assignment, boundary=boundary: SelectStrategyCommand(
+                    previous_state=previous,
+                    symbol=symbol.pair,
+                    boundary_at=boundary,
+                    artifact_snapshot=artifact_snapshot,
+                    assignment=assignment,
+                ),
+            )
+            if scheduled.error is not None:
+                raise scheduled.error
+            decision = scheduled.result
+            for event in decision.events:
+                selection_events.append({
+                    "boundary_at": boundary.isoformat(),
+                    "type": event.value,
+                    "evaluated_artifact_identity": decision.evaluated_artifact_identity,
+                    "committed_artifact_identity": decision.state.artifact_version,
+                    "current_cluster_fingerprint": decision.state.current_cluster_fingerprint,
+                    "pending_cluster_fingerprint": decision.state.pending_cluster_fingerprint,
+                    "active_strategy_profile_id": decision.state.active_strategy_profile_id,
+                    "new_entries_enabled": decision.state.new_entries_enabled,
+                    "assignment_fingerprint": assignment.fingerprint,
+                    "dominant_probability": str(assignment.dominant_probability),
+                    "second_probability": str(assignment.second_probability),
+                    "distance": None if assignment.distance is None else str(assignment.distance),
+                })
+                key = {"cluster_transition": "cluster", "strategy_transition": "strategy", "cash_transition": "cash", "artifact_replaced": "artifact"}.get(event.value)
+                if key is not None:
+                    transition_counts[key] += 1
+            confidence_diagnostics.append({
+                "boundary_at": boundary.isoformat(), "fingerprint": assignment.fingerprint,
+                "dominant_probability": str(assignment.dominant_probability),
+                "second_probability": str(assignment.second_probability),
+                "distance": None if assignment.distance is None else str(assignment.distance),
+            })
+
+        state = selection_repository.state
+        if open_position is not None:
+            closed = maybe_close_position(
+                open_position, selected, index,
+                max_holding_bars=open_position.owner_max_holding_bars,
+            )
+            if closed is not None:
+                trades.append(closed)
+                equity += closed.net_pnl
+                turnover += closed.exit_price * closed.quantity
+                owner = bundles[closed.owner_strategy_profile_id]
+                owner.guard.record_trade(index=index, closed_trade=closed, equity=equity)
+                open_position = None
+        elif boundary < end_at and state is not None and state.new_entries_enabled:
+            profile = state.active_strategy_profile_id
+            if profile is None:
+                entries_while_cash += 1
+            else:
+                bundle = bundles[profile]
+                if not bundle.guard.allows_entry(index=index, equity=equity):
+                    bundle.skipped_by_guard += 1
+                else:
+                    bundle.signal_attempts += 1
+                    signal_id = f"regime-bt-{profile}-{index:08d}"
+                    execution = bundle.scheduler.run_trade_execution(
+                        schedule_name="scheduler-driven-regime-backtest",
+                        command_factory=lambda signal_id=signal_id, bundle=bundle, equity=equity: execute_command(
+                            signal_id, selected, index, equity,
+                            bundle.candidate.candle_limit, symbol,
+                        ),
+                    )
+                    if execution.error is not None:
+                        raise execution.error
+                    if execution.result is not None and execution.result.order_result is not None:
+                        entry = execution.result.order_result
+                        levels = execution.result.take_profit_stop_loss
+                        if levels is not None and entry.average_price is not None and entry.executed_quantity is not None:
+                            open_position = BacktestPosition(
+                                direction=execution.result.generated_signal.signal.direction,
+                                entry_price=entry.average_price,
+                                quantity=entry.executed_quantity,
+                                take_profit=levels.take_profit,
+                                stop_loss=levels.stop_loss,
+                                opened_index=index,
+                                entry_fee=entry.average_price * entry.executed_quantity * FEE_RATE,
+                                margin=(entry.average_price * entry.executed_quantity) / bundle.candidate.leverage,
+                                opened_at=boundary,
+                                owner_strategy_profile_id=profile,
+                                owner_candidate_definition_hash=bundle.definition_hash,
+                                owner_guard_hash=bundle.guard_hash,
+                                owner_leverage=bundle.candidate.leverage,
+                                owner_max_holding_bars=bundle.candidate.max_holding_bars,
+                            )
+                            turnover += open_position.notional
+                            bundle.guard.record_entry(index=index)
+
+        if start_at <= boundary < end_at:
+            if state is None or state.active_strategy_profile_id is None:
+                cash_bars += 1
+            if state is not None:
+                if state.current_cluster_fingerprint is not None:
+                    cluster = state.current_cluster_fingerprint
+                    time_in_cluster_bars[cluster] = time_in_cluster_bars.get(cluster, 0) + 1
+                if not state.new_entries_enabled and state.active_strategy_profile_id is not None:
+                    entry_suspended_bars += 1
+            portfolio_equity = equity
+            if open_position is not None:
+                hypothetical = close_trade(
+                    open_position,
+                    _exit_fill_price(candle.close_price, open_position.direction),
+                    "mark_to_market", index, exit_at=boundary,
+                )
+                portfolio_equity += hypothetical.net_pnl
+            peak, max_drawdown = _update_drawdown(
+                equity=portfolio_equity, peak=peak, max_drawdown=max_drawdown
+            )
+            equity_curve.append({"timestamp": boundary.isoformat(), "equity": str(portfolio_equity)})
+
+    if open_position is not None:
+        last = selected.candles[-1]
+        closed = close_trade(
+            open_position, _exit_fill_price(last.close_price, open_position.direction),
+            "end_of_data", len(selected.candles) - 1, exit_at=last.closed_at,
+        )
+        trades.append(closed)
+        equity += closed.net_pnl
+        turnover += closed.exit_price * closed.quantity
+        bundles[closed.owner_strategy_profile_id].guard.record_trade(
+            index=len(selected.candles) - 1, closed_trade=closed, equity=equity
+        )
+
+    gross = sum((item.gross_pnl for item in trades), Decimal("0"))
+    net = sum((item.net_pnl for item in trades), Decimal("0"))
+    fees = sum((item.fee_paid for item in trades), Decimal("0"))
+    manifest = candidate_manifest(list(resolved))
+    reported_candidate_hashes = (
+        dict(sorted(mapping_artifact.candidate_hashes.items()))
+        if actual_mode
+        else {key: bundles[key].definition_hash for key in sorted(bundles)}
+    )
+    reported_universe_hash = (
+        mapping_artifact.candidate_universe_hash
+        if actual_mode
+        else manifest["candidate_universe_hash"]
+    )
+    return {
+        "engine": "scheduler_driven_regime_selection",
+        "symbol": symbol.pair,
+        "start_at": start_at.isoformat(), "end_at": end_at.isoformat(),
+        "initial_equity": str(initial_equity), "final_equity": str(equity),
+        "trade_count": len(trades), "gross_pnl": str(gross), "net_pnl": str(net),
+        "fee_paid": str(fees), "return_ratio": str(net / initial_equity),
+        "portfolio_max_drawdown_ratio": str(max_drawdown),
+        "trades": [_trade_payload(item) for item in trades],
+        "equity_curve": equity_curve,
+        "selection_events": selection_events,
+        "confidence_diagnostics": confidence_diagnostics,
+        "time_in_cluster_bars": dict(sorted(time_in_cluster_bars.items())),
+        "cash_bars": cash_bars, "entry_suspended_bars": entry_suspended_bars,
+        "entries_while_cash": entries_while_cash,
+        "skipped_by_guard": {key: bundles[key].skipped_by_guard for key in sorted(bundles)},
+        "signal_counts": {key: bundles[key].signal_attempts for key in sorted(bundles)},
+        "transition_counts": transition_counts,
+        "cluster_transition_count": transition_counts["cluster"],
+        "strategy_transition_count": transition_counts["strategy"],
+        "cash_transition_count": transition_counts["cash"],
+        "artifact_transition_count": transition_counts["artifact"],
+        "actual_turnover_notional": str(turnover),
+        "candidate_definition_hashes": reported_candidate_hashes,
+        "candidate_universe_hash": reported_universe_hash,
+        "model_artifact_hash": artifact_snapshot.model_artifact_hash,
+        "mapping_artifact_hash": artifact_snapshot.mapping_artifact_hash,
+        "selection_artifact_identity": artifact_snapshot.artifact_identity,
+        "feature_cache_hash": getattr(feature_provider, "feature_cache_hash", None),
+        "feature_provenance": getattr(feature_provider, "feature_provenance", {}),
+        "signal_discontinuity_count": 0,
+    }
 
 
 def _update_drawdown(
@@ -2656,6 +3179,11 @@ def close_trade(
         holding_bars=index - position.opened_index,
         entry_at=position.opened_at,
         exit_at=exit_at,
+        owner_strategy_profile_id=position.owner_strategy_profile_id,
+        owner_candidate_definition_hash=position.owner_candidate_definition_hash,
+        owner_guard_hash=position.owner_guard_hash,
+        owner_leverage=position.owner_leverage,
+        owner_max_holding_bars=position.owner_max_holding_bars,
     )
 
 
@@ -2673,6 +3201,11 @@ def _trade_payload(trade: BacktestTrade) -> dict[str, object]:
         "fee_paid": str(trade.fee_paid),
         "exit_reason": trade.exit_reason,
         "holding_bars": trade.holding_bars,
+        "owner_strategy_profile_id": trade.owner_strategy_profile_id,
+        "owner_candidate_definition_hash": trade.owner_candidate_definition_hash,
+        "owner_guard_hash": trade.owner_guard_hash,
+        "owner_leverage": str(trade.owner_leverage) if trade.owner_leverage is not None else None,
+        "owner_max_holding_bars": trade.owner_max_holding_bars,
     }
 
 
