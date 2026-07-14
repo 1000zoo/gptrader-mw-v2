@@ -16,6 +16,7 @@ from scripts.scheduler_driven_scalping_backtest import (
     FEE_RATE,
     SLIPPAGE_RATE,
     TIMEFRAME,
+    _update_drawdown,
     SchedulerBacktestCandidate,
     alpha_entry_candidates,
     build_scheduler_candidates,
@@ -400,10 +401,16 @@ def _validate_backtest_evidence(
     if not isinstance(trades, list):
         raise ValueError("backtest evidence trades must be a list")
     validated_trades = [
-        _validate_trade(item, index, episode=episode) for index, item in enumerate(trades)
+        _validate_trade(item, index, episode=episode, candidate=candidate)
+        for index, item in enumerate(trades)
     ]
     if trade_count != len(validated_trades):
         raise ValueError("backtest evidence trade_count does not match trades")
+    for previous, current in zip(validated_trades, validated_trades[1:]):
+        if current["entry_at_value"] < previous["exit_at_value"]:
+            raise ValueError(
+                "backtest evidence trades must be chronological and non-overlapping"
+            )
     total_gross = sum((item["gross_pnl"] for item in validated_trades), Decimal("0"))
     total_net = sum((item["net_pnl"] for item in validated_trades), Decimal("0"))
     total_fees = sum((item["fee_paid"] for item in validated_trades), Decimal("0"))
@@ -451,10 +458,23 @@ def _validate_backtest_evidence(
         decimals["average_net_trade_expectancy_ratio"],
         expected_expectancy,
     )
-    # Closed trades cannot reconstruct intratrade equity, so drawdown is bounded
-    # and trusted from the scheduler's marked closed-equity path rather than derived here.
-    if not Decimal("0") <= decimals["max_drawdown_ratio"] <= Decimal("1"):
-        raise ValueError("backtest evidence max_drawdown_ratio must be between zero and one")
+    equity = initial_equity
+    peak = initial_equity
+    reconstructed_drawdown = Decimal("0")
+    for item in validated_trades:
+        equity += item["net_pnl"]
+        peak, reconstructed_drawdown = _update_drawdown(
+            equity=equity,
+            peak=peak,
+            max_drawdown=reconstructed_drawdown,
+        )
+    if decimals["max_drawdown_ratio"] < 0:
+        raise ValueError("backtest evidence max_drawdown_ratio must be nonnegative")
+    _require_decimal_match(
+        "max_drawdown_ratio",
+        decimals["max_drawdown_ratio"],
+        reconstructed_drawdown,
+    )
     profit_factor = None
     if "profit_factor" in result:
         profit_factor = _finite_decimal(result["profit_factor"], "profit_factor")
@@ -502,7 +522,7 @@ def _validate_backtest_evidence(
         "fee_paid": _decimal_text(total_fees),
         "return_ratio": _decimal_text(expected_return),
         "daily_return_ratio": _decimal_text(expected_return / Decimal("7")),
-        "max_drawdown_ratio": _decimal_text(decimals["max_drawdown_ratio"]),
+        "max_drawdown_ratio": _decimal_text(reconstructed_drawdown),
         "net_win_rate": _decimal_text(expected_win_rate),
         "average_net_trade_roe": _decimal_text(expected_average_roe),
         "average_net_trade_expectancy_ratio": _decimal_text(expected_expectancy),
@@ -521,6 +541,7 @@ def _validate_trade(
     index: int,
     *,
     episode: WeeklyEpisode,
+    candidate: SchedulerBacktestCandidate,
 ) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise ValueError(f"trade {index} must be a mapping")
@@ -553,6 +574,33 @@ def _validate_trade(
             raise ValueError(f"trade {index} {field} must be positive")
     if decimals["fee_paid"] < 0:
         raise ValueError(f"trade {index} fee_paid must be nonnegative")
+    expected_gross = (
+        (decimals["exit_price"] - decimals["entry_price"]) * decimals["quantity"]
+        if value["direction"] == "long"
+        else (decimals["entry_price"] - decimals["exit_price"]) * decimals["quantity"]
+    )
+    _require_decimal_match(
+        f"trade {index} gross_pnl",
+        decimals["gross_pnl"],
+        expected_gross,
+    )
+    expected_fee = (
+        decimals["entry_price"] * decimals["quantity"]
+        + decimals["exit_price"] * decimals["quantity"]
+    ) * FEE_RATE
+    _require_decimal_match(
+        f"trade {index} fee_paid",
+        decimals["fee_paid"],
+        expected_fee,
+    )
+    expected_margin = (
+        decimals["entry_price"] * decimals["quantity"] / candidate.leverage
+    )
+    _require_decimal_match(
+        f"trade {index} margin",
+        decimals["margin"],
+        expected_margin,
+    )
     _require_decimal_match(
         f"trade {index} net_pnl",
         decimals["net_pnl"],
@@ -560,6 +608,8 @@ def _validate_trade(
     )
     return {
         **decimals,
+        "entry_at_value": entry_at,
+        "exit_at_value": exit_at,
         "payload": {
             "entry_at": entry_at.isoformat(),
             "exit_at": exit_at.isoformat(),

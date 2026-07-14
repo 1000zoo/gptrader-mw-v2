@@ -6,6 +6,7 @@ import pytest
 from scripts.chart_regime_strategy_mapping import run_mapping_episodes
 from scripts.chart_regime_strategy_mapping import _canonical_hash
 from scripts.scheduler_driven_scalping_backtest import (
+    FEE_RATE,
     SchedulerBacktestCandidate,
     StrategyCandidateSpec,
     feature_provider_config_hash,
@@ -61,6 +62,81 @@ def _evidence_result(kwargs, **overrides):
         "feature_provenance": {},
         "feature_config_hash": None,
     }
+    result.update(overrides)
+    return result
+
+
+def _accounted_trade(
+    kwargs,
+    *,
+    entry_at: datetime,
+    exit_at: datetime,
+    entry_price: Decimal = Decimal("100"),
+    exit_price: Decimal = Decimal("101"),
+    quantity: Decimal = Decimal("1"),
+    direction: str = "long",
+):
+    gross = (
+        (exit_price - entry_price) * quantity
+        if direction == "long"
+        else (entry_price - exit_price) * quantity
+    )
+    fee = (entry_price * quantity + exit_price * quantity) * FEE_RATE
+    margin = entry_price * quantity / kwargs["candidate"].leverage
+    return {
+        "entry_at": entry_at.isoformat(),
+        "exit_at": exit_at.isoformat(),
+        "entry_price": str(entry_price),
+        "exit_price": str(exit_price),
+        "direction": direction,
+        "quantity": str(quantity),
+        "margin": str(margin),
+        "gross_pnl": str(gross),
+        "net_pnl": str(gross - fee),
+        "fee_paid": str(fee),
+        "exit_reason": "take_profit",
+        "holding_bars": int((exit_at - entry_at).total_seconds() // 60),
+    }
+
+
+def _result_for_trades(kwargs, trades, **overrides):
+    initial = kwargs["initial_equity"]
+    gross = sum((Decimal(item["gross_pnl"]) for item in trades), Decimal("0"))
+    net = sum((Decimal(item["net_pnl"]) for item in trades), Decimal("0"))
+    fees = sum((Decimal(item["fee_paid"]) for item in trades), Decimal("0"))
+    equity = initial
+    peak = initial
+    max_drawdown = Decimal("0")
+    for trade in trades:
+        equity += Decimal(trade["net_pnl"])
+        peak = max(peak, equity)
+        max_drawdown = max(max_drawdown, (peak - equity) / peak)
+    count = len(trades)
+    wins = sum(Decimal(item["net_pnl"]) > 0 for item in trades)
+    result = _evidence_result(
+        kwargs,
+        trade_count=count,
+        trades=trades,
+        trades_per_day=str(Decimal(count) / Decimal(7)),
+        gross_pnl=str(gross),
+        net_pnl=str(net),
+        fee_paid=str(fees),
+        final_equity=str(initial + net),
+        return_ratio=str(net / initial),
+        daily_return_ratio=str((net / initial) / Decimal(7)),
+        net_win_rate=str(Decimal(wins) / Decimal(count) if count else Decimal("0")),
+        average_net_trade_roe=str(
+            sum(
+                (Decimal(item["net_pnl"]) / Decimal(item["margin"]) for item in trades),
+                Decimal("0"),
+            ) / Decimal(count)
+            if count else Decimal("0")
+        ),
+        average_net_trade_expectancy_ratio=str(
+            (net / Decimal(count)) / initial if count else Decimal("0")
+        ),
+        max_drawdown_ratio=str(max_drawdown),
+    )
     result.update(overrides)
     return result
 
@@ -453,37 +529,14 @@ def test_mapping_rejects_invalid_trade_accounting_or_bounds(
     start = datetime(2026, 1, 5, tzinfo=timezone.utc)
 
     def fake_backtest(snapshot, **kwargs):
-        initial = kwargs["initial_equity"]
-        trade = {
-            "entry_at": start.isoformat(),
-            "exit_at": (start + timedelta(minutes=1)).isoformat(),
-            "entry_price": "100",
-            "exit_price": "101",
-            "direction": "long",
-            "quantity": "1",
-            "margin": "100",
-            "gross_pnl": "1",
-            "net_pnl": "0.9",
-            "fee_paid": "0.1",
-            "exit_reason": "take_profit",
-            "holding_bars": 1,
-        }
-        trade[field] = value
-        return _evidence_result(
+        trade = _accounted_trade(
             kwargs,
-            trade_count=1,
-            trades=[trade],
-            trades_per_day=str(Decimal(1) / Decimal(7)),
-            gross_pnl="1",
-            net_pnl="0.9",
-            fee_paid="0.1",
-            final_equity=str(initial + Decimal("0.9")),
-            return_ratio=str(Decimal("0.9") / initial),
-            daily_return_ratio=str((Decimal("0.9") / initial) / Decimal(7)),
-            net_win_rate="1",
-            average_net_trade_roe="0.009",
-            average_net_trade_expectancy_ratio=str(Decimal("0.9") / initial),
+            entry_at=start,
+            exit_at=start + timedelta(minutes=1),
         )
+        result = _result_for_trades(kwargs, [trade])
+        result["trades"][0][field] = value
+        return result
 
     monkeypatch.setattr(module, "run_scheduler_driven_backtest", fake_backtest)
     episodes = tuple(build_weekly_episodes(start, start + timedelta(days=7)))
@@ -494,3 +547,100 @@ def test_mapping_rejects_invalid_trade_accounting_or_bounds(
             assignments={start: "cluster"},
             candidates=(_candidate("a"),),
         )
+
+
+@pytest.mark.parametrize(
+    ("forgery", "message"),
+    (("gross", "gross_pnl"), ("fee", "fee_paid"), ("margin", "margin")),
+)
+def test_mapping_rejects_coherent_reported_trade_forgery(monkeypatch, forgery, message) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+
+    def fake_backtest(snapshot, **kwargs):
+        trade = _accounted_trade(kwargs, entry_at=start, exit_at=start + timedelta(minutes=1))
+        if forgery == "gross":
+            trade["gross_pnl"] = "2"
+            trade["fee_paid"] = "0.2"
+            trade["net_pnl"] = "1.8"
+        elif forgery == "fee":
+            trade["fee_paid"] = "0.2"
+            trade["net_pnl"] = "0.8"
+        else:
+            trade["margin"] = "34"
+        return _result_for_trades(kwargs, [trade])
+
+    monkeypatch.setattr(module, "run_scheduler_driven_backtest", fake_backtest)
+    episodes = tuple(build_weekly_episodes(start, start + timedelta(days=7)))
+    with pytest.raises(ValueError, match=message):
+        run_mapping_episodes(
+            _minute_market(start, 1),
+            episodes=episodes,
+            assignments={start: "cluster"},
+            candidates=(_candidate("a"),),
+        )
+
+
+@pytest.mark.parametrize("mode", ("overlap", "reordered"))
+def test_mapping_rejects_non_chronological_single_position_trades(monkeypatch, mode) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+
+    def fake_backtest(snapshot, **kwargs):
+        first = _accounted_trade(
+            kwargs, entry_at=start, exit_at=start + timedelta(minutes=2)
+        )
+        second = _accounted_trade(
+            kwargs,
+            entry_at=start + timedelta(minutes=1 if mode == "overlap" else 2),
+            exit_at=start + timedelta(minutes=3),
+        )
+        trades = [first, second] if mode == "overlap" else [second, first]
+        return _result_for_trades(kwargs, trades)
+
+    monkeypatch.setattr(module, "run_scheduler_driven_backtest", fake_backtest)
+    episodes = tuple(build_weekly_episodes(start, start + timedelta(days=7)))
+    with pytest.raises(ValueError, match="chronological|overlap"):
+        run_mapping_episodes(
+            _minute_market(start, 1),
+            episodes=episodes,
+            assignments={start: "cluster"},
+            candidates=(_candidate("a"),),
+        )
+
+
+def test_mapping_reconstructs_drawdown_and_allows_equity_below_zero(monkeypatch) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    forged = {"enabled": True}
+
+    def fake_backtest(snapshot, **kwargs):
+        trade = _accounted_trade(
+            kwargs,
+            entry_at=start,
+            exit_at=start + timedelta(minutes=1),
+            entry_price=Decimal("100"),
+            exit_price=Decimal("1"),
+            quantity=Decimal("200"),
+        )
+        result = _result_for_trades(kwargs, [trade])
+        if forged["enabled"]:
+            result["max_drawdown_ratio"] = "0"
+        return result
+
+    monkeypatch.setattr(module, "run_scheduler_driven_backtest", fake_backtest)
+    episodes = tuple(build_weekly_episodes(start, start + timedelta(days=7)))
+    kwargs = {
+        "episodes": episodes,
+        "assignments": {start: "cluster"},
+        "candidates": (_candidate("a"),),
+    }
+    with pytest.raises(ValueError, match="max_drawdown_ratio"):
+        run_mapping_episodes(_minute_market(start, 1), **kwargs)
+
+    forged["enabled"] = False
+    rows = run_mapping_episodes(_minute_market(start, 1), **kwargs)
+    assert Decimal(rows[0]["max_drawdown_ratio"]) > Decimal("1")
