@@ -63,6 +63,9 @@ class ClusterAssignment:
             raise ValueError("assignment probabilities must be finite and between zero and one")
         if self.second_probability > self.dominant_probability:
             raise ValueError("second probability cannot exceed dominant probability")
+        # Permit only representational noise around a mathematically valid sum.
+        if math.fsum(probabilities) > 1.0 + 1e-12:
+            raise ValueError("top-two assignment probability sum cannot exceed one")
         if self.distance is not None and (
             not isinstance(self.distance, (int, float))
             or isinstance(self.distance, bool)

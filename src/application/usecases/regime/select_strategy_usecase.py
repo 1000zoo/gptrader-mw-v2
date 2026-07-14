@@ -1,41 +1,16 @@
 from dataclasses import dataclass
-import math
+from decimal import Decimal
 from datetime import datetime
-from typing import Literal
 
 from src.domain.regime.model import ClusterAssignment
 from src.domain.regime.selection import (
     RegimeSelectionState,
     SelectionArtifactSnapshot,
+    SelectionConfidenceThresholds,
     SelectStrategyResult,
     SelectionEventType,
 )
 from src.domain.regime.temporal import is_regime_boundary
-
-
-ModelType = Literal["gmm", "kmeans"]
-
-
-def _probability(value: object, field: str) -> float:
-    if (
-        not isinstance(value, (int, float))
-        or isinstance(value, bool)
-        or not math.isfinite(value)
-        or not 0 <= value <= 1
-    ):
-        raise ValueError(f"{field} must be finite and between zero and one")
-    return float(value)
-
-
-def _distance(value: object, field: str) -> float:
-    if (
-        not isinstance(value, (int, float))
-        or isinstance(value, bool)
-        or not math.isfinite(value)
-        or value < 0
-    ):
-        raise ValueError(f"{field} must be finite and nonnegative")
-    return float(value)
 
 
 def _canonical(value: object, field: str) -> str:
@@ -45,41 +20,11 @@ def _canonical(value: object, field: str) -> str:
 
 
 @dataclass(frozen=True)
-class SelectionConfidenceThresholds:
-    model_type: ModelType
-    gmm_probability_min: float | None = None
-    gmm_margin_min: float | None = None
-    kmeans_max_standardized_distance: float | None = None
-
-    def __post_init__(self) -> None:
-        if self.model_type == "gmm":
-            if self.gmm_probability_min is None or self.gmm_margin_min is None:
-                raise ValueError("GMM confidence thresholds are required")
-            _probability(self.gmm_probability_min, "gmm_probability_min")
-            _probability(self.gmm_margin_min, "gmm_margin_min")
-            if self.kmeans_max_standardized_distance is not None:
-                raise ValueError("GMM thresholds cannot contain a KMeans distance")
-        elif self.model_type == "kmeans":
-            if self.kmeans_max_standardized_distance is None:
-                raise ValueError("KMeans maximum distance is required")
-            _distance(
-                self.kmeans_max_standardized_distance,
-                "kmeans_max_standardized_distance",
-            )
-            if self.gmm_probability_min is not None or self.gmm_margin_min is not None:
-                raise ValueError("KMeans thresholds cannot contain GMM probabilities")
-        else:
-            raise ValueError("confidence threshold model type must be gmm or kmeans")
-
-
-@dataclass(frozen=True)
 class SelectStrategyCommand:
     previous_state: RegimeSelectionState | None
     symbol: str
     boundary_at: datetime
     artifact_snapshot: SelectionArtifactSnapshot
-    model_type: ModelType
-    confidence_thresholds: SelectionConfidenceThresholds
     assignment: ClusterAssignment
 
     def __post_init__(self) -> None:
@@ -88,12 +33,6 @@ class SelectStrategyCommand:
             raise ValueError("symbol must be canonical uppercase")
         if not isinstance(self.artifact_snapshot, SelectionArtifactSnapshot):
             raise ValueError("artifact_snapshot must be a SelectionArtifactSnapshot")
-        if self.model_type not in {"gmm", "kmeans"}:
-            raise ValueError("model type must be gmm or kmeans")
-        if not isinstance(self.confidence_thresholds, SelectionConfidenceThresholds):
-            raise ValueError("confidence thresholds are required")
-        if self.confidence_thresholds.model_type != self.model_type:
-            raise ValueError("confidence threshold model type must match command model type")
         if not isinstance(self.assignment, ClusterAssignment):
             raise ValueError("assignment must be a ClusterAssignment")
         if not isinstance(self.boundary_at, datetime) or not is_regime_boundary(self.boundary_at):
@@ -121,8 +60,8 @@ class SelectStrategyCommand:
 class SelectStrategyUseCase:
     def execute(self, command: SelectStrategyCommand) -> SelectStrategyResult:
         high_confidence = _is_high_confidence(
-            command.model_type,
-            command.confidence_thresholds,
+            command.artifact_snapshot.model_type,
+            command.artifact_snapshot.confidence_thresholds,
             command.assignment,
         )
         previous = command.previous_state
@@ -141,17 +80,17 @@ class SelectStrategyUseCase:
 
 
 def _is_high_confidence(
-    model_type: ModelType,
+    model_type: str,
     thresholds: SelectionConfidenceThresholds,
     assignment: ClusterAssignment,
 ) -> bool:
     if model_type == "gmm":
         if assignment.distance is not None:
             raise ValueError("GMM assignment distance must be None")
-        return (
-            assignment.dominant_probability >= thresholds.gmm_probability_min
-            and assignment.dominant_probability - assignment.second_probability
-            >= thresholds.gmm_margin_min
+        dominant = Decimal(str(assignment.dominant_probability))
+        second = Decimal(str(assignment.second_probability))
+        return dominant >= Decimal(str(thresholds.gmm_probability_min)) and (
+            dominant - second >= Decimal(str(thresholds.gmm_margin_min))
         )
     if assignment.distance is None:
         raise ValueError("KMeans assignment distance is required")

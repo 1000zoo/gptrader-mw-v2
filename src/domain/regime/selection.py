@@ -1,8 +1,10 @@
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum
 import hashlib
 import json
+import math
 import re
 from types import MappingProxyType
 from typing import Mapping
@@ -46,6 +48,63 @@ def _sha256(value: object, field: str) -> str:
     return value
 
 
+def _probability(value: object, field: str) -> float:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        or not 0 <= value <= 1
+    ):
+        raise ValueError(f"{field} must be finite and between zero and one")
+    return float(value)
+
+
+def _distance(value: object, field: str) -> float:
+    if (
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        or value < 0
+    ):
+        raise ValueError(f"{field} must be finite and nonnegative")
+    return float(value)
+
+
+@dataclass(frozen=True)
+class SelectionConfidenceThresholds:
+    model_type: str
+    gmm_probability_min: float | None = None
+    gmm_margin_min: float | None = None
+    kmeans_max_standardized_distance: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.model_type == "gmm":
+            if self.gmm_probability_min is None or self.gmm_margin_min is None:
+                raise ValueError("GMM confidence thresholds are required")
+            _probability(self.gmm_probability_min, "gmm_probability_min")
+            _probability(self.gmm_margin_min, "gmm_margin_min")
+            if self.kmeans_max_standardized_distance is not None:
+                raise ValueError("GMM thresholds cannot contain a KMeans distance")
+        elif self.model_type == "kmeans":
+            if self.kmeans_max_standardized_distance is None:
+                raise ValueError("KMeans maximum distance is required")
+            _distance(
+                self.kmeans_max_standardized_distance,
+                "kmeans_max_standardized_distance",
+            )
+            if self.gmm_probability_min is not None or self.gmm_margin_min is not None:
+                raise ValueError("KMeans thresholds cannot contain GMM probabilities")
+        else:
+            raise ValueError("confidence threshold model type must be gmm or kmeans")
+
+
+def _canonical_float(value: float | None) -> str | None:
+    if value is None:
+        return None
+    normalized = Decimal(str(value)).normalize()
+    return "0" if normalized.is_zero() else format(normalized, "f")
+
+
 @dataclass(frozen=True)
 class SelectionArtifactSnapshot:
     """Content-bound model/mapping bundle used for one selection decision."""
@@ -53,11 +112,19 @@ class SelectionArtifactSnapshot:
     model_artifact_hash: str
     mapping_artifact_hash: str
     cluster_strategy_mapping: Mapping[str, str | None]
+    model_type: str
+    confidence_thresholds: SelectionConfidenceThresholds
     artifact_identity: str | None = None
 
     def __post_init__(self) -> None:
         _sha256(self.model_artifact_hash, "model_artifact_hash")
         _sha256(self.mapping_artifact_hash, "mapping_artifact_hash")
+        if self.model_type not in {"gmm", "kmeans"}:
+            raise ValueError("model type must be gmm or kmeans")
+        if not isinstance(self.confidence_thresholds, SelectionConfidenceThresholds):
+            raise ValueError("confidence thresholds are required")
+        if self.confidence_thresholds.model_type != self.model_type:
+            raise ValueError("confidence threshold model type must match snapshot model type")
         mapping = dict(self.cluster_strategy_mapping)
         if not mapping:
             raise ValueError("cluster strategy mapping cannot be empty")
@@ -70,6 +137,18 @@ class SelectionArtifactSnapshot:
             "model_artifact_hash": self.model_artifact_hash,
             "mapping_artifact_hash": self.mapping_artifact_hash,
             "cluster_strategy_mapping": canonical_mapping,
+            "model_type": self.model_type,
+            "confidence_thresholds": {
+                "gmm_probability_min": _canonical_float(
+                    self.confidence_thresholds.gmm_probability_min
+                ),
+                "gmm_margin_min": _canonical_float(
+                    self.confidence_thresholds.gmm_margin_min
+                ),
+                "kmeans_max_standardized_distance": _canonical_float(
+                    self.confidence_thresholds.kmeans_max_standardized_distance
+                ),
+            },
         }
         computed = hashlib.sha256(
             json.dumps(
@@ -95,6 +174,8 @@ class SelectionArtifactSnapshot:
         artifact: object,
         *,
         mapping_artifact_hash: str,
+        model_type: str,
+        confidence_thresholds: SelectionConfidenceThresholds,
         artifact_identity: str | None = None,
     ) -> "SelectionArtifactSnapshot":
         """Build a snapshot from a mapping artifact without infrastructure coupling."""
@@ -111,6 +192,8 @@ class SelectionArtifactSnapshot:
             model_artifact_hash=model_hash,
             mapping_artifact_hash=mapping_artifact_hash,
             cluster_strategy_mapping=mapping,
+            model_type=model_type,
+            confidence_thresholds=confidence_thresholds,
             artifact_identity=artifact_identity,
         )
 
@@ -229,6 +312,7 @@ class SelectStrategyResult:
 __all__ = [
     "RegimeSelectionState",
     "SelectionArtifactSnapshot",
+    "SelectionConfidenceThresholds",
     "SelectStrategyResult",
     "SelectionEventType",
 ]

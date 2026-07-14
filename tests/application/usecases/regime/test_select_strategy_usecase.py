@@ -5,12 +5,12 @@ import pytest
 from src.application.usecases.regime.select_strategy_usecase import (
     SelectStrategyCommand,
     SelectStrategyUseCase,
-    SelectionConfidenceThresholds,
 )
 from src.domain.regime.model import ClusterAssignment
 from src.domain.regime.selection import (
     RegimeSelectionState,
     SelectionArtifactSnapshot,
+    SelectionConfidenceThresholds,
     SelectionEventType,
 )
 
@@ -27,6 +27,8 @@ def _snapshot(
     mapping: dict[str, str | None] | None = None,
     *,
     identity: str | None = None,
+    model_type: str = "gmm",
+    thresholds: SelectionConfidenceThresholds | None = None,
 ) -> SelectionArtifactSnapshot:
     discriminator = label.encode().hex()[-1]
     return SelectionArtifactSnapshot(
@@ -34,6 +36,8 @@ def _snapshot(
         mapping_artifact_hash=MAPPING_HASH,
         cluster_strategy_mapping=MAPPING if mapping is None else mapping,
         artifact_identity=identity,
+        model_type=model_type,
+        confidence_thresholds=thresholds or _thresholds(model_type),
     )
 
 
@@ -102,15 +106,15 @@ def _select(
     if boundary is None:
         boundary = START if previous is None else previous.last_boundary_at + timedelta(hours=4)
     selected_mapping = MAPPING if mapping is None else mapping
-    artifact_snapshot = snapshot or _snapshot(artifact, selected_mapping)
+    artifact_snapshot = snapshot or _snapshot(
+        artifact, selected_mapping, model_type=model_type
+    )
     return SelectStrategyUseCase().execute(
         SelectStrategyCommand(
             previous_state=previous,
             symbol="BTCUSDT",
             boundary_at=boundary,
             artifact_snapshot=artifact_snapshot,
-            model_type=model_type,
-            confidence_thresholds=_thresholds(model_type),
             assignment=assignment,
         )
     )
@@ -155,7 +159,7 @@ def test_different_candidate_resets_normal_confirmation():
 
 
 def test_first_low_confidence_disables_entries_and_second_commits_cash():
-    low = _assignment(dominant=0.6, second=0.5)
+    low = _assignment(dominant=0.6, second=0.4)
     first = _select(previous=_state(), assignment=low)
 
     assert not first.state.new_entries_enabled
@@ -171,7 +175,7 @@ def test_first_low_confidence_disables_entries_and_second_commits_cash():
 def test_repeated_low_confidence_does_not_emit_duplicate_cash_transition():
     cash = _state(strategy=None, entries=False, low_count=2)
 
-    result = _select(previous=cash, assignment=_assignment(dominant=0.6, second=0.5))
+    result = _select(previous=cash, assignment=_assignment(dominant=0.6, second=0.4))
 
     assert result.state.consecutive_low_confidence_count == 2
     assert result.events == (SelectionEventType.CLASSIFICATION,)
@@ -248,7 +252,7 @@ def test_low_between_artifact_confirmations_resets_candidate():
     first = _select(previous=_state(), artifact="artifact-v2")
     low = _select(
         previous=first.state,
-        assignment=_assignment(dominant=0.6, second=0.5),
+        assignment=_assignment(dominant=0.6, second=0.4),
         artifact="artifact-v2",
     )
 
@@ -309,16 +313,9 @@ def test_rejects_assignment_missing_from_mapping():
 
 def test_rejects_model_threshold_mismatch_and_missing_kmeans_distance():
     with pytest.raises(ValueError, match="model type"):
-        SelectStrategyUseCase().execute(
-            SelectStrategyCommand(
-                previous_state=None,
-                symbol="BTCUSDT",
-                boundary_at=START,
-                artifact_snapshot=_snapshot(),
-                model_type="gmm",
-                confidence_thresholds=_thresholds("kmeans"),
-                assignment=_assignment(),
-            )
+        _snapshot(
+            model_type="gmm",
+            thresholds=_thresholds("kmeans"),
         )
 
     with pytest.raises(ValueError, match="distance"):
@@ -361,11 +358,15 @@ def test_changed_mapping_content_forces_artifact_replacement_confirmation():
         model_artifact_hash=MODEL_HASH,
         mapping_artifact_hash=MAPPING_HASH,
         cluster_strategy_mapping={"a": "strategy-x", "b": "strategy-y"},
+        model_type="gmm",
+        confidence_thresholds=_thresholds(),
     )
     changed_snapshot = SelectionArtifactSnapshot(
         model_artifact_hash=MODEL_HASH,
         mapping_artifact_hash=MAPPING_HASH,
         cluster_strategy_mapping={"a": "strategy-z", "b": "strategy-y"},
+        model_type="gmm",
+        confidence_thresholds=_thresholds(),
     )
     previous = _state(artifact=old_snapshot.artifact_identity)
 
@@ -388,6 +389,8 @@ def test_forged_artifact_snapshot_identity_is_rejected():
             mapping_artifact_hash=MAPPING_HASH,
             cluster_strategy_mapping=MAPPING,
             artifact_identity="f" * 64,
+            model_type="gmm",
+            confidence_thresholds=_thresholds(),
         )
 
 
@@ -397,6 +400,8 @@ def test_artifact_snapshot_defensively_freezes_canonical_mapping():
         model_artifact_hash=MODEL_HASH,
         mapping_artifact_hash=MAPPING_HASH,
         cluster_strategy_mapping=source,
+        model_type="gmm",
+        confidence_thresholds=_thresholds(),
     )
 
     source["a"] = "forged"
@@ -499,3 +504,94 @@ def test_persisted_selection_state_rejects_invalid_boundary_type(boundary):
 def test_cluster_assignment_rejects_boolean_numerics(values):
     with pytest.raises(ValueError):
         ClusterAssignment("a", *values)
+
+
+def test_changed_confidence_threshold_forces_new_artifact_identity():
+    original = _snapshot()
+    changed = _snapshot(
+        thresholds=SelectionConfidenceThresholds(
+            model_type="gmm",
+            gmm_probability_min=0.71,
+            gmm_margin_min=0.2,
+        )
+    )
+
+    assert changed.artifact_identity != original.artifact_identity
+    with pytest.raises(ValueError, match="artifact identity"):
+        _snapshot(
+            identity=original.artifact_identity,
+            thresholds=changed.confidence_thresholds,
+        )
+
+    previous = _state(artifact=original.artifact_identity)
+    first = _select(previous=previous, snapshot=changed)
+    assert first.state.artifact_version == original.artifact_identity
+    assert first.state.pending_artifact_version == changed.artifact_identity
+    assert first.state.pending_confirmation_count == 1
+    assert not first.state.new_entries_enabled
+
+    second = _select(previous=first.state, snapshot=changed)
+    assert second.state.artifact_version == changed.artifact_identity
+
+
+def test_changed_model_type_forces_new_artifact_identity():
+    gmm = _snapshot()
+    kmeans = _snapshot(model_type="kmeans")
+
+    assert gmm.artifact_identity != kmeans.artifact_identity
+
+
+def test_command_cannot_override_frozen_confidence_policy():
+    assert "model_type" not in SelectStrategyCommand.__dataclass_fields__
+    assert "confidence_thresholds" not in SelectStrategyCommand.__dataclass_fields__
+
+
+def test_gmm_decimal_boundary_is_inclusive_without_binary_subtraction_error():
+    snapshot = _snapshot(
+        thresholds=SelectionConfidenceThresholds(
+            model_type="gmm",
+            gmm_probability_min=0.7,
+            gmm_margin_min=0.5,
+        )
+    )
+
+    result = _select(
+        snapshot=snapshot,
+        assignment=_assignment(dominant=0.7, second=0.2),
+    )
+
+    assert result.state.active_strategy_profile_id == "strategy-x"
+    assert result.state.new_entries_enabled
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        _assignment(dominant=0.699999999999, second=0.199999999999),
+        _assignment(dominant=0.7, second=0.200000000001),
+    ],
+)
+def test_gmm_just_below_probability_or_margin_is_low(assignment):
+    snapshot = _snapshot(
+        thresholds=SelectionConfidenceThresholds(
+            model_type="gmm",
+            gmm_probability_min=0.7,
+            gmm_margin_min=0.5,
+        )
+    )
+
+    result = _select(snapshot=snapshot, assignment=assignment)
+
+    assert result.state.active_strategy_profile_id is None
+    assert not result.state.new_entries_enabled
+
+
+def test_cluster_assignment_rejects_impossible_top_two_probability_sum():
+    with pytest.raises(ValueError, match="sum"):
+        ClusterAssignment("a", 0.8, 0.7, None)
+
+
+def test_cluster_assignment_allows_tight_roundoff_at_probability_sum_one():
+    assignment = ClusterAssignment("a", 0.8, 0.2000000000005, None)
+
+    assert assignment.fingerprint == "a"

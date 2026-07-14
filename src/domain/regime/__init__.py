@@ -27,6 +27,7 @@ from src.domain.regime.mapping import (
 from src.domain.regime.selection import (
     RegimeSelectionState,
     SelectionArtifactSnapshot,
+    SelectionConfidenceThresholds,
     SelectStrategyResult,
     SelectionEventType,
 )
@@ -54,6 +55,7 @@ __all__ = [
     "has_sufficient_calendar_block_coverage",
     "RegimeSelectionState",
     "SelectionArtifactSnapshot",
+    "SelectionConfidenceThresholds",
     "SelectStrategyResult",
     "SelectionEventType",
 ]
