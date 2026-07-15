@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -58,11 +59,15 @@ def test_cli_bounds_require_canonical_midnight_z(value: str) -> None:
 
 
 def test_direct_script_help_runs_from_repository_root() -> None:
+    environment = os.environ.copy()
+    environment.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
     result = subprocess.run(
         [sys.executable, "scripts/chart_regime_balance_diagnostic.py", "--help"],
         cwd=Path(__file__).resolve().parents[1],
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="strict",
+        env=environment,
         check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -122,7 +127,7 @@ def test_report_assembly_is_deterministic_and_reserves_outcomes(tmp_path: Path) 
         "rejections": [],
     }]
     provenance = [{"url": "https://example.test/a.zip", "sha256": "a" * 64,
-                   "bytes": 123, "period": "2024-07", "status": "cached"}]
+                   "bytes": 123, "period": "2024-07", "member_identity": "a.zip"}]
     first = assemble_report(vectors=vectors, candidates=candidates, archive_provenance=provenance,
                             start=START, end=END, symbol="BTCUSDT")
     second = assemble_report(vectors=vectors, candidates=candidates, archive_provenance=provenance,
@@ -158,6 +163,28 @@ def test_atomic_writer_preserves_both_outputs_if_rendering_fails(tmp_path: Path,
         module.write_reports_atomic({"sample_count": 727}, json_path=json_path, markdown_path=markdown_path)
     assert json_path.read_text(encoding="utf-8") == "old-json"
     assert markdown_path.read_text(encoding="utf-8") == "old-markdown"
+
+
+@pytest.mark.parametrize("alias_kind", ["same", "lexical"])
+def test_atomic_writer_rejects_aliased_destinations_before_mutation(
+    tmp_path: Path, monkeypatch, alias_kind: str,
+) -> None:
+    import scripts.chart_regime_balance_diagnostic as module
+
+    output_dir = tmp_path / "not-created"
+    json_path = output_dir / "report"
+    markdown_path = json_path if alias_kind == "same" else output_dir / "sub" / ".." / "report"
+    monkeypatch.setattr(module, "render_markdown", lambda payload: (_ for _ in ()).throw(AssertionError("rendered")))
+    with pytest.raises(ValueError, match="distinct"):
+        module.write_reports_atomic({"sample_count": 727}, json_path=json_path, markdown_path=markdown_path)
+    assert not output_dir.exists()
+
+
+def test_cli_rejects_aliased_destinations() -> None:
+    from scripts.chart_regime_balance_diagnostic import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(["--json-output", "reports/out", "--markdown-output", "reports/sub/../out"])
 
 
 def test_atomic_writer_rolls_back_both_outputs_when_second_replace_fails(tmp_path: Path, monkeypatch) -> None:
@@ -269,7 +296,7 @@ def test_fixture_orchestration_reports_727_without_archive_downloads(tmp_path: P
 
     vectors = _vectors()
     provenance = [{"url": "https://example.test/BTCUSDT-1m-fixture.zip", "sha256": "f" * 64,
-                   "bytes": 1234, "period": "fixture", "status": "cached"}]
+                   "bytes": 1234, "period": "fixture", "member_identity": "BTCUSDT-1m-fixture.zip"}]
     calls = []
 
     def vector_source(**kwargs):
@@ -341,8 +368,8 @@ def test_checksum_failure_aborts_before_vectors_or_outputs(tmp_path: Path) -> No
     assert not list(tmp_path.rglob("*.md"))
 
 
-def test_archive_provenance_and_report_hash_ignore_cache_acquisition_state() -> None:
-    from scripts.chart_regime_balance_diagnostic import assemble_report, canonical_json_bytes
+def test_archive_provenance_is_stable_and_rejects_ephemeral_status() -> None:
+    from scripts.chart_regime_balance_diagnostic import assemble_report
 
     vectors = _vectors()
     shares = (243 / 727, 242 / 727, 242 / 727)
@@ -355,11 +382,43 @@ def test_archive_provenance_and_report_hash_ignore_cache_acquisition_state() -> 
         "rejections": [],
     }
     base = {"url": "https://example.test/a.zip", "sha256": "a" * 64,
-            "bytes": 123, "period": "2024-07"}
-    cached = assemble_report(vectors=vectors, candidates=[candidate], archive_provenance=[{**base, "status": "cached"}],
+            "bytes": 123, "period": "2024-07", "member_identity": "a.zip"}
+    report = assemble_report(vectors=vectors, candidates=[candidate], archive_provenance=[base],
                              start=START, end=END, symbol="BTCUSDT")
-    downloaded = assemble_report(vectors=vectors, candidates=[candidate], archive_provenance=[{**base, "status": "downloaded"}],
-                                 start=START, end=END, symbol="BTCUSDT")
-    assert cached["archive_combined_sha256"] == downloaded["archive_combined_sha256"]
-    assert canonical_json_bytes(cached) == canonical_json_bytes(downloaded)
-    assert "status" not in cached["archive_provenance"][0]
+    assert report["archive_provenance"] == [base]
+    with pytest.raises(ValueError, match="ephemeral|status"):
+        assemble_report(vectors=vectors, candidates=[candidate], archive_provenance=[{**base, "status": "cached"}],
+                        start=START, end=END, symbol="BTCUSDT")
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [
+        [],
+        [{"url": "https://example.test/a.zip", "sha256": "a" * 64, "bytes": 123, "period": "2024-07"}],
+        [{"url": "https://example.test/a.zip", "sha256": "a" * 64, "bytes": 0,
+          "period": "2024-07", "member_identity": "a.zip"}],
+        [{"url": " https://example.test/a.zip", "sha256": "a" * 64, "bytes": 123,
+          "period": "2024-07", "member_identity": "a.zip"}],
+        [{"url": "https://example.test/a.zip", "sha256": "A" * 64, "bytes": 123,
+          "period": "2024-07", "member_identity": "a.zip"}],
+        [{"url": "https://example.test/a.zip", "sha256": "a" * 64, "bytes": 123,
+          "period": " ", "member_identity": "a.zip"}],
+    ],
+)
+def test_archive_provenance_requires_complete_canonical_nonempty_identity(provenance) -> None:
+    from scripts.chart_regime_balance_diagnostic import assemble_report
+
+    vectors = _vectors()
+    shares = (243 / 727, 242 / 727, 242 / 727)
+    candidate = {
+        "identity": "fixture", "status": "accepted", "model": {},
+        "fit": {"retained_feature_names": [THREE_DAY_CHART_FEATURE_REGISTRY_V1[0].name]},
+        "metrics": {"counts": {"a": 243, "b": 242, "c": 242},
+                    "shares": dict(zip(("a", "b", "c"), shares)),
+                    "normalized_entropy": -sum(value * math.log(value) for value in shares) / math.log(3)},
+        "rejections": [],
+    }
+    with pytest.raises(ValueError, match="provenance"):
+        assemble_report(vectors=vectors, candidates=[candidate], archive_provenance=provenance,
+                        start=START, end=END, symbol="BTCUSDT")

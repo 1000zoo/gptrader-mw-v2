@@ -99,7 +99,20 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         parser.error("symbol must be canonical uppercase and end in USDT")
     if args.end <= args.start:
         parser.error("end must be after start")
+    try:
+        _validate_distinct_destinations(args.json_output, args.markdown_output)
+    except ValueError as error:
+        parser.error(str(error))
     return args
+
+
+def _destination_identity(path: Path) -> str:
+    return os.path.normcase(str(Path(path).resolve(strict=False)))
+
+
+def _validate_distinct_destinations(json_path: Path, markdown_path: Path) -> None:
+    if _destination_identity(json_path) == _destination_identity(markdown_path):
+        raise ValueError("JSON and Markdown report destinations must be distinct")
 
 
 def build_primary_configs() -> tuple[CandidateConfig, ...]:
@@ -407,28 +420,36 @@ def assemble_report(
     candidate_values = [_jsonable(item) for item in candidates]
     if not candidate_values:
         raise ValueError("diagnostic must include candidate records")
+    if not archive_provenance:
+        raise ValueError("archive provenance must be nonempty")
     provenance = []
+    required_provenance_fields = {"period", "url", "sha256", "bytes", "member_identity"}
     for raw_item in archive_provenance:
         item = _jsonable(raw_item)
-        acquisition_status = item.get("status")
-        if acquisition_status is not None and acquisition_status not in {"cached", "downloaded"}:
-            raise ValueError("archive provenance acquisition status is invalid")
-        stable = {
-            key: item[key]
-            for key in ("period", "url", "sha256", "bytes", "member_identity")
-            if key in item
-        }
+        if "status" in item:
+            raise ValueError("archive provenance must not contain ephemeral acquisition status")
+        if set(item) != required_provenance_fields:
+            raise ValueError("archive provenance must contain exactly the stable canonical fields")
+        stable = {key: item[key] for key in ("period", "url", "sha256", "bytes", "member_identity")}
         provenance.append(stable)
     for item in provenance:
         sha256 = item.get("sha256")
+        period = item.get("period")
+        url = item.get("url")
+        member_identity = item.get("member_identity")
         if (
-            not isinstance(item.get("period"), str) or not item["period"]
-            or not isinstance(item.get("url"), str) or not item["url"].startswith("https://")
+            not isinstance(period, str) or not period or period != period.strip()
+            or not isinstance(url, str) or url != url.strip() or not url.startswith("https://")
             or not isinstance(sha256, str) or len(sha256) != 64
-            or any(character not in "0123456789abcdefABCDEF" for character in sha256)
+            or sha256 != sha256.lower() or any(character not in "0123456789abcdef" for character in sha256)
             or not isinstance(item.get("bytes"), int) or isinstance(item["bytes"], bool) or item["bytes"] <= 0
+            or not isinstance(member_identity, str) or not member_identity or member_identity != member_identity.strip()
+            or "/" in member_identity or "\\" in member_identity
+            or url.rsplit("/", 1)[-1] != member_identity
         ):
-            raise ValueError("archive provenance must be checksum-verified")
+            raise ValueError("archive provenance fields must be complete and canonical")
+    if len({(item["period"], item["url"], item["sha256"]) for item in provenance}) != len(provenance):
+        raise ValueError("archive provenance entries must be unique")
     accepted = [item for item in candidate_values if item["status"] == "accepted"]
     for item in accepted:
         counts = item["metrics"].get("counts")
@@ -524,6 +545,7 @@ def _unused_sibling(final: Path, suffix: str) -> Path:
 
 
 def write_reports_atomic(payload: Mapping[str, object], *, json_path: Path, markdown_path: Path) -> None:
+    _validate_distinct_destinations(json_path, markdown_path)
     json_content = canonical_json_bytes(payload)
     markdown_content = render_markdown(payload).encode("utf-8")
     json_temp: Path | None = None
