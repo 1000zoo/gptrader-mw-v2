@@ -4,11 +4,31 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from src.domain.regime.daily_temporal import DailyRegimeEpisode, build_daily_regime_episodes
+from src.domain import regime
+from src.domain.regime import (
+    DailyRegimeEpisode,
+    THREE_DAY_CHART_FEATURE_REGISTRY_V1,
+    THREE_DAY_CHART_FEATURE_SCHEMA_VERSION,
+    ThreeDayChartFeatureVector,
+    build_daily_regime_episodes,
+)
 
 
 START = datetime(2024, 7, 1, tzinfo=timezone.utc)
 END = datetime(2026, 7, 1, tzinfo=timezone.utc)
+
+
+def test_three_day_contracts_are_exported_from_regime_public_api():
+    expected_exports = {
+        "DailyRegimeEpisode": DailyRegimeEpisode,
+        "build_daily_regime_episodes": build_daily_regime_episodes,
+        "THREE_DAY_CHART_FEATURE_REGISTRY_V1": THREE_DAY_CHART_FEATURE_REGISTRY_V1,
+        "THREE_DAY_CHART_FEATURE_SCHEMA_VERSION": THREE_DAY_CHART_FEATURE_SCHEMA_VERSION,
+        "ThreeDayChartFeatureVector": ThreeDayChartFeatureVector,
+    }
+
+    assert {name: getattr(regime, name) for name in expected_exports} == expected_exports
+    assert set(expected_exports) <= set(regime.__all__)
 
 
 def test_build_daily_regime_episodes_reserves_first_three_days_and_727_outcomes():

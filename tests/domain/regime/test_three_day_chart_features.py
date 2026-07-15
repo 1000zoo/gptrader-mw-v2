@@ -43,6 +43,51 @@ EXPECTED_NAMES = (
     "top_decile_volume_share_3d",
     "volume_ratio_1d_3d",
 )
+
+
+def _expected_spec(name, family, aggregation_minutes, lookback_minutes, formula):
+    return (
+        name,
+        family,
+        aggregation_minutes,
+        lookback_minutes,
+        formula,
+        "reject_window",
+        "train_quantile_0.005_0.995",
+        True,
+    )
+
+
+EXPECTED_REGISTRY_SNAPSHOT = (
+    _expected_spec("return_4h", "returns", 15, 240, "last close / first bar open - 1 over 4h"),
+    _expected_spec("return_12h", "returns", 15, 720, "last close / first bar open - 1 over 12h"),
+    _expected_spec("return_1d", "returns", 15, 1440, "last close / first bar open - 1 over 1d"),
+    _expected_spec("return_2d", "returns", 15, 2880, "last close / first bar open - 1 over 2d"),
+    _expected_spec("return_3d", "returns", 15, 4320, "last close / first bar open - 1 over 3d"),
+    _expected_spec("rv_4h", "volatility", 15, 240, "population stddev of 15m interval log returns including first bar open-to-close over 4h"),
+    _expected_spec("rv_1d", "volatility", 15, 1440, "population stddev of 15m interval log returns including first bar open-to-close over 1d"),
+    _expected_spec("rv_3d", "volatility", 15, 4320, "population stddev of 15m interval log returns including first bar open-to-close over 3d"),
+    _expected_spec("rv_ratio_1d_3d", "volatility", 15, 4320, "1d realized volatility / 3d realized volatility"),
+    _expected_spec("atr_ratio_1d", "range", 60, 1440, "mean 1h true range over 1d / last close"),
+    _expected_spec("atr_ratio_3d", "range", 60, 4320, "mean 1h true range over 3d / last close"),
+    _expected_spec("range_ratio_3d", "range", 60, 4320, "3d high-low range / last close"),
+    _expected_spec("close_location_3d", "range", 60, 4320, "(last close - 3d low) / 3d high-low range"),
+    _expected_spec("directional_efficiency_1d", "path", 15, 1440, "absolute net movement on path [first bar open, closes] / sum absolute movements over 1d"),
+    _expected_spec("directional_efficiency_3d", "path", 15, 4320, "absolute net movement on path [first bar open, closes] / sum absolute movements over 3d"),
+    _expected_spec("sign_change_rate_1d", "reversal", 15, 1440, "opposite-sign original adjacent nonzero 15m interval-return pairs / eligible pairs over 1d; includes first bar open-to-close return"),
+    _expected_spec("sign_change_rate_3d", "reversal", 15, 4320, "opposite-sign original adjacent nonzero 15m interval-return pairs / eligible pairs over 3d; includes first bar open-to-close return"),
+    _expected_spec("return_autocorr_1d", "reversal", 15, 1440, "lag-one population correlation of 15m interval returns including first bar open-to-close over 1d"),
+    _expected_spec("return_autocorr_3d", "reversal", 15, 4320, "lag-one population correlation of 15m interval returns including first bar open-to-close over 3d"),
+    _expected_spec("max_drawdown_3d", "excursion", 15, 4320, "minimum price / running peak price - 1 on path [first bar open, closes] over 3d"),
+    _expected_spec("max_runup_3d", "excursion", 15, 4320, "maximum price / running trough price - 1 on path [first bar open, closes] over 3d"),
+    _expected_spec("breakout_rate_3d", "structure", 15, 4320, "fraction of 15m closes outside the preceding 24h high-low range"),
+    _expected_spec("mean_body_ratio_3d", "structure", 60, 4320, "mean absolute 1h candle body / candle range; zero-range hour contributes 0"),
+    _expected_spec("mean_upper_wick_ratio_3d", "structure", 60, 4320, "mean 1h upper wick / candle range; zero-range hour contributes 0"),
+    _expected_spec("mean_lower_wick_ratio_3d", "structure", 60, 4320, "mean 1h lower wick / candle range; zero-range hour contributes 0"),
+    _expected_spec("volume_cv_3d", "volume", 60, 4320, "population stddev of 1h volume / mean 1h volume"),
+    _expected_spec("top_decile_volume_share_3d", "volume", 60, 4320, "largest ceiling ten percent 1h volumes / total 1h volume"),
+    _expected_spec("volume_ratio_1d_3d", "volume", 60, 4320, "mean last-1d 1h volume / mean 3d 1h volume"),
+)
 ANCHOR = datetime(2026, 4, 6, tzinfo=timezone.utc)
 
 
@@ -100,6 +145,22 @@ def test_three_day_registry_has_exact_feature_families():
     assert {
         spec.name: spec.family for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1
     } == expected_families
+
+
+def test_three_day_registry_has_exact_ordered_metadata_snapshot():
+    assert tuple(
+        (
+            spec.name,
+            spec.family,
+            spec.aggregation_minutes,
+            spec.lookback_minutes,
+            spec.formula,
+            spec.null_policy,
+            spec.clipping_policy,
+            spec.scale_invariant,
+        )
+        for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1
+    ) == EXPECTED_REGISTRY_SNAPSHOT
 
 
 def test_three_day_vector_fixes_schema_and_copies_values_immutably():
