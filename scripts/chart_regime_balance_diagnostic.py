@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -38,10 +37,7 @@ from src.application.services.regime_balance_diagnostics import (
     seed_stability,
     summarize_cluster_balance,
 )
-from src.application.services.three_day_chart_feature_extractor import (
-    extract_three_day_chart_feature_vector,
-)
-from src.domain.market import Candle, Symbol, Timeframe
+from src.domain.market import Candle
 from src.domain.regime import (
     THREE_DAY_CHART_FEATURE_REGISTRY_V1,
     THREE_DAY_CHART_FEATURE_SCHEMA_VERSION,
@@ -51,11 +47,13 @@ from src.domain.regime import (
 from src.domain.regime.model import RegimeModelConfig
 from src.infrastructure.exchange.binance.research_data.historical_feature_loader import (
     ArchiveDownloader,
-    archive_url,
     iter_archive_requests,
     iter_zip_csv_rows,
-    parse_kline_feature_row,
-    validate_archive,
+)
+from src.infrastructure.exchange.binance.research_data.three_day_feature_history import (
+    candle_from_kline_row as _shared_candle_from_kline_row,
+    candles_from_kline_rows,
+    load_three_day_feature_history,
 )
 from src.infrastructure.regime.sklearn_cluster_diagnostic import SklearnClusterDiagnostic
 
@@ -152,46 +150,8 @@ def build_primary_configs() -> tuple[CandidateConfig, ...]:
     return tuple(values)
 
 
-def _symbol(value: str) -> Symbol:
-    if value != value.strip().upper() or not value.endswith("USDT") or len(value) <= 4:
-        raise ValueError("symbol must be canonical uppercase USDT pair")
-    return Symbol(value[:-4], "USDT")
-
-
 def _candle_from_row(row: Sequence[object], symbol: str) -> Candle:
-    parsed = parse_kline_feature_row(row)
-    opened_at = parsed.minute_end - timedelta(minutes=1)
-    values = parsed.features
-    candle = Candle(
-        symbol=_symbol(symbol), timeframe=Timeframe(1, "m"), opened_at=opened_at,
-        closed_at=parsed.minute_end, open_price=values["open"], high_price=values["high"],
-        low_price=values["low"], close_price=values["close"], volume=values["base_volume"],
-    )
-    if any(not math.isfinite(float(value)) for value in (
-        candle.open_price, candle.high_price, candle.low_price, candle.close_price, candle.volume
-    )):
-        raise ValueError("OHLCV values must be finite")
-    return candle
-
-
-def candles_from_kline_rows(
-    rows: Iterable[Sequence[object]], *, symbol: str, start: datetime, end: datetime
-) -> tuple[Candle, ...]:
-    _symbol(symbol)
-    result: list[Candle] = []
-    expected = start
-    for row in rows:
-        candle = _candle_from_row(row, symbol)
-        if not start <= candle.opened_at < end:
-            raise ValueError("kline candle is outside requested bounds")
-        if candle.opened_at != expected:
-            kind = "duplicate" if candle.opened_at < expected else "continuity gap"
-            raise ValueError(f"kline minute {kind}")
-        result.append(candle)
-        expected += timedelta(minutes=1)
-    if expected != end:
-        raise ValueError("kline continuity does not cover exact requested bounds")
-    return tuple(result)
+    return _shared_candle_from_kline_row(row, symbol=symbol)
 
 
 def validate_vectors(
@@ -219,41 +179,17 @@ def acquire_feature_vectors(
     request_factory: Callable[..., Iterable[object]] = iter_archive_requests,
     row_reader: Callable[[Path], Iterable[Sequence[object]]] = iter_zip_csv_rows,
 ) -> tuple[tuple[ThreeDayChartFeatureVector, ...], list[dict[str, object]]]:
-    downloader = downloader or ArchiveDownloader()
-    requests = tuple(request_factory("klines", symbol, start, end, now=end + timedelta(days=32)))
-    if not requests:
-        raise ValueError("no Binance kline archive requests cover interval")
-    provenance: list[dict[str, object]] = []
-    window: deque[Candle] = deque(maxlen=4320)
-    vectors: list[ThreeDayChartFeatureVector] = []
-    expected = start
-    anchors = {episode.anchor_at for episode in build_daily_regime_episodes(start, end)}
-    for request in requests:
-        if request.symbol != symbol or request.url != archive_url("klines", symbol, request.period, request.granularity):
-            raise ValueError("archive request symbol or URL mismatch")
-        destination = raw_root / symbol / request.filename
-        result = downloader.download(request.url, destination, source="klines")
-        if result.status not in {"cached", "downloaded"} or not result.sha256:
-            raise ValueError(f"required archive unavailable: {request.period} ({result.status})")
-        validate_archive(result.path, source="klines", expected_archive_filename=request.filename)
-        provenance.append({"url": request.url, "sha256": result.sha256, "bytes": result.bytes_received,
-                           "period": request.period, "member_identity": request.filename})
-        for row in row_reader(result.path):
-            candle = _candle_from_row(row, symbol)
-            if candle.opened_at < start or candle.opened_at >= end:
-                continue
-            if candle.opened_at != expected:
-                kind = "duplicate/reversed" if candle.opened_at < expected else "missing"
-                raise ValueError(f"{kind} minute breaks exact UTC continuity")
-            window.append(candle)
-            expected = candle.closed_at
-            if expected in anchors:
-                if len(window) != 4320:
-                    raise ValueError("anchor lacks complete preceding 4320-minute window")
-                vectors.append(extract_three_day_chart_feature_vector(tuple(window), expected))
-    if expected != end:
-        raise ValueError("archive candles do not cover exact requested bounds")
-    return validate_vectors(vectors, symbol=symbol, start=start, end=end), provenance
+    vectors, provenance = load_three_day_feature_history(
+        symbol=symbol,
+        start=start,
+        end=end,
+        raw_root=raw_root,
+        expected_anchor_count=EXPECTED_SAMPLE_COUNT,
+        downloader=downloader,
+        request_factory=request_factory,
+        row_reader=row_reader,
+    )
+    return vectors, [dict(item) for item in provenance]
 
 
 def _config_payload(config: RegimeModelConfig) -> dict[str, object]:

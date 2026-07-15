@@ -21,6 +21,8 @@ from src.domain.regime import (
 UTC = timezone.utc
 START = datetime(2024, 7, 1, tzinfo=UTC)
 END = datetime(2026, 7, 1, tzinfo=UTC)
+CANONICAL_JSON_SHA256 = "2e656b11b89baf412d1f6af3217c8900165d45c14531c28f64795695baaa8f4c"
+CANONICAL_MARKDOWN_SHA256 = "8578e1579e6c3d2fa82c34870369ecc5b17ce069ec95b999d77325d29263c5d2"
 
 
 def test_defaults_and_production_grid_are_frozen() -> None:
@@ -92,6 +94,15 @@ def test_direct_script_help_runs_from_repository_root() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "three-day" in result.stdout.lower()
+
+
+def test_committed_canonical_diagnostic_hashes_are_frozen() -> None:
+    root = Path(__file__).resolve().parents[1]
+    json_path = root / "docs/backtests/chart-regime-balance-btcusdt-3d-1d-2024-2026.json"
+    markdown_path = root / "docs/backtests/chart-regime-balance-btcusdt-3d-1d-2024-2026.md"
+
+    assert hashlib.sha256(json_path.read_bytes()).hexdigest() == CANONICAL_JSON_SHA256
+    assert hashlib.sha256(markdown_path.read_bytes()).hexdigest() == CANONICAL_MARKDOWN_SHA256
 
 
 def test_candidate_payload_is_identical_across_external_thread_limits() -> None:
@@ -469,6 +480,37 @@ def test_checksum_failure_aborts_before_vectors_or_outputs(tmp_path: Path) -> No
         )
     assert not list(tmp_path.rglob("*.json"))
     assert not list(tmp_path.rglob("*.md"))
+
+
+def test_acquire_feature_vectors_delegates_to_shared_loader_with_frozen_count(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    import scripts.chart_regime_balance_diagnostic as diagnostic
+
+    vectors = _vectors()
+    stable = ({
+        "period": "2024-07", "url": "https://example.test/a.zip",
+        "sha256": "a" * 64, "bytes": 123, "member_identity": "a.zip",
+    },)
+    captured = {}
+
+    def loader(**kwargs):
+        captured.update(kwargs)
+        return vectors, stable
+
+    monkeypatch.setattr(diagnostic, "load_three_day_feature_history", loader)
+    actual_vectors, provenance = diagnostic.acquire_feature_vectors(
+        symbol="BTCUSDT", start=START, end=END, raw_root=tmp_path,
+    )
+
+    assert actual_vectors is vectors
+    assert captured["expected_anchor_count"] == 727
+    assert captured["symbol"] == "BTCUSDT"
+    assert captured["start"] == START
+    assert captured["end"] == END
+    assert captured["raw_root"] == tmp_path
+    assert provenance == [dict(stable[0])]
+    assert provenance[0] is not stable[0]
 
 
 def test_archive_provenance_is_stable_and_rejects_ephemeral_status() -> None:
