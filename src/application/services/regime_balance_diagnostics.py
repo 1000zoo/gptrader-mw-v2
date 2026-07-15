@@ -329,7 +329,7 @@ class SeedStability:
     def __post_init__(self) -> None:
         if any(not _finite(value) for value in (self.adjusted_rand_index, self.normalized_mutual_information)):
             raise ValueError("seed stability metrics must be finite")
-        if not -1 <= self.adjusted_rand_index <= 1 or not 0 <= self.normalized_mutual_information <= 1:
+        if not -.5 <= self.adjusted_rand_index <= 1 or not 0 <= self.normalized_mutual_information <= 1:
             raise ValueError("seed stability metrics are outside their theoretical ranges")
 
 
