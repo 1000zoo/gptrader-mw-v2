@@ -23,9 +23,69 @@ from src.infrastructure.regime.sklearn_regime_model import (
     _validate_covariance,
     prune_correlated_features,
 )
+from src.infrastructure.regime.json_regime_artifact_repository import model_artifact_hash
 
 
 FEATURE_NAMES = tuple(spec.name for spec in CHART_FEATURE_REGISTRY_V1)
+
+
+@pytest.mark.parametrize(
+    ("config", "expected_hash"),
+    [
+        (RegimeModelConfig("kmeans", 3), "39318ca6c32e2db67a5019e8b114d2f725d4d5731428f2239f046bcff66363a9"),
+        (
+            RegimeModelConfig("gmm", 3, covariance_type="diag"),
+            "543c933069e97db124a5d9d0a4153da32fb2b0840f272ce272b6830ff0bd0e56",
+        ),
+        (
+            RegimeModelConfig("gmm", 3, covariance_type="tied"),
+            "d5dfda332fb3723afb9fa34965fb1440624e20ef53dcd45e1f17af30baf31e29",
+        ),
+    ],
+)
+def test_seven_day_fit_bytes_remain_frozen(config, expected_hash):
+    assert model_artifact_hash(SklearnRegimeModel().fit(config, _vectors())) == expected_hash
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        (
+            RegimeModelConfig("kmeans", 3),
+            (
+                ("16250fdd086799bf7fea0c7a", 0.8787796089627629, 0.10821701730901495, 0.01557455266489679),
+                ("f5fa608d6e9b3420d5d07d8b", 0.7977904847505851, 0.10113640494281649, 0.054126467498397376),
+                ("daefcd478dbcc8e6d951e7bf", 0.8750541560708589, 0.11153793687480866, 0.06037618901274106),
+            ),
+        ),
+        (
+            RegimeModelConfig("gmm", 3, covariance_type="diag"),
+            (
+                ("c36916cea88476fd6b61f382", 1.0, 0.0, None),
+                ("4ff659f678bedac2bc816210", 1.0, 0.0, None),
+                ("c13ed8afec0513bbb9fa75d9", 1.0, 0.0, None),
+            ),
+        ),
+        (
+            RegimeModelConfig("gmm", 3, covariance_type="tied"),
+            (
+                ("0bc95608dc9d7a060bda60f6", 1.0, 0.0, None),
+                ("6e084c699c6eda67c4a91cf6", 1.0, 0.0, None),
+                ("9b0e2d8ee784ef5c6ef564a6", 1.0, 0.0, None),
+            ),
+        ),
+    ],
+)
+def test_seven_day_assignment_values_remain_frozen(config, expected):
+    engine = SklearnRegimeModel()
+    vectors = _vectors()
+    artifact = engine.fit(config, vectors)
+    actual = tuple(
+        (item.fingerprint, item.dominant_probability, item.second_probability, item.distance)
+        for item in engine.assign(artifact, vectors[-3:])
+    )
+
+    assert actual == expected
 
 
 def _vectors(count: int = 36, *, start_offset: int = 0) -> tuple[ChartFeatureVector, ...]:
