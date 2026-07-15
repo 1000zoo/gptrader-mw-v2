@@ -49,13 +49,32 @@ def test_defaults_and_production_grid_are_frozen() -> None:
 
 @pytest.mark.parametrize(
     "value",
-    ["2024-07-01", "2024-07-01T01:00:00Z", "2024-07-01T00:00:00+00:00"],
+    ["2024-07-01T01:00:00Z", "2024-07-01T00:00:00+00:00"],
 )
 def test_cli_bounds_require_canonical_midnight_z(value: str) -> None:
     from scripts.chart_regime_balance_diagnostic import parse_args
 
     with pytest.raises(SystemExit):
         parse_args(["--start", value])
+
+
+def test_cli_accepts_documented_real_diagnostic_command_contract() -> None:
+    from scripts.chart_regime_balance_diagnostic import parse_args
+
+    args = parse_args([
+        "--symbol", "BTCUSDT",
+        "--start", "2024-07-01",
+        "--end", "2026-07-01",
+        "--raw-kline-root", ".research-data/binance-usdm/raw/klines",
+        "--output-json", "docs/backtests/report.json",
+        "--output-markdown", "docs/backtests/report.md",
+    ])
+
+    assert args.start == START
+    assert args.end == END
+    assert args.raw_kline_root == Path(".research-data/binance-usdm/raw/klines")
+    assert args.json_output == Path("docs/backtests/report.json")
+    assert args.markdown_output == Path("docs/backtests/report.md")
 
 
 def test_direct_script_help_runs_from_repository_root() -> None:
