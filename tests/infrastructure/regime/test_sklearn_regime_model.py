@@ -132,6 +132,23 @@ def test_correlation_pruning_keeps_registry_priority():
     )
 
 
+def test_correlation_pruning_preserves_positional_threshold_api():
+    matrix = np.asarray(
+        [
+            [1.0, 2.0, 10.0],
+            [2.0, 4.0, 40.0],
+            [3.0, 6.0, 20.0],
+            [4.0, 8.0, 30.0],
+        ]
+    )
+    names = ("return_4h", "return_12h", "rv_1d")
+
+    assert prune_correlated_features(matrix, names, 0.9) == (
+        "return_4h",
+        "rv_1d",
+    )
+
+
 @pytest.mark.parametrize(
     "config",
     [

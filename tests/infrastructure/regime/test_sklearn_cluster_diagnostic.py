@@ -1,5 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -144,6 +145,75 @@ def test_diagnostic_fails_closed_on_registry_schema_order_and_symbol():
             engine.fit(config, vectors, REGISTRY, retained_feature_names=RETAINED),
             (wrong_schema,),
             REGISTRY,
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_spec",
+    [
+        SimpleNamespace(
+            name=REGISTRY[0].name,
+            family=REGISTRY[0].family,
+            aggregation_minutes=REGISTRY[0].aggregation_minutes,
+            lookback_minutes=REGISTRY[0].lookback_minutes,
+            formula=REGISTRY[0].formula,
+            null_policy=REGISTRY[0].null_policy,
+            clipping_policy=REGISTRY[0].clipping_policy,
+            scale_invariant=REGISTRY[0].scale_invariant,
+        ),
+        replace(REGISTRY[0], family=" returns "),
+        replace(REGISTRY[0], name="return-4h"),
+        replace(REGISTRY[0], aggregation_minutes=0),
+        replace(REGISTRY[0], lookback_minutes=0),
+        replace(REGISTRY[0], formula=" formula "),
+        replace(REGISTRY[0], null_policy=" reject_window "),
+        replace(REGISTRY[0], clipping_policy=" train_quantile_0.005_0.995 "),
+        replace(REGISTRY[0], scale_invariant=1),
+    ],
+)
+def test_diagnostic_rejects_malformed_registry_specs(bad_spec):
+    registry = (bad_spec, *REGISTRY[1:])
+
+    with pytest.raises(ValueError, match="registry"):
+        SklearnClusterDiagnostic().fit(
+            RegimeModelConfig("kmeans", 3),
+            _vectors(),
+            registry,
+            retained_feature_names=RETAINED,
+        )
+
+
+def test_diagnostic_fit_rejects_uniformly_tampered_three_day_schema():
+    vectors = list(_vectors())
+    for vector in vectors:
+        object.__setattr__(vector, "schema_version", "other-schema")
+
+    with pytest.raises(ValueError, match="schema"):
+        SklearnClusterDiagnostic().fit(
+            RegimeModelConfig("kmeans", 3),
+            tuple(vectors),
+            REGISTRY,
+            retained_feature_names=RETAINED,
+        )
+
+
+def test_diagnostic_fit_rejects_duck_typed_feature_vectors():
+    vectors = tuple(
+        SimpleNamespace(
+            symbol=vector.symbol,
+            anchor_at=vector.anchor_at,
+            schema_version=vector.schema_version,
+            values=vector.values,
+        )
+        for vector in _vectors()
+    )
+
+    with pytest.raises(ValueError, match="three-day feature vectors"):
+        SklearnClusterDiagnostic().fit(
+            RegimeModelConfig("kmeans", 3),
+            vectors,
+            REGISTRY,
+            retained_feature_names=RETAINED,
         )
 
 

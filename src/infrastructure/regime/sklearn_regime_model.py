@@ -30,8 +30,9 @@ _FAMILIES = {spec.name: spec.family for spec in CHART_FEATURE_REGISTRY_V1}
 def prune_correlated_features(
     matrix: np.ndarray,
     feature_names: tuple[str, ...],
-    registry_names: tuple[str, ...] = _REGISTRY_NAMES,
     threshold: float = 0.95,
+    *,
+    registry_names: tuple[str, ...] = _REGISTRY_NAMES,
 ) -> tuple[str, ...]:
     values = np.asarray(matrix, dtype=float)
     if values.ndim != 2 or values.shape[1] != len(feature_names) or values.shape[0] < 2:

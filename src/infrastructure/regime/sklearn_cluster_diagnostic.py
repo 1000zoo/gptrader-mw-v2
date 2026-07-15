@@ -7,7 +7,10 @@ from sklearn.preprocessing import RobustScaler
 from src.domain.regime.chart_features import ChartFeatureSpec
 from src.domain.regime.cluster_diagnostic import ClusterDiagnosticFit
 from src.domain.regime.model import ClusterAssignment, RegimeModelConfig
-from src.domain.regime.three_day_chart_features import ThreeDayChartFeatureVector
+from src.domain.regime.three_day_chart_features import (
+    THREE_DAY_CHART_FEATURE_SCHEMA_VERSION,
+    ThreeDayChartFeatureVector,
+)
 from src.infrastructure.regime.sklearn_cluster_core import (
     _ClusterArrays,
     _assign_probabilities,
@@ -131,15 +134,48 @@ def _validate_registry(
 ) -> tuple[tuple[str, ...], dict[str, str]]:
     if not isinstance(registry, (tuple, list)) or not registry:
         raise ValueError("diagnostic registry must be nonempty")
-    names = tuple(getattr(spec, "name", None) for spec in registry)
-    families = tuple(getattr(spec, "family", None) for spec in registry)
-    if (
-        any(not isinstance(name, str) or not name or name != name.strip() for name in names)
-        or len(set(names)) != len(names)
-        or any(not isinstance(family, str) or not family for family in families)
+    if any(not isinstance(spec, ChartFeatureSpec) for spec in registry):
+        raise ValueError("diagnostic registry entries must be chart feature specs")
+    names = tuple(spec.name for spec in registry)
+    families = tuple(spec.family for spec in registry)
+    if len(set(names)) != len(names) or any(
+        not _canonical_identifier(name) for name in names
     ):
-        raise ValueError("diagnostic registry names and families must be canonical and unique")
+        raise ValueError("diagnostic registry names must be canonical and unique")
+    if any(not _canonical_identifier(family) for family in families):
+        raise ValueError("diagnostic registry families must be canonical identifiers")
+    for spec in registry:
+        if (
+            not isinstance(spec.aggregation_minutes, int)
+            or isinstance(spec.aggregation_minutes, bool)
+            or spec.aggregation_minutes <= 0
+            or not isinstance(spec.lookback_minutes, int)
+            or isinstance(spec.lookback_minutes, bool)
+            or spec.lookback_minutes < spec.aggregation_minutes
+            or spec.lookback_minutes % spec.aggregation_minutes != 0
+        ):
+            raise ValueError("diagnostic registry intervals must be positive aligned integers")
+        if not _canonical_text(spec.formula):
+            raise ValueError("diagnostic registry formulas must be nonblank and canonical")
+        if not _canonical_text(spec.null_policy) or not _canonical_text(spec.clipping_policy):
+            raise ValueError("diagnostic registry policies must be nonblank and canonical")
+        if not isinstance(spec.scale_invariant, bool):
+            raise ValueError("diagnostic registry scale-invariant flags must be boolean")
     return names, dict(zip(names, families))
+
+
+def _canonical_identifier(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip()
+        and value == value.lower()
+        and value.isidentifier()
+    )
+
+
+def _canonical_text(value: object) -> bool:
+    return isinstance(value, str) and bool(value) and value == value.strip()
 
 
 def _validate_vectors(
@@ -152,6 +188,13 @@ def _validate_vectors(
         raise ValueError("feature vectors cannot be empty")
     if not vectors:
         return
+    if any(not isinstance(vector, ThreeDayChartFeatureVector) for vector in vectors):
+        raise ValueError("diagnostic inputs must be actual three-day feature vectors")
+    if any(
+        vector.schema_version != THREE_DAY_CHART_FEATURE_SCHEMA_VERSION
+        for vector in vectors
+    ):
+        raise ValueError("feature vectors must use the three-day feature schema")
     first = vectors[0]
     if any(tuple(vector.values) != registry_names for vector in vectors):
         raise ValueError("feature vectors must use ordered diagnostic registry features")
