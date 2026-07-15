@@ -1,3 +1,4 @@
+from collections import UserList
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -181,6 +182,57 @@ def test_diagnostic_rejects_malformed_registry_specs(bad_spec):
             registry,
             retained_feature_names=RETAINED,
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("formula", f"{REGISTRY[0].formula} amended"),
+        ("family", "alternate_family"),
+        ("aggregation_minutes", 30),
+        ("lookback_minutes", 480),
+        ("null_policy", "alternate_policy"),
+        ("clipping_policy", "alternate_clipping"),
+        ("scale_invariant", False),
+    ],
+)
+def test_diagnostic_rejects_semantically_altered_three_day_registry(field, value):
+    altered = replace(REGISTRY[0], **{field: value})
+    registry = (altered, *REGISTRY[1:])
+
+    with pytest.raises(ValueError, match="incompatible three-day registry"):
+        SklearnClusterDiagnostic().fit(
+            RegimeModelConfig("kmeans", 3),
+            _vectors(),
+            registry,
+            retained_feature_names=RETAINED,
+        )
+
+
+def test_diagnostic_assign_rejects_semantically_altered_three_day_registry():
+    engine = SklearnClusterDiagnostic()
+    vectors = _vectors()
+    fit = engine.fit(
+        RegimeModelConfig("kmeans", 3),
+        vectors,
+        REGISTRY,
+        retained_feature_names=RETAINED,
+    )
+    altered = replace(REGISTRY[0], formula=f"{REGISTRY[0].formula} amended")
+
+    with pytest.raises(ValueError, match="incompatible three-day registry"):
+        engine.assign(fit, vectors, (altered, *REGISTRY[1:]))
+
+
+def test_diagnostic_accepts_non_list_sequence_registry():
+    fit = SklearnClusterDiagnostic().fit(
+        RegimeModelConfig("kmeans", 3),
+        _vectors(),
+        UserList(REGISTRY),
+        retained_feature_names=RETAINED,
+    )
+
+    assert fit.feature_names == RETAINED
 
 
 def test_diagnostic_fit_rejects_uniformly_tampered_three_day_schema():

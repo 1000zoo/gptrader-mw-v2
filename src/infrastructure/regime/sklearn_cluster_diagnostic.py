@@ -1,5 +1,5 @@
 from collections import Counter
-from typing import Sequence
+from collections.abc import Sequence
 
 import numpy as np
 from sklearn.preprocessing import RobustScaler
@@ -8,6 +8,7 @@ from src.domain.regime.chart_features import ChartFeatureSpec
 from src.domain.regime.cluster_diagnostic import ClusterDiagnosticFit
 from src.domain.regime.model import ClusterAssignment, RegimeModelConfig
 from src.domain.regime.three_day_chart_features import (
+    THREE_DAY_CHART_FEATURE_REGISTRY_V1,
     THREE_DAY_CHART_FEATURE_SCHEMA_VERSION,
     ThreeDayChartFeatureVector,
 )
@@ -132,19 +133,24 @@ class SklearnClusterDiagnostic:
 def _validate_registry(
     registry: Sequence[ChartFeatureSpec],
 ) -> tuple[tuple[str, ...], dict[str, str]]:
-    if not isinstance(registry, (tuple, list)) or not registry:
+    if (
+        isinstance(registry, (str, bytes))
+        or not isinstance(registry, Sequence)
+        or not registry
+    ):
         raise ValueError("diagnostic registry must be nonempty")
-    if any(not isinstance(spec, ChartFeatureSpec) for spec in registry):
+    specs = tuple(registry)
+    if any(not isinstance(spec, ChartFeatureSpec) for spec in specs):
         raise ValueError("diagnostic registry entries must be chart feature specs")
-    names = tuple(spec.name for spec in registry)
-    families = tuple(spec.family for spec in registry)
+    names = tuple(spec.name for spec in specs)
+    families = tuple(spec.family for spec in specs)
     if len(set(names)) != len(names) or any(
         not _canonical_identifier(name) for name in names
     ):
         raise ValueError("diagnostic registry names must be canonical and unique")
     if any(not _canonical_identifier(family) for family in families):
         raise ValueError("diagnostic registry families must be canonical identifiers")
-    for spec in registry:
+    for spec in specs:
         if (
             not isinstance(spec.aggregation_minutes, int)
             or isinstance(spec.aggregation_minutes, bool)
@@ -161,6 +167,8 @@ def _validate_registry(
             raise ValueError("diagnostic registry policies must be nonblank and canonical")
         if not isinstance(spec.scale_invariant, bool):
             raise ValueError("diagnostic registry scale-invariant flags must be boolean")
+    if specs != THREE_DAY_CHART_FEATURE_REGISTRY_V1:
+        raise ValueError("incompatible three-day registry")
     return names, dict(zip(names, families))
 
 
