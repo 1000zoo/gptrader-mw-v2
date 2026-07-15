@@ -7,9 +7,11 @@ import pytest
 from src.application.services.regime_balance_diagnostics import (
     BalanceCandidate,
     BootstrapClusterShareIntervals,
+    CentroidMatch,
     ClusterBalanceSummary,
     ClusterShareInterval,
     EffectiveSampleSizes,
+    QuarterlyClusterCounts,
     bootstrap_cluster_share_intervals,
     effective_sample_sizes,
     match_refit_centroids,
@@ -63,6 +65,32 @@ def test_balance_result_rejects_counts_and_shares_that_disagree() -> None:
 
 
 @pytest.mark.parametrize(
+    "override",
+    [
+        {"normalized_entropy": .25},
+        {"normalized_entropy": True},
+        {"minimum_share": True},
+        {"counts": {"a": True, "b": 1}},
+        {"shares": {"a": True, "b": 0.5}},
+        {"total": True},
+    ],
+)
+def test_balance_result_rejects_inconsistent_entropy_and_bool_numerics(override) -> None:
+    values = dict(
+        fingerprints=("a", "b"), total=2, counts={"a": 1, "b": 1}, shares={"a": .5, "b": .5},
+        normalized_entropy=1.0, minimum_share=.5, maximum_share=.5,
+    )
+    values.update(override)
+    with pytest.raises(ValueError):
+        ClusterBalanceSummary(**values)
+
+
+def test_single_cluster_balance_requires_zero_normalized_entropy() -> None:
+    with pytest.raises(ValueError, match="entropy"):
+        ClusterBalanceSummary(("a",), 2, {"a": 2}, {"a": 1.0}, .1, 1.0, 1.0)
+
+
+@pytest.mark.parametrize(
     ("labels", "fingerprints"),
     [((), ("a",)), (("x",), ("a",)), (("a",), ()), (("a",), ("a", "a")), (("a",), ("a", " "))],
 )
@@ -113,6 +141,30 @@ def test_quarterly_counts_can_derive_first_seen_fingerprint_order() -> None:
 
     assert result.fingerprints == ("b", "a")
     assert dict(result.counts["2025-Q1"]) == {"b": 2, "a": 1}
+
+
+@pytest.mark.parametrize(
+    "quarters,counts,total",
+    [
+        (("2025-1",), {"2025-1": {"a": 1}}, 1),
+        (("2025-Q5",), {"2025-Q5": {"a": 1}}, 1),
+        (("2025-Q2", "2025-Q1"), {"2025-Q2": {"a": 1}, "2025-Q1": {"a": 1}}, 2),
+        (("2025-Q1",), {"2025-Q1": {"a": True}}, 1),
+        (("2025-Q1",), {"2025-Q1": {"a": 1}}, True),
+        (("2025-Q1",), {"2025-Q1": {"a": 1}}, -1),
+        (("2025-Q1",), {"2025-Q1": {"a": 2}}, 1),
+    ],
+)
+def test_quarterly_result_rejects_noncanonical_order_counts_and_totals(quarters, counts, total) -> None:
+    with pytest.raises(ValueError):
+        QuarterlyClusterCounts(("a",), quarters, counts, total)
+
+
+def test_quarterly_result_requires_each_row_in_exact_fingerprint_order() -> None:
+    with pytest.raises(ValueError, match="fingerprints"):
+        QuarterlyClusterCounts(
+            ("a", "b"), ("2025-Q1",), {"2025-Q1": {"b": 1, "a": 1}}, 2,
+        )
 
 
 def _reference_circular_bootstrap(labels, fingerprints, block_length, resamples, confidence, seed):
@@ -177,6 +229,26 @@ def test_effective_sample_size_detects_persistence_and_handles_zero_variance_fai
         effective_sample_sizes(("a", "b"), ("a", "b"), max_lag=0)
 
 
+def test_effective_sample_size_uses_both_positive_pairs_and_max_lag_truncation() -> None:
+    labels = tuple("b" if bit == "1" else "a" for bit in "0000011011")
+
+    through_lag_four = effective_sample_sizes(labels, ("a", "b"), max_lag=4)
+    through_lag_two = effective_sample_sizes(labels, ("a", "b"), max_lag=2)
+
+    # Hand-computed rhos: (4/15, -1/20) and (3/10, -1/60).
+    assert dict(through_lag_four.values) == pytest.approx({"a": 5.0, "b": 5.0})
+    assert dict(through_lag_two.values) == pytest.approx({"a": 300 / 43, "b": 300 / 43})
+
+
+def test_effective_sample_size_stops_before_first_nonpositive_pair() -> None:
+    labels = tuple("b" if bit == "1" else "a" for bit in "00000011")
+
+    result = effective_sample_sizes(labels, ("a", "b"), max_lag=4)
+
+    # Pair one is 11/24 - 1/12 = 3/8; pair two is -1/8 - 1/6 < 0.
+    assert dict(result.values) == pytest.approx({"a": 32 / 7, "b": 32 / 7})
+
+
 def test_seed_stability_identity_permutation_and_difference() -> None:
     identity = seed_stability(("a", "a", "b", "b"), ("a", "a", "b", "b"), ("a", "b"), ("a", "b"))
     permutation = seed_stability(("a", "a", "b", "b"), ("y", "y", "x", "x"), ("a", "b"), ("x", "y"))
@@ -208,6 +280,32 @@ def test_centroid_projection_and_hungarian_matching() -> None:
     assert result.projected_refit_centroids == ((2.0, 2.0), (2.0, 2.0))
     assert result.mean_distance == pytest.approx(math.sqrt(8) / 2)
     assert result.maximum_distance == pytest.approx(math.sqrt(8))
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"refit_to_primary": {}},
+        {"refit_to_primary": {"r0": "p0", "r1": "p0"}},
+        {"refit_to_primary": {"": "p0", "r1": "p1"}},
+        {"projected_refit_centroids": ((0.0, 0.0),)},
+        {"projected_refit_centroids": ((0.0, 0.0), (1.0,))},
+        {"projected_refit_centroids": ((), ())},
+        {"projected_refit_centroids": ((0.0, 0.0), (math.inf, 1.0))},
+        {"distances": {"r0": 0.0}},
+        {"mean_distance": .25},
+        {"maximum_distance": 2.0},
+    ],
+)
+def test_centroid_match_result_rejects_impossible_mapping_shape_and_summaries(override) -> None:
+    values = dict(
+        refit_to_primary={"r0": "p0", "r1": "p1"},
+        projected_refit_centroids=((0.0, 0.0), (1.0, 1.0)),
+        distances={"r0": 0.0, "r1": 1.0}, mean_distance=.5, maximum_distance=1.0,
+    )
+    values.update(override)
+    with pytest.raises(ValueError):
+        CentroidMatch(**values)
 
 
 @pytest.mark.parametrize(

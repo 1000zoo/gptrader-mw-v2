@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 import math
+import re
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
@@ -81,6 +82,10 @@ class ClusterBalanceSummary:
             raise ValueError("balance share extrema are inconsistent")
         if not 0 <= self.normalized_entropy <= 1 + 1e-12:
             raise ValueError("normalized entropy must lie in [0, 1]")
+        entropy = -math.fsum(share * math.log(share) for share in shares.values() if share > 0)
+        expected_entropy = 0.0 if len(names) == 1 else entropy / math.log(len(names))
+        if not math.isclose(self.normalized_entropy, expected_entropy, rel_tol=1e-12, abs_tol=1e-12):
+            raise ValueError("normalized entropy is inconsistent with stored shares")
         object.__setattr__(self, "fingerprints", names)
         object.__setattr__(self, "counts", _immutable_mapping(counts))
         object.__setattr__(self, "shares", _immutable_mapping(shares))
@@ -107,12 +112,21 @@ class QuarterlyClusterCounts:
     def __post_init__(self) -> None:
         names = _fingerprints(self.fingerprints)
         quarters = tuple(self.quarters)
-        if not quarters or len(set(quarters)) != len(quarters):
-            raise ValueError("quarters must be nonempty and unique")
+        if (
+            not quarters
+            or any(not isinstance(value, str) or re.fullmatch(r"\d{4}-Q[1-4]", value) is None for value in quarters)
+            or tuple(sorted(quarters, key=lambda value: (int(value[:4]), int(value[-1])))) != quarters
+            or len(set(quarters)) != len(quarters)
+        ):
+            raise ValueError("quarters must be nonempty canonical unique chronological keys")
+        if not isinstance(self.total, int) or isinstance(self.total, bool) or self.total < 0:
+            raise ValueError("quarter total must be a nonnegative integer")
         copied = {}
         for quarter in quarters:
             row = dict(self.counts.get(quarter, {}))
-            if tuple(row) != names or any(not isinstance(value, int) or value < 0 for value in row.values()):
+            if tuple(row) != names or any(
+                not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in row.values()
+            ):
                 raise ValueError("quarter counts must be nonnegative and match fingerprints")
             copied[quarter] = _immutable_mapping(row)
         if set(self.counts) != set(quarters) or sum(sum(row.values()) for row in copied.values()) != self.total:
@@ -339,16 +353,34 @@ class CentroidMatch:
     def __post_init__(self) -> None:
         mapping = dict(self.refit_to_primary)
         distances = dict(self.distances)
-        if set(mapping) != set(distances) or any(not _finite(value) or value < 0 for value in distances.values()):
+        if (
+            not mapping
+            or any(
+                not isinstance(key, str) or not key or key != key.strip()
+                or not isinstance(value, str) or not value or value != value.strip()
+                for key, value in mapping.items()
+            )
+            or len(set(mapping.values())) != len(mapping)
+        ):
+            raise ValueError("centroid mapping must be a nonempty canonical bijection")
+        if tuple(mapping) != tuple(distances) or any(not _finite(value) or value < 0 for value in distances.values()):
             raise ValueError("centroid mapping and distances must be finite and aligned")
-        if any(not _finite(value) for row in self.projected_refit_centroids for value in row):
-            raise ValueError("projected centroids must be finite")
+        projected = tuple(tuple(row) for row in self.projected_refit_centroids)
+        if (
+            len(projected) != len(mapping)
+            or not projected[0]
+            or any(len(row) != len(projected[0]) for row in projected)
+            or any(not _finite(value) for row in projected for value in row)
+        ):
+            raise ValueError("projected centroids must be finite with consistent nonzero dimensions")
+        if not _finite(self.mean_distance) or not _finite(self.maximum_distance):
+            raise ValueError("centroid distance summaries must be finite")
         if not math.isclose(self.mean_distance, math.fsum(distances.values()) / len(distances)) or not math.isclose(
             self.maximum_distance, max(distances.values())
         ):
             raise ValueError("centroid distance summaries are inconsistent")
         object.__setattr__(self, "refit_to_primary", _immutable_mapping(mapping))
-        object.__setattr__(self, "projected_refit_centroids", tuple(tuple(row) for row in self.projected_refit_centroids))
+        object.__setattr__(self, "projected_refit_centroids", projected)
         object.__setattr__(self, "distances", _immutable_mapping(distances))
 
 
