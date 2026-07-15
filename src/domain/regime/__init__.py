@@ -4,6 +4,12 @@ from src.domain.regime.chart_features import (
     ChartFeatureSpec,
     ChartFeatureVector,
 )
+from src.domain.regime.daily_temporal import DailyRegimeEpisode, build_daily_regime_episodes
+from src.domain.regime.three_day_chart_features import (
+    THREE_DAY_CHART_FEATURE_REGISTRY_V1,
+    THREE_DAY_CHART_FEATURE_SCHEMA_VERSION,
+    ThreeDayChartFeatureVector,
+)
 from src.domain.regime.temporal import (
     RegimeWalkForwardFold,
     UtcInterval,
@@ -39,6 +45,11 @@ __all__ = [
     "CHART_FEATURE_SCHEMA_VERSION",
     "ChartFeatureSpec",
     "ChartFeatureVector",
+    "DailyRegimeEpisode",
+    "build_daily_regime_episodes",
+    "THREE_DAY_CHART_FEATURE_REGISTRY_V1",
+    "THREE_DAY_CHART_FEATURE_SCHEMA_VERSION",
+    "ThreeDayChartFeatureVector",
     "RegimeWalkForwardFold",
     "UtcInterval",
     "WeeklyEpisode",
