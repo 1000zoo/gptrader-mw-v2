@@ -166,6 +166,8 @@ def quarterly_cluster_counts(
 
 @dataclass(frozen=True)
 class ClusterShareInterval:
+    """Observed share with percentile bounds widened to contain that point."""
+
     point: float
     lower: float
     upper: float
@@ -258,7 +260,9 @@ class EffectiveSampleSizes:
             raise ValueError("effective sample size metadata is invalid")
         if tuple(values) != names or any(not _finite(value) or not 1 <= value <= self.sample_count for value in values.values()):
             raise ValueError("effective sample sizes must be finite and lie in [1, N]")
-        if not math.isclose(self.minimum, min(values.values())):
+        if not _finite(self.minimum) or not math.isclose(
+            self.minimum, min(values.values()), rel_tol=1e-12, abs_tol=1e-12,
+        ):
             raise ValueError("minimum effective sample size is inconsistent")
         object.__setattr__(self, "fingerprints", names)
         object.__setattr__(self, "values", _immutable_mapping(values))
@@ -325,6 +329,8 @@ class SeedStability:
     def __post_init__(self) -> None:
         if any(not _finite(value) for value in (self.adjusted_rand_index, self.normalized_mutual_information)):
             raise ValueError("seed stability metrics must be finite")
+        if not -1 <= self.adjusted_rand_index <= 1 or not 0 <= self.normalized_mutual_information <= 1:
+            raise ValueError("seed stability metrics are outside their theoretical ranges")
 
 
 def seed_stability(
@@ -427,9 +433,19 @@ class PrevalenceDrift:
 
     def __post_init__(self) -> None:
         changes = dict(self.absolute_share_changes)
-        if not changes or any(not _finite(value) or not 0 <= value <= 1 for value in changes.values()):
+        _fingerprints(tuple(changes), name="prevalence drift fingerprints")
+        if any(not _finite(value) or not 0 <= value <= 1 for value in changes.values()):
             raise ValueError("prevalence changes must be finite shares")
-        if not math.isclose(self.maximum, max(changes.values())) or not math.isclose(self.l1, math.fsum(changes.values())):
+        if (
+            not _finite(self.maximum) or not 0 <= self.maximum <= 1
+            or not _finite(self.l1) or not 0 <= self.l1 <= 2
+        ):
+            raise ValueError("prevalence drift summaries are outside valid ranges")
+        if not math.isclose(
+            self.maximum, max(changes.values()), rel_tol=1e-12, abs_tol=1e-12,
+        ) or not math.isclose(
+            self.l1, math.fsum(changes.values()), rel_tol=1e-12, abs_tol=1e-12,
+        ):
             raise ValueError("prevalence drift summaries are inconsistent")
         object.__setattr__(self, "absolute_share_changes", _immutable_mapping(changes))
 

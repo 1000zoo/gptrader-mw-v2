@@ -11,7 +11,9 @@ from src.application.services.regime_balance_diagnostics import (
     ClusterBalanceSummary,
     ClusterShareInterval,
     EffectiveSampleSizes,
+    PrevalenceDrift,
     QuarterlyClusterCounts,
+    SeedStability,
     bootstrap_cluster_share_intervals,
     effective_sample_sizes,
     match_refit_centroids,
@@ -198,6 +200,22 @@ def test_circular_moving_block_bootstrap_is_deterministic_and_matches_reference(
         assert interval.lower <= interval.point <= interval.upper
 
 
+def test_circular_bootstrap_matches_frozen_small_sample_oracle() -> None:
+    result = bootstrap_cluster_share_intervals(
+        ("a", "a", "b", "b", "a"), ("a", "b"),
+        block_length=3, resamples=8, confidence=.5, seed=11,
+    )
+
+    # Frozen from eight manually enumerated circular draws; no production helper computes this oracle.
+    assert (
+        result.intervals["a"].point, result.intervals["a"].lower, result.intervals["a"].upper,
+    ) == pytest.approx((.6, .55, .65))
+    assert (
+        result.intervals["b"].point, result.intervals["b"].lower, result.intervals["b"].upper,
+    ) == pytest.approx((.4, .35, .45))
+    assert (result.sample_count, result.block_length, result.resamples, result.seed) == (5, 3, 8, 11)
+
+
 def test_bootstrap_defaults_report_all_5000_resamples() -> None:
     result = bootstrap_cluster_share_intervals(("a", "b", "a"), ("a", "b"))
     assert (result.block_length, result.resamples, result.confidence, result.seed) == (3, 5000, .95, 20260714)
@@ -209,6 +227,24 @@ def test_bootstrap_and_ess_results_reject_impossible_metadata() -> None:
         BootstrapClusterShareIntervals(("a",), {"a": interval}, 0, 1, 10, .95, 1)
     with pytest.raises(ValueError, match="metadata"):
         EffectiveSampleSizes(("a",), {"a": 1.0}, 1.0, 0, 1)
+
+
+@pytest.mark.parametrize(
+    "values,minimum",
+    [
+        ({"a": True}, 1.0),
+        ({"a": math.nan}, 1.0),
+        ({"a": 0.0}, 0.0),
+        ({"a": 6.0}, 6.0),
+        ({"a": 1.0}, True),
+        ({"a": 1.0}, math.inf),
+        ({"a": 2.0, "b": 3.0}, 2.5),
+    ],
+)
+def test_effective_sample_size_result_rejects_bool_nonfinite_range_and_minimum_mismatch(values, minimum) -> None:
+    fingerprints = tuple(values)
+    with pytest.raises(ValueError):
+        EffectiveSampleSizes(fingerprints, values, minimum, 5, 2)
 
 
 @pytest.mark.parametrize("kwargs", [{"block_length": 0}, {"block_length": 4}, {"resamples": 0}, {"confidence": 1}, {"seed": True}])
@@ -260,6 +296,20 @@ def test_seed_stability_identity_permutation_and_difference() -> None:
     assert different.normalized_mutual_information < 1
     with pytest.raises(ValueError):
         seed_stability(("a",), ("x", "x"), ("a",), ("x",))
+
+
+@pytest.mark.parametrize(
+    "ari,nmi",
+    [(True, .5), (.5, False), (math.nan, .5), (.5, math.inf), (-1.01, .5), (1.01, .5), (.5, -.01), (.5, 1.01)],
+)
+def test_seed_stability_result_rejects_bool_nonfinite_and_out_of_range_metrics(ari, nmi) -> None:
+    with pytest.raises(ValueError):
+        SeedStability(ari, nmi)
+
+
+def test_seed_stability_result_accepts_theoretical_boundaries() -> None:
+    assert SeedStability(-1.0, 0.0) == SeedStability(-1.0, 0.0)
+    assert SeedStability(1.0, 1.0) == SeedStability(1.0, 1.0)
 
 
 def test_centroid_projection_and_hungarian_matching() -> None:
@@ -341,6 +391,33 @@ def test_prevalence_drift_applies_matching_before_comparison() -> None:
     assert dict(result.absolute_share_changes) == pytest.approx({"p0": .25, "p1": .25})
     assert result.maximum == pytest.approx(.25)
     assert result.l1 == pytest.approx(.5)
+
+
+@pytest.mark.parametrize(
+    "changes,maximum,l1",
+    [
+        ({"p0": True}, 1.0, 1.0),
+        ({"p0": math.nan}, 0.0, 0.0),
+        ({"p0": -.1}, 0.0, 0.0),
+        ({"p0": 1.1}, 1.1, 1.1),
+        ({"p0": 1.0}, True, 1.0),
+        ({"p0": 1.0}, 1.0, True),
+        ({"p0": .5}, math.inf, .5),
+        ({"p0": .5}, .5, math.nan),
+        ({"p0": .5}, .4, .5),
+        ({"p0": .5}, .5, .4),
+        ({"p0": 1.0, "p1": 1.0, "p2": 1.0}, 1.0, 3.0),
+        ({"": .5}, .5, .5),
+    ],
+)
+def test_prevalence_drift_result_rejects_invalid_values_keys_and_summaries(changes, maximum, l1) -> None:
+    with pytest.raises(ValueError):
+        PrevalenceDrift(changes, maximum, l1)
+
+
+def test_prevalence_drift_result_accepts_summary_boundaries() -> None:
+    result = PrevalenceDrift({"p0": 1.0, "p1": 1.0}, 1.0, 2.0)
+    assert (result.maximum, result.l1) == (1.0, 2.0)
 
 
 def test_ranking_is_descriptive_stable_and_preserves_rejected_candidates() -> None:
