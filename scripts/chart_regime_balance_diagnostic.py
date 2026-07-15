@@ -203,7 +203,7 @@ def acquire_feature_vectors(
             raise ValueError(f"required archive unavailable: {request.period} ({result.status})")
         validate_archive(result.path, source="klines", expected_archive_filename=request.filename)
         provenance.append({"url": request.url, "sha256": result.sha256, "bytes": result.bytes_received,
-                           "period": request.period, "status": result.status})
+                           "period": request.period, "member_identity": request.filename})
         for row in row_reader(result.path):
             candle = _candle_from_row(row, symbol)
             if candle.opened_at < start or candle.opened_at >= end:
@@ -283,6 +283,30 @@ def _gmm_bic(vectors: Sequence[ThreeDayChartFeatureVector], fit: object) -> floa
     return result
 
 
+def cross_half_prevalence_drift(
+    *, first_labels: Sequence[str], second_labels: Sequence[str],
+    first_to_primary: Mapping[str, str], second_to_primary: Mapping[str, str],
+    primary_fingerprints: Sequence[str],
+) -> object:
+    """Compare chronological refit prevalence after both halves share primary IDs."""
+    primary = tuple(primary_fingerprints)
+    first_mapping = dict(first_to_primary)
+    second_mapping = dict(second_to_primary)
+    try:
+        first_mapped = tuple(first_mapping[label] for label in first_labels)
+        second_mapped = tuple(second_mapping[label] for label in second_labels)
+    except KeyError as error:
+        raise ValueError("chronological labels must be covered by centroid mappings") from error
+    identity = {fingerprint: fingerprint for fingerprint in primary}
+    return prevalence_drift(
+        first_half_labels=first_mapped,
+        second_half_labels=second_mapped,
+        primary_fingerprints=primary,
+        refit_fingerprints=primary,
+        refit_to_primary=identity,
+    )
+
+
 def _fit_candidate(config: CandidateConfig, vectors: tuple[ThreeDayChartFeatureVector, ...], adapter: object) -> dict[str, object]:
     registry = THREE_DAY_CHART_FEATURE_REGISTRY_V1
     primary = adapter.fit(config.model, vectors, registry)
@@ -311,11 +335,12 @@ def _fit_candidate(config: CandidateConfig, vectors: tuple[ThreeDayChartFeatureV
         stability = seed_stability(labels, refit_labels, primary.fingerprints, refit.fingerprints)
         seed_results.append({"seed": seed, **_jsonable(stability)})
     chronological = []
+    chronological_labels = []
+    chronological_mappings = []
     split = len(vectors) // 2
     for name, block in (("first", vectors[:split]), ("second", vectors[split:])):
         refit = adapter.fit(config.model, block, registry, retained_feature_names=primary.feature_names)
         refit_labels = tuple(item.fingerprint for item in adapter.assign(refit, block, registry))
-        primary_block_labels = tuple(item.fingerprint for item in adapter.assign(primary, block, registry))
         matching = match_refit_centroids(
             primary_centroids=primary.means, refit_centroids=refit.means,
             primary_feature_names=primary.feature_names, refit_feature_names=refit.feature_names,
@@ -323,11 +348,15 @@ def _fit_candidate(config: CandidateConfig, vectors: tuple[ThreeDayChartFeatureV
             refit_means=refit.medians, refit_scales=refit.scales,
             primary_fingerprints=primary.fingerprints, refit_fingerprints=refit.fingerprints,
         )
-        drift = prevalence_drift(first_half_labels=primary_block_labels, second_half_labels=refit_labels,
-                                 primary_fingerprints=primary.fingerprints, refit_fingerprints=refit.fingerprints,
-                                 refit_to_primary=matching.refit_to_primary)
         chronological.append({"block": name, "sample_count": len(block), "fit": _fit_payload(refit),
-                              "centroid_matching": _jsonable(matching), "prevalence_drift": _jsonable(drift)})
+                              "centroid_matching": _jsonable(matching)})
+        chronological_labels.append(refit_labels)
+        chronological_mappings.append(matching.refit_to_primary)
+    cross_half_drift = cross_half_prevalence_drift(
+        first_labels=chronological_labels[0], second_labels=chronological_labels[1],
+        first_to_primary=chronological_mappings[0], second_to_primary=chronological_mappings[1],
+        primary_fingerprints=primary.fingerprints,
+    )
     if config.model.model_type == "kmeans":
         label_indices = [primary.fingerprints.index(label) for label in labels]
         family_metric = {"silhouette": float(silhouette_score(_scaled_matrix(vectors, primary), label_indices)), "bic": None}
@@ -338,11 +367,13 @@ def _fit_candidate(config: CandidateConfig, vectors: tuple[ThreeDayChartFeatureV
         "fit": _fit_payload(primary),
         "metrics": {
             "counts": dict(balance.counts), "shares": dict(balance.shares),
+            "empty_cluster_count": sum(count == 0 for count in balance.counts.values()),
             "normalized_entropy": balance.normalized_entropy, "minimum_share": balance.minimum_share,
             "maximum_share": balance.maximum_share, "quarterly": _jsonable(quarters),
             "quarter_warnings": quarter_warnings,
             "bootstrap": _jsonable(bootstrap), "minimum_ess": ess.minimum, "effective_sample_sizes": _jsonable(ess),
-            "seed_stability": seed_results, "chronological_stability": chronological, **family_metric,
+            "seed_stability": seed_results, "chronological_stability": chronological,
+            "cross_half_prevalence_drift": _jsonable(cross_half_drift), **family_metric,
         },
         "rejections": [],
     }
@@ -376,11 +407,38 @@ def assemble_report(
     candidate_values = [_jsonable(item) for item in candidates]
     if not candidate_values:
         raise ValueError("diagnostic must include candidate records")
-    provenance = [_jsonable(item) for item in archive_provenance]
+    provenance = []
+    for raw_item in archive_provenance:
+        item = _jsonable(raw_item)
+        acquisition_status = item.get("status")
+        if acquisition_status is not None and acquisition_status not in {"cached", "downloaded"}:
+            raise ValueError("archive provenance acquisition status is invalid")
+        stable = {
+            key: item[key]
+            for key in ("period", "url", "sha256", "bytes", "member_identity")
+            if key in item
+        }
+        provenance.append(stable)
     for item in provenance:
-        if item.get("status") not in {"cached", "downloaded"} or not isinstance(item.get("sha256"), str) or len(item["sha256"]) != 64:
+        sha256 = item.get("sha256")
+        if (
+            not isinstance(item.get("period"), str) or not item["period"]
+            or not isinstance(item.get("url"), str) or not item["url"].startswith("https://")
+            or not isinstance(sha256, str) or len(sha256) != 64
+            or any(character not in "0123456789abcdefABCDEF" for character in sha256)
+            or not isinstance(item.get("bytes"), int) or isinstance(item["bytes"], bool) or item["bytes"] <= 0
+        ):
             raise ValueError("archive provenance must be checksum-verified")
     accepted = [item for item in candidate_values if item["status"] == "accepted"]
+    for item in accepted:
+        counts = item["metrics"].get("counts")
+        if not isinstance(counts, Mapping) or not counts:
+            raise ValueError("accepted candidate metrics require cluster counts")
+        empty_cluster_count = sum(count == 0 for count in counts.values())
+        reported = item["metrics"].get("empty_cluster_count", empty_cluster_count)
+        if reported != empty_cluster_count:
+            raise ValueError("empty cluster count is inconsistent with cluster counts")
+        item["metrics"]["empty_cluster_count"] = empty_cluster_count
     ranking_inputs = []
     for item in accepted:
         metrics = item["metrics"]
@@ -417,8 +475,8 @@ def canonical_json_bytes(payload: object) -> bytes:
 
 def render_markdown(payload: Mapping[str, object]) -> str:
     lines = ["# Three-day regime balance diagnostic", "", "Descriptive comparison only; ranking is not selection.", "",
-             "| Candidate | Status | Counts | Shares | Entropy | Min ESS | Quarter warnings | Seed stability | Chronological stability | Rejections |",
-             "|---|---|---|---|---:|---:|---|---|---|---|"]
+             "| Candidate | Status | Counts | Shares | Empty clusters | Entropy | Min ESS | Quarter warnings | Seed stability | Chronological stability | Cross-half prevalence drift | Rejections |",
+             "|---|---|---|---|---:|---:|---:|---|---|---|---|---|"]
     for candidate in payload.get("candidate_configs", []):
         metrics = candidate.get("metrics") or {}
         quarterly = metrics.get("quarterly", {})
@@ -426,13 +484,22 @@ def render_markdown(payload: Mapping[str, object]) -> str:
         warnings = [quarter for quarter, counts in quarter_counts.items() if any(value == 0 for value in counts.values())]
         lines.append(
             f"| {candidate['identity']} | {candidate['status']} | {metrics.get('counts', {})} | {metrics.get('shares', {})} | "
+            f"{metrics.get('empty_cluster_count', 'n/a')} | "
             f"{metrics.get('normalized_entropy', 'n/a')} | {metrics.get('minimum_ess', 'n/a')} | {warnings or 'none'} | "
             f"{metrics.get('seed_stability', 'n/a')} | {metrics.get('chronological_stability', 'n/a')} | "
+            f"{metrics.get('cross_half_prevalence_drift', 'n/a')} | "
             f"{candidate.get('rejections') or 'none'} |"
         )
     lines.extend(["", "## Limitations", "", "- 727 overlapping 3d windows are not independent.",
                   "- No strategy evaluated.", "- No production model selected.", ""])
     return "\n".join(lines)
+
+
+def _best_effort_unlink(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _write_temp(final: Path, content: bytes) -> Path:
@@ -444,8 +511,16 @@ def _write_temp(final: Path, content: bytes) -> Path:
             stream.write(content); stream.flush(); os.fsync(stream.fileno())
         return temporary
     except BaseException:
-        temporary.unlink(missing_ok=True)
+        _best_effort_unlink(temporary)
         raise
+
+
+def _unused_sibling(final: Path, suffix: str) -> Path:
+    descriptor, name = tempfile.mkstemp(prefix=f".{final.name}.", suffix=suffix, dir=final.parent)
+    os.close(descriptor)
+    path = Path(name)
+    path.unlink()
+    return path
 
 
 def write_reports_atomic(payload: Mapping[str, object], *, json_path: Path, markdown_path: Path) -> None:
@@ -453,14 +528,47 @@ def write_reports_atomic(payload: Mapping[str, object], *, json_path: Path, mark
     markdown_content = render_markdown(payload).encode("utf-8")
     json_temp: Path | None = None
     markdown_temp: Path | None = None
+    finals = (Path(json_path), Path(markdown_path))
+    backups: dict[Path, Path] = {}
+    originally_absent: set[Path] = set()
+    published: set[Path] = set()
+    publication_succeeded = False
     try:
-        json_temp = _write_temp(Path(json_path), json_content)
-        markdown_temp = _write_temp(Path(markdown_path), markdown_content)
-        json_temp.replace(json_path); json_temp = None
-        markdown_temp.replace(markdown_path); markdown_temp = None
+        json_temp = _write_temp(finals[0], json_content)
+        markdown_temp = _write_temp(finals[1], markdown_content)
+        for final in finals:
+            if final.exists():
+                backup = _unused_sibling(final, ".bak")
+                final.replace(backup)
+                backups[final] = backup
+            else:
+                originally_absent.add(final)
+        json_temp.replace(finals[0]); json_temp = None; published.add(finals[0])
+        markdown_temp.replace(finals[1]); markdown_temp = None; published.add(finals[1])
+        publication_succeeded = True
+    except BaseException as publication_error:
+        rollback_errors = []
+        for final in finals:
+            try:
+                if final in published:
+                    final.unlink(missing_ok=True)
+                if final in backups:
+                    backups[final].replace(final)
+                    backups.pop(final)
+                elif final in originally_absent:
+                    final.unlink(missing_ok=True)
+            except BaseException as rollback_error:
+                rollback_errors.append(rollback_error)
+        if rollback_errors:
+            for error in rollback_errors:
+                publication_error.add_note(f"rollback error: {error}")
+        raise
     finally:
-        if json_temp is not None: json_temp.unlink(missing_ok=True)
-        if markdown_temp is not None: markdown_temp.unlink(missing_ok=True)
+        if json_temp is not None: _best_effort_unlink(json_temp)
+        if markdown_temp is not None: _best_effort_unlink(markdown_temp)
+        if publication_succeeded:
+            for backup in backups.values():
+                _best_effort_unlink(backup)
 
 
 def run_diagnostic(

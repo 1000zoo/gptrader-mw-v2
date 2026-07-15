@@ -113,9 +113,9 @@ def test_report_assembly_is_deterministic_and_reserves_outcomes(tmp_path: Path) 
         "model": {"model_type": "kmeans", "cluster_count": 3, "random_seed": 20260714,
                   "covariance_type": None, "regularization": 1e-6},
         "fit": {"retained_feature_names": [spec.name for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1[:4]]},
-        "metrics": {"counts": {"a": 243, "b": 242, "c": 242},
-                    "shares": {"a": 243 / 727, "b": 242 / 727, "c": 242 / 727},
-                    "normalized_entropy": -sum(share * math.log(share) for share in (243 / 727, 242 / 727, 242 / 727)) / math.log(3),
+        "metrics": {"counts": {"a": 365, "b": 362, "c": 0},
+                    "shares": {"a": 365 / 727, "b": 362 / 727, "c": 0},
+                    "normalized_entropy": -sum(share * math.log(share) for share in (365 / 727, 362 / 727) if share) / math.log(3),
                     "minimum_ess": 20.0,
                     "quarterly": {}, "seed_stability": {}, "chronological_stability": [],
                     "silhouette": 0.3, "bic": None},
@@ -133,6 +133,7 @@ def test_report_assembly_is_deterministic_and_reserves_outcomes(tmp_path: Path) 
     assert first["strategy_outcomes_evaluated"] is False
     assert first["production_model_selected"] is False
     assert first["outcome_evaluation"] == "reserved_not_evaluated"
+    assert first["candidate_configs"][0]["metrics"]["empty_cluster_count"] == 1
     assert "following" not in canonical_json_bytes(first).decode().lower()
 
     json_path, markdown_path = tmp_path / "report.json", tmp_path / "report.md"
@@ -142,6 +143,8 @@ def test_report_assembly_is_deterministic_and_reserves_outcomes(tmp_path: Path) 
     assert "727 overlapping 3d windows are not independent" in markdown
     assert "no strategy evaluated" in markdown.lower()
     assert "no production model selected" in markdown.lower()
+    assert "Empty clusters" in markdown
+    assert "Cross-half prevalence drift" in markdown
 
 
 def test_atomic_writer_preserves_both_outputs_if_rendering_fails(tmp_path: Path, monkeypatch) -> None:
@@ -157,6 +160,83 @@ def test_atomic_writer_preserves_both_outputs_if_rendering_fails(tmp_path: Path,
     assert markdown_path.read_text(encoding="utf-8") == "old-markdown"
 
 
+def test_atomic_writer_rolls_back_both_outputs_when_second_replace_fails(tmp_path: Path, monkeypatch) -> None:
+    import scripts.chart_regime_balance_diagnostic as module
+
+    json_path, markdown_path = tmp_path / "report.json", tmp_path / "report.md"
+    json_path.write_text("old-json", encoding="utf-8")
+    markdown_path.write_text("old-markdown", encoding="utf-8")
+    original_replace = Path.replace
+    final_replacements = 0
+
+    def fail_second_final(source: Path, target: Path):
+        nonlocal final_replacements
+        if Path(target) in {json_path, markdown_path} and Path(source).suffix == ".tmp":
+            final_replacements += 1
+            if final_replacements == 2:
+                raise OSError("second publication failed")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", fail_second_final)
+    with pytest.raises(OSError, match="second publication"):
+        module.write_reports_atomic({"sample_count": 727}, json_path=json_path, markdown_path=markdown_path)
+    assert json_path.read_text(encoding="utf-8") == "old-json"
+    assert markdown_path.read_text(encoding="utf-8") == "old-markdown"
+
+
+def test_atomic_writer_removes_new_outputs_when_second_replace_fails(tmp_path: Path, monkeypatch) -> None:
+    import scripts.chart_regime_balance_diagnostic as module
+
+    json_path, markdown_path = tmp_path / "new.json", tmp_path / "new.md"
+    original_replace = Path.replace
+    final_replacements = 0
+
+    def fail_second_final(source: Path, target: Path):
+        nonlocal final_replacements
+        if Path(target) in {json_path, markdown_path} and Path(source).suffix == ".tmp":
+            final_replacements += 1
+            if final_replacements == 2:
+                raise OSError("second publication failed")
+        return original_replace(source, target)
+
+    monkeypatch.setattr(Path, "replace", fail_second_final)
+    with pytest.raises(OSError, match="second publication"):
+        module.write_reports_atomic({"sample_count": 727}, json_path=json_path, markdown_path=markdown_path)
+    assert not json_path.exists()
+    assert not markdown_path.exists()
+
+
+def test_atomic_cleanup_failure_does_not_mask_publication_failure(tmp_path: Path, monkeypatch) -> None:
+    import scripts.chart_regime_balance_diagnostic as module
+
+    json_path, markdown_path = tmp_path / "report.json", tmp_path / "report.md"
+    json_path.write_text("old-json", encoding="utf-8")
+    markdown_path.write_text("old-markdown", encoding="utf-8")
+    original_replace = Path.replace
+    original_unlink = Path.unlink
+    final_replacements = 0
+
+    def fail_second_final(source: Path, target: Path):
+        nonlocal final_replacements
+        if Path(target) in {json_path, markdown_path} and Path(source).suffix == ".tmp":
+            final_replacements += 1
+            if final_replacements == 2:
+                raise OSError("publication root cause")
+        return original_replace(source, target)
+
+    def fail_temp_cleanup(path: Path, *args, **kwargs):
+        if path.suffix == ".tmp":
+            raise PermissionError("cleanup noise")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "replace", fail_second_final)
+    monkeypatch.setattr(Path, "unlink", fail_temp_cleanup)
+    with pytest.raises(OSError, match="publication root cause"):
+        module.write_reports_atomic({"sample_count": 727}, json_path=json_path, markdown_path=markdown_path)
+    assert json_path.read_text(encoding="utf-8") == "old-json"
+    assert markdown_path.read_text(encoding="utf-8") == "old-markdown"
+
+
 def test_kline_rows_reject_duplicate_gap_wrong_symbol_bounds_and_nonfinite() -> None:
     from scripts.chart_regime_balance_diagnostic import candles_from_kline_rows
 
@@ -166,6 +246,11 @@ def test_kline_rows_reject_duplicate_gap_wrong_symbol_bounds_and_nonfinite() -> 
     assert len(candles_from_kline_rows([row], symbol="BTCUSDT", start=start, end=start + timedelta(minutes=1))) == 1
     with pytest.raises(ValueError, match="duplicate|continuity"):
         candles_from_kline_rows([row, row], symbol="BTCUSDT", start=start, end=start + timedelta(minutes=2))
+    forward = row.copy()
+    forward[0] = str(millis + 120_000)
+    forward[6] = str(millis + 179_999)
+    with pytest.raises(ValueError, match="gap|continuity"):
+        candles_from_kline_rows([row, forward], symbol="BTCUSDT", start=start, end=start + timedelta(minutes=3))
     with pytest.raises(ValueError, match="bounds"):
         candles_from_kline_rows([row], symbol="BTCUSDT", start=start + timedelta(minutes=1), end=start + timedelta(minutes=2))
     bad = row.copy(); bad[4] = "nan"
@@ -215,3 +300,66 @@ def test_nonfinite_report_metric_is_rejected_before_output_replacement(tmp_path:
         write_reports_atomic({"metric": float("nan")}, json_path=json_path, markdown_path=markdown_path)
     assert json_path.read_text(encoding="utf-8") == "old-json"
     assert markdown_path.read_text(encoding="utf-8") == "old-markdown"
+
+
+def test_cross_half_prevalence_uses_refits_mapped_to_common_primary_ids() -> None:
+    from scripts.chart_regime_balance_diagnostic import cross_half_prevalence_drift
+
+    result = cross_half_prevalence_drift(
+        first_labels=("x", "x", "y", "y"),
+        second_labels=("p", "p", "p", "q"),
+        first_to_primary={"x": "a", "y": "b"},
+        second_to_primary={"p": "a", "q": "b"},
+        primary_fingerprints=("a", "b"),
+    )
+    assert result.absolute_share_changes == {"a": .25, "b": .25}
+    assert result.maximum == .25
+    assert result.l1 == .5
+
+
+def test_checksum_failure_aborts_before_vectors_or_outputs(tmp_path: Path) -> None:
+    from src.infrastructure.exchange.binance.research_data.historical_feature_loader import (
+        ArchiveRequest,
+        ChecksumMismatchError,
+    )
+    from scripts.chart_regime_balance_diagnostic import acquire_feature_vectors
+
+    class BadChecksumDownloader:
+        def download(self, *args, **kwargs):
+            raise ChecksumMismatchError("fixture checksum mismatch")
+
+    request = ArchiveRequest(
+        "klines", "BTCUSDT", "monthly", "2024-07",
+        "https://data.binance.vision/data/futures/um/monthly/klines/BTCUSDT/1m/BTCUSDT-1m-2024-07.zip",
+    )
+    with pytest.raises(ChecksumMismatchError, match="checksum"):
+        acquire_feature_vectors(
+            symbol="BTCUSDT", start=START, end=END, raw_root=tmp_path,
+            downloader=BadChecksumDownloader(), request_factory=lambda *args, **kwargs: (request,),
+        )
+    assert not list(tmp_path.rglob("*.json"))
+    assert not list(tmp_path.rglob("*.md"))
+
+
+def test_archive_provenance_and_report_hash_ignore_cache_acquisition_state() -> None:
+    from scripts.chart_regime_balance_diagnostic import assemble_report, canonical_json_bytes
+
+    vectors = _vectors()
+    shares = (243 / 727, 242 / 727, 242 / 727)
+    candidate = {
+        "identity": "fixture", "status": "accepted", "model": {},
+        "fit": {"retained_feature_names": [THREE_DAY_CHART_FEATURE_REGISTRY_V1[0].name]},
+        "metrics": {"counts": {"a": 243, "b": 242, "c": 242},
+                    "shares": dict(zip(("a", "b", "c"), shares)),
+                    "normalized_entropy": -sum(value * math.log(value) for value in shares) / math.log(3)},
+        "rejections": [],
+    }
+    base = {"url": "https://example.test/a.zip", "sha256": "a" * 64,
+            "bytes": 123, "period": "2024-07"}
+    cached = assemble_report(vectors=vectors, candidates=[candidate], archive_provenance=[{**base, "status": "cached"}],
+                             start=START, end=END, symbol="BTCUSDT")
+    downloaded = assemble_report(vectors=vectors, candidates=[candidate], archive_provenance=[{**base, "status": "downloaded"}],
+                                 start=START, end=END, symbol="BTCUSDT")
+    assert cached["archive_combined_sha256"] == downloaded["archive_combined_sha256"]
+    assert canonical_json_bytes(cached) == canonical_json_bytes(downloaded)
+    assert "status" not in cached["archive_provenance"][0]
