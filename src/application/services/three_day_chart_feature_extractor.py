@@ -40,14 +40,16 @@ def extract_three_day_chart_feature_vector(
     if not _is_midnight_utc(anchor_at):
         raise ValueError("anchor must be canonical midnight UTC")
     window_start_at = anchor_at - timedelta(days=3)
-    try:
-        window = tuple(
-            candle
-            for candle in candles
-            if window_start_at <= candle.opened_at < anchor_at
-        )
-    except TypeError as error:
-        raise ValueError("complete three-day one-minute history is required") from error
+    window_items = []
+    for candle in candles:
+        if (
+            candle.opened_at.tzinfo is not timezone.utc
+            or candle.closed_at.tzinfo is not timezone.utc
+        ):
+            raise ValueError("complete three-day one-minute history is required")
+        if window_start_at <= candle.opened_at < anchor_at:
+            window_items.append(candle)
+    window = tuple(window_items)
     _validate_window(window, window_start_at, anchor_at)
     bars_15m = aggregate_closed_candles(window, minutes=15)
     bars_1h = aggregate_closed_candles(window, minutes=60)
@@ -191,6 +193,32 @@ def _validate_aggregated_history(
         or bars_15m[-1].closed_at != bars_1h[-1].closed_at
     ):
         raise ValueError("complete aligned three-day aggregated history is required")
+    for hour_index, bar_1h in enumerate(bars_1h):
+        bucket = bars_15m[hour_index * 4 : (hour_index + 1) * 4]
+        expected = (
+            bucket[0].symbol,
+            Timeframe(60, "m"),
+            bucket[0].opened_at,
+            bucket[-1].closed_at,
+            bucket[0].open_price,
+            max(bar.high_price for bar in bucket),
+            min(bar.low_price for bar in bucket),
+            bucket[-1].close_price,
+            sum(bar.volume for bar in bucket),
+        )
+        actual = (
+            bar_1h.symbol,
+            bar_1h.timeframe,
+            bar_1h.opened_at,
+            bar_1h.closed_at,
+            bar_1h.open_price,
+            bar_1h.high_price,
+            bar_1h.low_price,
+            bar_1h.close_price,
+            bar_1h.volume,
+        )
+        if actual != expected:
+            raise ValueError("three-day cross-resolution inconsistency")
     for bar in (*bars_15m, *bars_1h):
         if any(
             not math.isfinite(float(value))

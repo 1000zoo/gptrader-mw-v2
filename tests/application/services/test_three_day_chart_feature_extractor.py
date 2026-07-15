@@ -77,6 +77,26 @@ def _bars(*, minutes, count):
     return tuple(bars)
 
 
+def _aggregate_15m_to_1h(bars_15m):
+    bars = []
+    for offset in range(0, len(bars_15m), 4):
+        bucket = bars_15m[offset:offset + 4]
+        bars.append(
+            Candle(
+                symbol=bucket[0].symbol,
+                timeframe=Timeframe(60, "m"),
+                opened_at=bucket[0].opened_at,
+                closed_at=bucket[-1].closed_at,
+                open_price=bucket[0].open_price,
+                high_price=max(bar.high_price for bar in bucket),
+                low_price=min(bar.low_price for bar in bucket),
+                close_price=bucket[-1].close_price,
+                volume=sum((bar.volume for bar in bucket), Decimal("0")),
+            )
+        )
+    return tuple(bars)
+
+
 def _reference_values(bars_15m, bars_1h):
     def path(bars):
         return [float(bars[0].open_price), *[float(bar.close_price) for bar in bars]]
@@ -200,7 +220,8 @@ def test_registry_values_match_independent_formula_reference():
         calculate_three_day_registry_values,
     )
 
-    bars_15m, bars_1h = _bars(minutes=15, count=288), _bars(minutes=60, count=72)
+    bars_15m = _bars(minutes=15, count=288)
+    bars_1h = _aggregate_15m_to_1h(bars_15m)
     actual = calculate_three_day_registry_values(bars_15m, bars_1h)
     expected = _reference_values(bars_15m, bars_1h)
 
@@ -236,12 +257,26 @@ def test_extractor_requires_midnight_canonical_utc_anchor():
         extract_three_day_chart_feature_vector(_minute_candles(), ANCHOR.replace(tzinfo=None))
 
 
+def test_extractor_preserves_type_error_from_source_iterable():
+    from src.application.services.three_day_chart_feature_extractor import (
+        extract_three_day_chart_feature_vector,
+    )
+
+    def failed_source():
+        yield _minute_candles(count=1)[0]
+        raise TypeError("source failed")
+
+    with pytest.raises(TypeError, match="source failed"):
+        extract_three_day_chart_feature_vector(failed_source(), ANCHOR)
+
+
 def test_registry_calculation_rejects_misaligned_aggregated_history():
     from src.application.services.three_day_chart_feature_extractor import (
         calculate_three_day_registry_values,
     )
 
-    bars_15m, bars_1h = _bars(minutes=15, count=288), _bars(minutes=60, count=72)
+    bars_15m = _bars(minutes=15, count=288)
+    bars_1h = _aggregate_15m_to_1h(bars_15m)
     shifted = replace(
         bars_15m[1],
         opened_at=bars_15m[1].opened_at + timedelta(minutes=1),
@@ -250,6 +285,31 @@ def test_registry_calculation_rejects_misaligned_aggregated_history():
     with pytest.raises(ValueError, match="three-day aggregated history"):
         calculate_three_day_registry_values(
             bars_15m[:1] + (shifted,) + bars_15m[2:], bars_1h
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "changed"),
+    [
+        ("open_price", lambda value: value + Decimal("0.001")),
+        ("high_price", lambda value: value + Decimal("0.001")),
+        ("low_price", lambda value: value - Decimal("0.001")),
+        ("close_price", lambda value: value - Decimal("0.001")),
+        ("volume", lambda value: value + Decimal("1")),
+    ],
+)
+def test_registry_calculation_rejects_cross_resolution_inconsistency(field, changed):
+    from src.application.services.three_day_chart_feature_extractor import (
+        calculate_three_day_registry_values,
+    )
+
+    bars_15m = _bars(minutes=15, count=288)
+    bars_1h = _aggregate_15m_to_1h(bars_15m)
+    inconsistent = replace(bars_1h[10], **{field: changed(getattr(bars_1h[10], field))})
+
+    with pytest.raises(ValueError, match="three-day cross-resolution inconsistency"):
+        calculate_three_day_registry_values(
+            bars_15m, bars_1h[:10] + (inconsistent,) + bars_1h[11:]
         )
 
 
