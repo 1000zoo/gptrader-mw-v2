@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -17,6 +17,9 @@ from src.domain.regime.three_day_chart_features import (
     THREE_DAY_CHART_FEATURE_REGISTRY_V1,
     THREE_DAY_CHART_FEATURE_SCHEMA_VERSION,
 )
+from src.infrastructure.exchange.binance.research_data.historical_feature_loader import (
+    iter_archive_requests,
+)
 
 
 _KIND = "three_day_regime_balance_diagnostic"
@@ -27,6 +30,7 @@ _START_TEXT = "2024-07-01T00:00:00Z"
 _END_TEXT = "2026-07-01T00:00:00Z"
 _START = datetime(2024, 7, 1, tzinfo=timezone.utc)
 _END = datetime(2026, 7, 1, tzinfo=timezone.utc)
+_EXPECTED_ARCHIVE_COMBINED_SHA256 = "8ddd6c2bb524c74bde7e56d1e8c6804da8cb11b2197ca204ea3947b835a1cb5f"
 _SELECTED_IDENTITIES = ("gmm-diag-k4", "gmm-diag-k8")
 _CANDIDATE_IDENTITIES = (
     *(f"kmeans-k{count}" for count in range(3, 9)),
@@ -66,6 +70,8 @@ class HistoricalReplaySource:
     registry: tuple[ChartFeatureSpec, ...]
     fits: Mapping[str, ClusterDiagnosticFit]
     training_counts: Mapping[str, Mapping[str, int]]
+    archive_provenance: tuple[Mapping[str, object], ...]
+    archive_combined_sha256: str
 
     def __post_init__(self) -> None:
         copied_fits = MappingProxyType(dict(self.fits))
@@ -78,6 +84,9 @@ class HistoricalReplaySource:
         object.__setattr__(self, "registry", tuple(self.registry))
         object.__setattr__(self, "fits", copied_fits)
         object.__setattr__(self, "training_counts", copied_counts)
+        object.__setattr__(self, "archive_provenance", tuple(
+            MappingProxyType(dict(row)) for row in self.archive_provenance
+        ))
 
 
 def load_historical_replay_source(
@@ -98,6 +107,7 @@ def load_historical_replay_source(
 
     _validate_report_header(payload)
     _validate_feature_schema(payload.get("feature_schema"))
+    archive_provenance, archive_combined_sha256 = _restore_archive_provenance(payload)
     candidates = _validate_candidate_registry(payload.get("candidate_configs"))
 
     fits: dict[str, ClusterDiagnosticFit] = {}
@@ -116,7 +126,48 @@ def load_historical_replay_source(
         registry=THREE_DAY_CHART_FEATURE_REGISTRY_V1,
         fits=fits,
         training_counts=training_counts,
+        archive_provenance=archive_provenance,
+        archive_combined_sha256=archive_combined_sha256,
     )
+
+
+def _restore_archive_provenance(
+    payload: Mapping[str, object],
+) -> tuple[tuple[Mapping[str, object], ...], str]:
+    value = payload.get("archive_provenance")
+    required = {"period", "url", "sha256", "bytes", "member_identity"}
+    if not isinstance(value, list) or not value or any(not isinstance(row, dict) or set(row) != required for row in value):
+        raise ValueError("source archive provenance is missing or noncanonical")
+    rows = []
+    for raw in value:
+        row = {key: raw[key] for key in ("period", "url", "sha256", "bytes", "member_identity")}
+        sha = row["sha256"]
+        if (
+            not isinstance(row["period"], str) or not row["period"] or row["period"] != row["period"].strip()
+            or not isinstance(row["url"], str) or row["url"] != row["url"].strip()
+            or not isinstance(sha, str) or len(sha) != 64 or sha != sha.lower()
+            or any(char not in "0123456789abcdef" for char in sha)
+            or not isinstance(row["bytes"], int) or isinstance(row["bytes"], bool) or row["bytes"] <= 0
+            or not isinstance(row["member_identity"], str) or not row["member_identity"]
+            or row["member_identity"] != row["member_identity"].strip()
+        ):
+            raise ValueError("source archive provenance fields are noncanonical")
+        rows.append(row)
+    expected_requests = tuple(iter_archive_requests(
+        "klines", _SYMBOL, _START, _END, now=_END + timedelta(days=32),
+    ))
+    identities = tuple((row["period"], row["url"], row["member_identity"]) for row in rows)
+    expected = tuple((request.period, request.url, request.filename) for request in expected_requests)
+    if identities != expected or len(set(identities)) != len(identities):
+        raise ValueError("source archive provenance does not match the exact ordered Binance request set")
+    raw_canonical = (json.dumps(
+        rows, ensure_ascii=True, sort_keys=True, separators=(",", ":"), allow_nan=False,
+    ) + "\n").encode("utf-8")
+    combined = hashlib.sha256(raw_canonical).hexdigest()
+    reported = payload.get("archive_combined_sha256")
+    if reported != combined or combined != _EXPECTED_ARCHIVE_COMBINED_SHA256:
+        raise ValueError("source archive combined hash is incompatible")
+    return tuple(rows), combined
 
 
 def _validate_report_header(payload: Mapping[str, object]) -> None:

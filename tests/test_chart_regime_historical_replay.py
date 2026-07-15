@@ -261,7 +261,7 @@ def test_canonical_payload_is_identical_across_external_thread_limits():
         import sys
         import scripts.chart_regime_historical_replay as c
         from src.domain.regime import THREE_DAY_CHART_FEATURE_REGISTRY_V1, ThreeDayChartFeatureVector
-        from src.infrastructure.regime.historical_replay_source import load_historical_replay_source
+        from src.infrastructure.regime.historical_replay_source import HistoricalReplaySource, load_historical_replay_source
         from src.infrastructure.exchange.binance.research_data.historical_feature_loader import iter_archive_requests
         source=load_historical_replay_source('docs/backtests/chart-regime-balance-btcusdt-3d-1d-2024-2026.json',expected_sha256=c.SOURCE_SHA256)
         names=tuple(s.name for s in THREE_DAY_CHART_FEATURE_REGISTRY_V1)
@@ -276,7 +276,13 @@ def test_canonical_payload_is_identical_across_external_thread_limits():
             return tuple(ThreeDayChartFeatureVector('BTCUSDT',start+timedelta(days=d),start+timedelta(days=d-3),representatives[(d-3)%len(representatives)]) for d in range(3,(end-start).days))
         def provenance(start,end):
             return tuple({'period':r.period,'url':r.url,'sha256':'a'*64,'bytes':123,'member_identity':r.filename} for r in iter_archive_requests('klines','BTCUSDT',start,end,now=end+timedelta(days=32)))
-        report=c.build_report(symbol='BTCUSDT',historical_start=c.HISTORICAL_START,historical_end=c.HISTORICAL_END,training_start=c.HISTORICAL_END,training_end=c.TRAINING_END,source=source,historical_vectors=vectors(c.HISTORICAL_START,c.HISTORICAL_END),historical_provenance=provenance(c.HISTORICAL_START,c.HISTORICAL_END),training_vectors=vectors(c.HISTORICAL_END,c.TRAINING_END),training_provenance=provenance(c.HISTORICAL_END,c.TRAINING_END))
+        training=vectors(c.HISTORICAL_END,c.TRAINING_END)
+        counts={}
+        for identity,fit in source.fits.items():
+            rows=c.diagnose_gmm_assignments(fit,training,source.registry)
+            counts[identity]={fp:sum(row.fingerprint==fp for row in rows) for fp in fit.fingerprints}
+        source=HistoricalReplaySource(source.report_sha256,source.training_start_at,source.training_end_at,source.registry,source.fits,counts,source.archive_provenance,source.archive_combined_sha256)
+        report=c.build_report(symbol='BTCUSDT',historical_start=c.HISTORICAL_START,historical_end=c.HISTORICAL_END,training_start=c.HISTORICAL_END,training_end=c.TRAINING_END,source=source,historical_vectors=vectors(c.HISTORICAL_START,c.HISTORICAL_END),historical_provenance=provenance(c.HISTORICAL_START,c.HISTORICAL_END),training_vectors=training,training_provenance=source.archive_provenance)
         sys.stdout.buffer.write(c.canonical_json_bytes(report))
     """)
     outputs = []
@@ -387,6 +393,11 @@ class _Result:
     balance: dict
 
 
+@dataclass(frozen=True)
+class _Assignment:
+    fingerprint: str
+
+
 def _vectors(start, end):
     names = tuple(spec.name for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1)
     values = {name: 0.0 for name in names}
@@ -422,9 +433,15 @@ def test_build_report_uses_training_only_for_reference_and_sets_false_flags(monk
     from src.infrastructure.regime.sklearn_cluster_diagnostic import SklearnClusterDiagnostic
     monkeypatch.setattr(SklearnClusterDiagnostic, "fit", lambda *args, **kwargs: pytest.fail("fixed replay refit"))
 
-    def diagnose(_fit, vectors, _registry):
-        marker = "training" if vectors is training else "historical"
-        return (marker,)
+    def diagnose(fit, vectors, _registry):
+        if vectors is historical:
+            return ("historical",)
+        identity = f"gmm-diag-k{fit.config.cluster_count}"
+        return tuple(
+            _Assignment(fingerprint)
+            for fingerprint, count in source.training_counts[identity].items()
+            for _ in range(count)
+        )
 
     def reference(rows, fingerprints):
         calls.append(rows)
@@ -442,9 +459,9 @@ def test_build_report_uses_training_only_for_reference_and_sets_false_flags(monk
         symbol="BTCUSDT", historical_start=HISTORICAL_START, historical_end=HISTORICAL_END,
         training_start=HISTORICAL_END, training_end=TRAINING_END, source=source,
         historical_vectors=historical, historical_provenance=_provenance(HISTORICAL_START, HISTORICAL_END),
-        training_vectors=training, training_provenance=_provenance(HISTORICAL_END, TRAINING_END),
+        training_vectors=training, training_provenance=source.archive_provenance,
     )
-    assert calls == [("training",), ("training",)]
+    assert [len(rows) for rows in calls] == [727, 727]
     assert [item["identity"] for item in report["models"]] == ["gmm-diag-k4", "gmm-diag-k8"]
     assert all(report[key] is False for key in (
         "models_refit", "runtime_thresholds_present", "historical_cutoffs_fitted",
@@ -456,6 +473,51 @@ def test_build_report_uses_training_only_for_reference_and_sets_false_flags(monk
     assert report["training_reference_last_anchor"] == "2026-06-30T00:00:00Z"
     assert set(report["archive_combined_sha256"]) == {"historical", "training_reference", "overall"}
     assert all(len(item["source_fit_sha256"]) == 64 for item in report["models"])
+
+
+def test_build_report_rejects_current_training_provenance_mismatch_before_diagnosis(monkeypatch):
+    import scripts.chart_regime_historical_replay as cli
+
+    source = load_historical_replay_source(
+        "docs/backtests/chart-regime-balance-btcusdt-3d-1d-2024-2026.json",
+        expected_sha256=SOURCE_SHA256,
+    )
+    changed = [dict(row) for row in source.archive_provenance]
+    changed[0]["bytes"] += 1
+    monkeypatch.setattr(cli, "diagnose_gmm_assignments", lambda *args, **kwargs: pytest.fail("diagnosis must not run"))
+    with pytest.raises(ValueError, match="frozen source"):
+        build_report(
+            symbol="BTCUSDT", historical_start=HISTORICAL_START, historical_end=HISTORICAL_END,
+            training_start=HISTORICAL_END, training_end=TRAINING_END, source=source,
+            historical_vectors=_vectors(HISTORICAL_START, HISTORICAL_END),
+            historical_provenance=_provenance(HISTORICAL_START, HISTORICAL_END),
+            training_vectors=_vectors(HISTORICAL_END, TRAINING_END), training_provenance=changed,
+        )
+
+
+def test_training_assignment_count_drift_rejected_before_reference(monkeypatch):
+    import scripts.chart_regime_historical_replay as cli
+
+    source = load_historical_replay_source(
+        "docs/backtests/chart-regime-balance-btcusdt-3d-1d-2024-2026.json",
+        expected_sha256=SOURCE_SHA256,
+    )
+    fit = source.fits["gmm-diag-k4"]
+    drifted = []
+    for fingerprint, count in source.training_counts["gmm-diag-k4"].items():
+        drifted.extend(_Assignment(fingerprint) for _ in range(count))
+    drifted[0] = _Assignment(fit.fingerprints[1])
+    monkeypatch.setattr(cli, "diagnose_gmm_assignments", lambda *args, **kwargs: tuple(drifted))
+    monkeypatch.setattr(cli, "build_confidence_reference", lambda *args, **kwargs: pytest.fail("reference must not run"))
+    with pytest.raises(ValueError, match="assignment counts"):
+        build_report(
+            symbol="BTCUSDT", historical_start=HISTORICAL_START, historical_end=HISTORICAL_END,
+            training_start=HISTORICAL_END, training_end=TRAINING_END, source=source,
+            historical_vectors=_vectors(HISTORICAL_START, HISTORICAL_END),
+            historical_provenance=_provenance(HISTORICAL_START, HISTORICAL_END),
+            training_vectors=_vectors(HISTORICAL_END, TRAINING_END),
+            training_provenance=source.archive_provenance,
+        )
 
 
 def test_run_wires_source_and_exactly_two_interval_loads(monkeypatch):

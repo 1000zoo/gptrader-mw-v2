@@ -50,6 +50,14 @@ def _write_payload(tmp_path: Path, payload: dict[str, object]) -> tuple[Path, st
     return path, hashlib.sha256(raw).hexdigest()
 
 
+def _rehash_archive(payload: dict[str, object]) -> None:
+    raw = (json.dumps(
+        payload["archive_provenance"], allow_nan=False, ensure_ascii=True,
+        separators=(",", ":"), sort_keys=True,
+    ) + "\n").encode("utf-8")
+    payload["archive_combined_sha256"] = hashlib.sha256(raw).hexdigest()
+
+
 def test_loads_only_fixed_k4_and_k8_diagnostic_fits() -> None:
     source = load_historical_replay_source(REPORT, expected_sha256=SOURCE_SHA256)
 
@@ -71,6 +79,8 @@ def test_loads_only_fixed_k4_and_k8_diagnostic_fits() -> None:
     assert tuple(source.training_counts["gmm-diag-k4"]) == source.fits[
         "gmm-diag-k4"
     ].fingerprints
+    assert len(source.archive_provenance) == 24
+    assert source.archive_combined_sha256 == "8ddd6c2bb524c74bde7e56d1e8c6804da8cb11b2197ca204ea3947b835a1cb5f"
 
 
 def test_source_owns_deeply_immutable_copies() -> None:
@@ -79,10 +89,38 @@ def test_source_owns_deeply_immutable_copies() -> None:
     assert isinstance(source.fits, MappingProxyType)
     assert isinstance(source.training_counts, MappingProxyType)
     assert all(isinstance(counts, MappingProxyType) for counts in source.training_counts.values())
+    assert all(isinstance(row, MappingProxyType) for row in source.archive_provenance)
     with pytest.raises(TypeError):
         source.fits["other"] = source.fits["gmm-diag-k4"]
     with pytest.raises(TypeError):
         source.training_counts["gmm-diag-k4"]["other"] = 1
+    with pytest.raises(TypeError):
+        source.archive_provenance[0]["bytes"] = 1
+
+
+@pytest.mark.parametrize("field", ("sha256", "bytes"))
+def test_rejects_source_archive_content_change_even_after_rehash(tmp_path: Path, field: str) -> None:
+    payload = deepcopy(_payload())
+    row = payload["archive_provenance"][0]
+    row[field] = "f" * 64 if field == "sha256" else row[field] + 1
+    _rehash_archive(payload)
+    path, digest = _write_payload(tmp_path, payload)
+    with pytest.raises(ValueError, match="combined hash"):
+        load_historical_replay_source(path, expected_sha256=digest)
+
+
+@pytest.mark.parametrize("mode", ("missing", "reordered"))
+def test_rejects_source_archive_request_set_change_after_rehash(tmp_path: Path, mode: str) -> None:
+    payload = deepcopy(_payload())
+    rows = payload["archive_provenance"]
+    if mode == "missing":
+        rows.pop()
+    else:
+        rows[0], rows[1] = rows[1], rows[0]
+    _rehash_archive(payload)
+    path, digest = _write_payload(tmp_path, payload)
+    with pytest.raises(ValueError, match="ordered Binance request set"):
+        load_historical_replay_source(path, expected_sha256=digest)
 
 
 def test_rejects_source_report_hash_mismatch(tmp_path: Path) -> None:

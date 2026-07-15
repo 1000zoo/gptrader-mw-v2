@@ -237,14 +237,26 @@ def build_report(
         training_provenance, interval_name="training-reference", symbol=symbol,
         start=training_start, end=training_end,
     )
+    training_archive_hash = hashlib.sha256(canonical_json_bytes(training_archive)).hexdigest()
+    if (
+        tuple(training_archive) != source.archive_provenance
+        or training_archive_hash != source.archive_combined_sha256
+    ):
+        raise ValueError("current training archive provenance does not exactly match the frozen source")
 
     models = []
     results = []
     for identity in ("gmm-diag-k4", "gmm-diag-k8"):
         fit = source.fits[identity]
         training_diagnostics = diagnose_gmm_assignments(fit, training, source.registry)
-        historical_diagnostics = diagnose_gmm_assignments(fit, historical, source.registry)
+        observed_training_counts = {
+            fingerprint: sum(row.fingerprint == fingerprint for row in training_diagnostics)
+            for fingerprint in fit.fingerprints
+        }
+        if observed_training_counts != dict(source.training_counts[identity]):
+            raise ValueError("current training assignment counts do not match the frozen source")
         reference = build_confidence_reference(training_diagnostics, fit.fingerprints)
+        historical_diagnostics = diagnose_gmm_assignments(fit, historical, source.registry)
         counts = source.training_counts[identity]
         training_shares = {name: counts[name] / TRAINING_SAMPLE_COUNT for name in fit.fingerprints}
         result = summarize_historical_replay_candidate(
@@ -274,7 +286,7 @@ def build_report(
         },
         "archive_combined_sha256": {
             "historical": hashlib.sha256(canonical_json_bytes(historical_archive)).hexdigest(),
-            "training_reference": hashlib.sha256(canonical_json_bytes(training_archive)).hexdigest(),
+            "training_reference": training_archive_hash,
             "overall": hashlib.sha256(canonical_json_bytes({
                 "historical": historical_archive, "training_reference": training_archive,
             })).hexdigest(),
