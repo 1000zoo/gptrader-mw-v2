@@ -132,6 +132,9 @@ def _destination_identity(path: Path) -> str:
 def _validate_distinct_destinations(json_path: Path, markdown_path: Path) -> None:
     if _destination_identity(json_path) == _destination_identity(markdown_path):
         raise ValueError("JSON and Markdown report destinations must be distinct")
+    for path in (Path(json_path), Path(markdown_path)):
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise ValueError("existing report destination must be a regular file that is replaceable")
 
 
 def build_primary_configs() -> tuple[CandidateConfig, ...]:

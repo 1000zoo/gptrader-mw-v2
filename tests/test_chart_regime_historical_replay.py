@@ -22,6 +22,7 @@ from scripts.chart_regime_historical_replay import (
 )
 from src.infrastructure.regime.historical_replay_source import load_historical_replay_source
 from src.domain.regime import THREE_DAY_CHART_FEATURE_REGISTRY_V1, ThreeDayChartFeatureVector
+from src.infrastructure.exchange.binance.research_data.historical_feature_loader import iter_archive_requests
 
 
 UTC = timezone.utc
@@ -72,6 +73,24 @@ def test_output_alias_rejected_before_directory_creation(tmp_path):
     assert not destination.parent.exists()
 
 
+@pytest.mark.parametrize("directory_slot", ("json", "markdown"))
+def test_existing_directory_destination_is_rejected_without_mutation(tmp_path, directory_slot):
+    directory = tmp_path / directory_slot
+    directory.mkdir()
+    valuable = directory / "valuable.txt"
+    valuable.write_text("keep", encoding="utf-8")
+    other = tmp_path / "other.txt"
+    kwargs = {
+        "json_path": directory if directory_slot == "json" else other,
+        "markdown_path": directory if directory_slot == "markdown" else other,
+    }
+    with pytest.raises(ValueError, match="regular file"):
+        write_reports_atomic({}, **kwargs)
+    assert valuable.read_text(encoding="utf-8") == "keep"
+    assert directory.is_dir() and not other.exists()
+    assert not tuple(tmp_path.rglob("*.tmp")) and not tuple(tmp_path.rglob("*.bak"))
+
+
 def test_resolved_destination_alias_is_rejected(tmp_path):
     target = tmp_path / "report"
     target.write_text("old", encoding="utf-8")
@@ -80,7 +99,7 @@ def test_resolved_destination_alias_is_rejected(tmp_path):
         link.symlink_to(target)
     except OSError:
         pytest.skip("symlinks are not available")
-    with pytest.raises(ValueError, match="distinct"):
+    with pytest.raises(ValueError, match="distinct|regular file"):
         write_reports_atomic({}, json_path=target, markdown_path=link)
 
 
@@ -194,30 +213,26 @@ def test_direct_entrypoint_help_is_utf8():
 
 def test_canonical_payload_is_identical_across_external_thread_limits():
     code = textwrap.dedent("""
-        from dataclasses import dataclass
         from datetime import timedelta
         import sys
         import scripts.chart_regime_historical_replay as c
         from src.domain.regime import THREE_DAY_CHART_FEATURE_REGISTRY_V1, ThreeDayChartFeatureVector
         from src.infrastructure.regime.historical_replay_source import load_historical_replay_source
-        names=tuple(s.name for s in THREE_DAY_CHART_FEATURE_REGISTRY_V1); values={n:0. for n in names}
-        def vectors(start,end):
-            return tuple(ThreeDayChartFeatureVector('BTCUSDT',start+timedelta(days=d),start+timedelta(days=d-3),values) for d in range(3,(end-start).days))
-        @dataclass(frozen=True)
-        class Ref:
-            sample_count:int; quantile_method:str; posterior_fifth_percentile:float; margin_fifth_percentile:float
-            component_distance_995:dict; posterior_quantiles:dict; margin_quantiles:dict; distance_quantiles:dict
-        @dataclass(frozen=True)
-        class Result:
-            identity:str; balance:dict
-        c.diagnose_gmm_assignments=lambda fit,rows,registry: ('training' if len(rows)==727 else 'historical',)
-        c.build_confidence_reference=lambda rows,fps: Ref(727,'linear',.5,.2,{n:2. for n in fps},{'p05':.5},{'p05':.2},{'p05':1.})
-        c.summarize_historical_replay_candidate=lambda **kw: Result(kw['identity'],{'counts':{n:1 for n in kw['fit'].fingerprints},'shares':{n:1/len(kw['fit'].fingerprints) for n in kw['fit'].fingerprints}})
-        c.rank_historical_replay_candidates=lambda rows: tuple(rows)
-        def provenance(period):
-            member=f'BTCUSDT-1m-{period}.zip'; return ({'period':period,'url':f'https://data.binance.vision/{member}','sha256':'a'*64,'bytes':123,'member_identity':member},)
+        from src.infrastructure.exchange.binance.research_data.historical_feature_loader import iter_archive_requests
         source=load_historical_replay_source('docs/backtests/chart-regime-balance-btcusdt-3d-1d-2024-2026.json',expected_sha256=c.SOURCE_SHA256)
-        report=c.build_report(symbol='BTCUSDT',historical_start=c.HISTORICAL_START,historical_end=c.HISTORICAL_END,training_start=c.HISTORICAL_END,training_end=c.TRAINING_END,source=source,historical_vectors=vectors(c.HISTORICAL_START,c.HISTORICAL_END),historical_provenance=provenance('2021-01'),training_vectors=vectors(c.HISTORICAL_END,c.TRAINING_END),training_provenance=provenance('2024-07'))
+        names=tuple(s.name for s in THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+        representatives=[]
+        for fit in source.fits.values():
+            for mean in fit.means:
+                raw={n:0. for n in names}
+                for index,name in enumerate(fit.feature_names):
+                    raw[name]=min(fit.upper_bounds[index],max(fit.lower_bounds[index],mean[index]*fit.scales[index]+fit.medians[index]))
+                representatives.append(raw)
+        def vectors(start,end):
+            return tuple(ThreeDayChartFeatureVector('BTCUSDT',start+timedelta(days=d),start+timedelta(days=d-3),representatives[(d-3)%len(representatives)]) for d in range(3,(end-start).days))
+        def provenance(start,end):
+            return tuple({'period':r.period,'url':r.url,'sha256':'a'*64,'bytes':123,'member_identity':r.filename} for r in iter_archive_requests('klines','BTCUSDT',start,end,now=end+timedelta(days=32)))
+        report=c.build_report(symbol='BTCUSDT',historical_start=c.HISTORICAL_START,historical_end=c.HISTORICAL_END,training_start=c.HISTORICAL_END,training_end=c.TRAINING_END,source=source,historical_vectors=vectors(c.HISTORICAL_START,c.HISTORICAL_END),historical_provenance=provenance(c.HISTORICAL_START,c.HISTORICAL_END),training_vectors=vectors(c.HISTORICAL_END,c.TRAINING_END),training_provenance=provenance(c.HISTORICAL_END,c.TRAINING_END))
         sys.stdout.buffer.write(c.canonical_json_bytes(report))
     """)
     outputs = []
@@ -247,7 +262,7 @@ def test_markdown_is_compact_and_states_research_limitations():
     })
     assert "Reverse-time" in text and "not forward validation" in text
     assert "No strategy outcomes" in text and "no production model was selected" in text
-    assert "14-quarter warnings" in text and "per-anchor" not in text
+    assert "14-quarter empty-cluster warnings" in text and "per-anchor" not in text
     assert "training counts/shares" in text and "historical-training deltas" in text
 
 
@@ -255,12 +270,40 @@ def test_provenance_boundary_rejects_empty_duplicate_and_ephemeral_fields():
     import scripts.chart_regime_historical_replay as cli
 
     with pytest.raises(ValueError, match="nonempty"):
-        cli._canonical_provenance((), interval_name="historical")
-    row = _provenance("2021-01")[0]
+        cli._canonical_provenance(
+            (), interval_name="historical", symbol="BTCUSDT",
+            start=HISTORICAL_START, end=HISTORICAL_END,
+        )
+    row = _provenance(HISTORICAL_START, HISTORICAL_END)[0]
     with pytest.raises(ValueError, match="unique"):
-        cli._canonical_provenance((row, dict(row)), interval_name="historical")
+        cli._canonical_provenance(
+            (row, dict(row)), interval_name="historical", symbol="BTCUSDT",
+            start=HISTORICAL_START, end=HISTORICAL_END,
+        )
     with pytest.raises(ValueError, match="field order"):
-        cli._canonical_provenance(({**row, "status": "cached"},), interval_name="historical")
+        cli._canonical_provenance(
+            ({**row, "status": "cached"},), interval_name="historical", symbol="BTCUSDT",
+            start=HISTORICAL_START, end=HISTORICAL_END,
+        )
+
+
+def test_provenance_boundary_rejects_wrong_symbol_missing_extra_and_reordered_requests():
+    import scripts.chart_regime_historical_replay as cli
+
+    rows = _provenance(HISTORICAL_START, HISTORICAL_END)
+    kwargs = dict(interval_name="historical", symbol="BTCUSDT", start=HISTORICAL_START, end=HISTORICAL_END)
+    for bad in (rows[:-1], (*rows, rows[-1]), (rows[1], rows[0], *rows[2:])):
+        with pytest.raises(ValueError, match="request set|unique"):
+            cli._canonical_provenance(bad, **kwargs)
+    conflicting_duplicate = (*rows, dict(rows[-1], sha256="b" * 64))
+    with pytest.raises(ValueError, match="unique"):
+        cli._canonical_provenance(conflicting_duplicate, **kwargs)
+    eth = _provenance(HISTORICAL_START, HISTORICAL_END, symbol="ETHUSDT")
+    with pytest.raises(ValueError, match="request set"):
+        cli._canonical_provenance(eth, **kwargs)
+    malformed = (dict(rows[0], period="2021-1"), *rows[1:])
+    with pytest.raises(ValueError, match="request set"):
+        cli._canonical_provenance(malformed, **kwargs)
 
 
 def test_vector_boundary_rejects_count_symbol_anchor_and_window():
@@ -312,15 +355,14 @@ def _vectors(start, end):
     )
 
 
-def _provenance(period):
-    member = f"BTCUSDT-1m-{period}.zip"
-    return ({
-        "period": period,
-        "url": f"https://data.binance.vision/{member}",
+def _provenance(start, end, *, symbol="BTCUSDT"):
+    return tuple({
+        "period": request.period,
+        "url": request.url,
         "sha256": "a" * 64,
         "bytes": 123,
-        "member_identity": member,
-    },)
+        "member_identity": request.filename,
+    } for request in iter_archive_requests("klines", symbol, start, end, now=end + timedelta(days=32)))
 
 
 def test_build_report_uses_training_only_for_reference_and_sets_false_flags(monkeypatch):
@@ -355,8 +397,8 @@ def test_build_report_uses_training_only_for_reference_and_sets_false_flags(monk
     report = build_report(
         symbol="BTCUSDT", historical_start=HISTORICAL_START, historical_end=HISTORICAL_END,
         training_start=HISTORICAL_END, training_end=TRAINING_END, source=source,
-        historical_vectors=historical, historical_provenance=_provenance("2021-01"),
-        training_vectors=training, training_provenance=_provenance("2024-07"),
+        historical_vectors=historical, historical_provenance=_provenance(HISTORICAL_START, HISTORICAL_END),
+        training_vectors=training, training_provenance=_provenance(HISTORICAL_END, TRAINING_END),
     )
     assert calls == [("training",), ("training",)]
     assert [item["identity"] for item in report["models"]] == ["gmm-diag-k4", "gmm-diag-k8"]
@@ -383,7 +425,10 @@ def test_run_wires_source_and_exactly_two_interval_loads(monkeypatch):
     def loader(**kwargs):
         calls.append(kwargs)
         count = kwargs["expected_anchor_count"]
-        return tuple(range(count)), _provenance("2021-01" if count == 1274 else "2024-07")
+        return tuple(range(count)), _provenance(
+            HISTORICAL_START if count == 1274 else HISTORICAL_END,
+            HISTORICAL_END if count == 1274 else TRAINING_END,
+        )
 
     sentinel = {"ok": True}
     monkeypatch.setattr(cli, "load_three_day_feature_history", loader)

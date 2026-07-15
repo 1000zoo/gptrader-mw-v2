@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Mapping, Sequence
 from dataclasses import fields, is_dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import math
 from pathlib import Path
@@ -29,6 +29,9 @@ from src.application.services.regime_historical_replay import (
 )
 from src.infrastructure.exchange.binance.research_data.three_day_feature_history import (
     load_three_day_feature_history,
+)
+from src.infrastructure.exchange.binance.research_data.historical_feature_loader import (
+    iter_archive_requests,
 )
 from src.infrastructure.regime.historical_replay_source import (
     HistoricalReplaySource,
@@ -110,8 +113,14 @@ def _validate_finite(value: Any) -> None:
             _validate_finite(item)
 
 
-def _canonical_provenance(values: Sequence[Mapping[str, object]], *, interval_name: str) -> list[dict[str, object]]:
+def _canonical_provenance(
+    values: Sequence[Mapping[str, object]], *, interval_name: str,
+    symbol: str, start: datetime, end: datetime,
+) -> list[dict[str, object]]:
     required = ("period", "url", "sha256", "bytes", "member_identity")
+    expected_requests = tuple(iter_archive_requests(
+        "klines", symbol, start, end, now=end + timedelta(days=32),
+    ))
     rows = []
     for raw in values:
         if not isinstance(raw, Mapping) or tuple(raw) != required:
@@ -131,8 +140,12 @@ def _canonical_provenance(values: Sequence[Mapping[str, object]], *, interval_na
         ):
             raise ValueError(f"{interval_name} archive provenance is not canonical")
         rows.append(row)
-    if not rows or len({(row["period"], row["url"], row["sha256"]) for row in rows}) != len(rows):
+    if not rows or len({(row["period"], row["url"], row["member_identity"]) for row in rows}) != len(rows):
         raise ValueError(f"{interval_name} archive provenance must be nonempty and unique")
+    identities = tuple((row["period"], row["url"], row["member_identity"]) for row in rows)
+    expected = tuple((request.period, request.url, request.filename) for request in expected_requests)
+    if identities != expected:
+        raise ValueError(f"{interval_name} archive provenance must exactly match the ordered Binance request set")
     return rows
 
 
@@ -216,8 +229,14 @@ def build_report(
         training_vectors, symbol=symbol, start=training_start, end=training_end,
         count=TRAINING_SAMPLE_COUNT, name="training-reference",
     )
-    historical_archive = _canonical_provenance(historical_provenance, interval_name="historical")
-    training_archive = _canonical_provenance(training_provenance, interval_name="training-reference")
+    historical_archive = _canonical_provenance(
+        historical_provenance, interval_name="historical", symbol=symbol,
+        start=historical_start, end=historical_end,
+    )
+    training_archive = _canonical_provenance(
+        training_provenance, interval_name="training-reference", symbol=symbol,
+        start=training_start, end=training_end,
+    )
 
     models = []
     results = []
@@ -263,7 +282,7 @@ def build_report(
         "models": models,
         "research_preference": [item.identity for item in ranked],
         "preferred_research_model": ranked[0].identity,
-        "preference_rule": "lexicographic: clipping, margin-tail, distance-tail, quarter warnings, negative minimum ESS, JSD, K, identity",
+        "preference_rule": "lexicographic: clipping, margin-tail, distance-tail, empty-cluster quarter warnings, negative minimum ESS, JSD, K, identity",
         "models_refit": False,
         "runtime_thresholds_present": False,
         "historical_cutoffs_fitted": False,
@@ -280,7 +299,7 @@ def render_markdown(payload: Mapping[str, object]) -> str:
     lines = [
         "# BTCUSDT 3-day regime historical replay",
         "",
-        "| Model | Clip share | Posterior tail | Margin tail | Distance tail | JSD | Min ESS | Quarter warnings |",
+        "| Model | Clip share | Posterior tail | Margin tail | Distance tail | JSD | Min ESS | Empty-cluster quarter warnings |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for model in models:
@@ -308,7 +327,7 @@ def render_markdown(payload: Mapping[str, object]) -> str:
             f"historical counts/shares={historical['counts']} / {historical['shares']}; "
             f"historical-training deltas={historical['prevalence_delta_vs_training']}."
         )
-    lines.extend(["", "## Clipping and quarterly warnings", ""])
+    lines.extend(["", "## Clipping and empty-cluster quarter warnings", ""])
     for model in models:
         historical = model["historical"]
         warnings = historical["quarter_warnings"]
@@ -322,7 +341,7 @@ def render_markdown(payload: Mapping[str, object]) -> str:
             f"- {model['identity']}: pre-clipping envelope share="
             f"{historical['envelope']['any_feature_exceedance_share']:.6f}; "
             f"clipped dimensions p50/p95/max={clipped['p50']}/{clipped['p95']}/{clipped['max']}; "
-            f"14-quarter warnings: {warning_text}."
+            f"14-quarter empty-cluster warnings: {warning_text}."
         )
     lines.extend([
         "", "## Research preference", "",
