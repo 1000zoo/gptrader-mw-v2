@@ -299,7 +299,7 @@ def render_markdown(payload: Mapping[str, object]) -> str:
     lines = [
         "# BTCUSDT 3-day regime historical replay",
         "",
-        "| Model | Clip share | Posterior tail | Margin tail | Distance tail | JSD | Min ESS | Empty-cluster quarter warnings |",
+        "| Model | Clip share | Posterior tail | Margin tail | Distance tail | JSD | Min ESS | Quarterly warnings |",
         "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for model in models:
@@ -327,7 +327,7 @@ def render_markdown(payload: Mapping[str, object]) -> str:
             f"historical counts/shares={historical['counts']} / {historical['shares']}; "
             f"historical-training deltas={historical['prevalence_delta_vs_training']}."
         )
-    lines.extend(["", "## Clipping and empty-cluster quarter warnings", ""])
+    lines.extend(["", "## Clipping and quarterly warnings", ""])
     for model in models:
         historical = model["historical"]
         warnings = historical["quarter_warnings"]
@@ -341,7 +341,7 @@ def render_markdown(payload: Mapping[str, object]) -> str:
             f"- {model['identity']}: pre-clipping envelope share="
             f"{historical['envelope']['any_feature_exceedance_share']:.6f}; "
             f"clipped dimensions p50/p95/max={clipped['p50']}/{clipped['p95']}/{clipped['max']}; "
-            f"14-quarter empty-cluster warnings: {warning_text}."
+            f"14-quarter warnings: {warning_text}."
         )
     lines.extend([
         "", "## Research preference", "",

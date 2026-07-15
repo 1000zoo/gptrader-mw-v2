@@ -91,6 +91,25 @@ def test_existing_directory_destination_is_rejected_without_mutation(tmp_path, d
     assert not tuple(tmp_path.rglob("*.tmp")) and not tuple(tmp_path.rglob("*.bak"))
 
 
+def test_reserved_destination_is_rejected_before_render_or_parent_mutation(tmp_path, monkeypatch):
+    import scripts.chart_regime_balance_diagnostic as shared
+
+    parent = tmp_path / "missing"
+    monkeypatch.setattr(shared.os.path, "isreserved", lambda value: Path(value).name.lower() == "reserved.json")
+    with pytest.raises(ValueError, match="reserved"):
+        write_reports_atomic({}, json_path=parent / "reserved.json", markdown_path=parent / "report.md")
+    assert not parent.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows reserved path semantics")
+@pytest.mark.parametrize("name", ("PRN", "AUX.json", "COM1.txt", "LPT1.md", "report.json:stream"))
+def test_windows_reserved_destinations_are_rejected_without_artifacts(tmp_path, name):
+    parent = tmp_path / "missing"
+    with pytest.raises(ValueError, match="reserved"):
+        write_reports_atomic({}, json_path=parent / name, markdown_path=parent / "safe.md")
+    assert not parent.exists()
+
+
 def test_resolved_destination_alias_is_rejected(tmp_path):
     target = tmp_path / "report"
     target.write_text("old", encoding="utf-8")
@@ -262,7 +281,7 @@ def test_markdown_is_compact_and_states_research_limitations():
     })
     assert "Reverse-time" in text and "not forward validation" in text
     assert "No strategy outcomes" in text and "no production model was selected" in text
-    assert "14-quarter empty-cluster warnings" in text and "per-anchor" not in text
+    assert "14-quarter warnings" in text and "per-anchor" not in text
     assert "training counts/shares" in text and "historical-training deltas" in text
 
 
