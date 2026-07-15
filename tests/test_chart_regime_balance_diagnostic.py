@@ -94,6 +94,55 @@ def test_direct_script_help_runs_from_repository_root() -> None:
     assert "three-day" in result.stdout.lower()
 
 
+def test_candidate_payload_is_identical_across_external_thread_limits() -> None:
+    environment = os.environ.copy()
+    environment.update({"PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"})
+    child = r"""
+import runpy
+import sys
+from threadpoolctl import threadpool_limits
+from scripts.chart_regime_balance_diagnostic import CandidateConfig, _fit_candidate, canonical_json_bytes
+from src.domain.regime.model import RegimeModelConfig
+from src.infrastructure.regime.sklearn_cluster_diagnostic import SklearnClusterDiagnostic
+
+vectors = runpy.run_path("tests/test_chart_regime_balance_diagnostic.py")["_vectors"]()
+config = CandidateConfig("kmeans-k3", RegimeModelConfig("kmeans", 3, random_seed=20260714))
+if sys.argv[1] == "single":
+    with threadpool_limits(limits=1):
+        payload = _fit_candidate(config, vectors, SklearnClusterDiagnostic())
+else:
+    payload = _fit_candidate(config, vectors, SklearnClusterDiagnostic())
+sys.stdout.buffer.write(canonical_json_bytes(payload))
+"""
+
+    outputs = []
+    for mode in ("default", "single"):
+        result = subprocess.run(
+            [sys.executable, "-c", child, mode], cwd=Path(__file__).resolve().parents[1],
+            capture_output=True, env=environment, check=False,
+        )
+        assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+        outputs.append(result.stdout)
+
+    assert outputs[0] == outputs[1]
+
+
+def test_candidate_fit_restores_process_thread_limits() -> None:
+    from threadpoolctl import threadpool_info
+    from scripts.chart_regime_balance_diagnostic import CandidateConfig, _fit_candidate
+    from src.domain.regime.model import RegimeModelConfig
+    from src.infrastructure.regime.sklearn_cluster_diagnostic import SklearnClusterDiagnostic
+
+    before = [(pool["filepath"], pool["num_threads"]) for pool in threadpool_info()]
+    _fit_candidate(
+        CandidateConfig("kmeans-k3", RegimeModelConfig("kmeans", 3, random_seed=20260714)),
+        _vectors(), SklearnClusterDiagnostic(),
+    )
+    after = [(pool["filepath"], pool["num_threads"]) for pool in threadpool_info()]
+
+    assert after == before
+
+
 def _vectors() -> tuple[ThreeDayChartFeatureVector, ...]:
     episodes = build_daily_regime_episodes(START, END)
     names = tuple(spec.name for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1)
@@ -170,6 +219,40 @@ def test_report_assembly_is_deterministic_and_reserves_outcomes(tmp_path: Path) 
     assert "no production model selected" in markdown.lower()
     assert "Empty clusters" in markdown
     assert "Cross-half prevalence drift" in markdown
+
+
+def test_markdown_summarizes_stability_without_embedding_fit_matrices() -> None:
+    from scripts.chart_regime_balance_diagnostic import render_markdown
+
+    large_fit = {"means": [[float(row + column) for column in range(25)] for row in range(8)]}
+    payload = {"candidate_configs": [{
+        "identity": "fixture-kmeans-k8", "status": "accepted", "rejections": [],
+        "metrics": {
+            "counts": {"a": 400, "b": 327}, "shares": {"a": 400 / 727, "b": 327 / 727},
+            "empty_cluster_count": 0, "normalized_entropy": .99, "minimum_ess": 80.0,
+            "quarterly": {"counts": {}},
+            "seed_stability": [
+                {"seed": 20260715, "adjusted_rand_index": .8, "normalized_mutual_information": .9},
+                {"seed": 20260716, "adjusted_rand_index": .7, "normalized_mutual_information": .85},
+            ],
+            "chronological_stability": [
+                {"block": "first", "fit": large_fit,
+                 "centroid_matching": {"mean_distance": .1, "maximum_distance": .2}},
+                {"block": "second", "fit": large_fit,
+                 "centroid_matching": {"mean_distance": .3, "maximum_distance": .4}},
+            ],
+            "cross_half_prevalence_drift": {"maximum": .12, "l1": .2},
+        },
+    }]}
+
+    markdown = render_markdown(payload)
+
+    assert "min ARI=0.7; min NMI=0.85" in markdown
+    assert "first: mean=0.1, max=0.2; second: mean=0.3, max=0.4" in markdown
+    assert "max=0.12; L1=0.2" in markdown
+    assert "'means'" not in markdown
+    assert "projected_refit_centroids" not in markdown
+    assert len(markdown.encode("utf-8")) < 5_000
 
 
 def test_atomic_writer_preserves_both_outputs_if_rendering_fails(tmp_path: Path, monkeypatch) -> None:

@@ -20,6 +20,7 @@ from dataclasses import fields, is_dataclass
 import numpy as np
 from scipy.special import logsumexp
 from sklearn.metrics import silhouette_score
+import threadpoolctl
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -341,6 +342,13 @@ def cross_half_prevalence_drift(
 
 
 def _fit_candidate(config: CandidateConfig, vectors: tuple[ThreeDayChartFeatureVector, ...], adapter: object) -> dict[str, object]:
+    with threadpoolctl.threadpool_limits(limits=1):
+        return _fit_candidate_single_thread(config, vectors, adapter)
+
+
+def _fit_candidate_single_thread(
+    config: CandidateConfig, vectors: tuple[ThreeDayChartFeatureVector, ...], adapter: object,
+) -> dict[str, object]:
     registry = THREE_DAY_CHART_FEATURE_REGISTRY_V1
     primary = adapter.fit(config.model, vectors, registry)
     primary_assignments = adapter.assign(primary, vectors, registry)
@@ -523,17 +531,59 @@ def render_markdown(payload: Mapping[str, object]) -> str:
         quarterly = metrics.get("quarterly", {})
         quarter_counts = quarterly.get("counts", {}) if isinstance(quarterly, Mapping) else {}
         warnings = [quarter for quarter, counts in quarter_counts.items() if any(value == 0 for value in counts.values())]
+        seed_summary = _seed_stability_summary(metrics.get("seed_stability"))
+        chronological_summary = _chronological_stability_summary(metrics.get("chronological_stability"))
+        prevalence_summary = _prevalence_drift_summary(metrics.get("cross_half_prevalence_drift"))
         lines.append(
             f"| {candidate['identity']} | {candidate['status']} | {metrics.get('counts', {})} | {metrics.get('shares', {})} | "
             f"{metrics.get('empty_cluster_count', 'n/a')} | "
             f"{metrics.get('normalized_entropy', 'n/a')} | {metrics.get('minimum_ess', 'n/a')} | {warnings or 'none'} | "
-            f"{metrics.get('seed_stability', 'n/a')} | {metrics.get('chronological_stability', 'n/a')} | "
-            f"{metrics.get('cross_half_prevalence_drift', 'n/a')} | "
+            f"{seed_summary} | {chronological_summary} | {prevalence_summary} | "
             f"{candidate.get('rejections') or 'none'} |"
         )
     lines.extend(["", "## Limitations", "", "- 727 overlapping 3d windows are not independent.",
                   "- No strategy evaluated.", "- No production model selected.", ""])
     return "\n".join(lines)
+
+
+def _seed_stability_summary(value: object) -> str:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or not value:
+        return "n/a"
+    records = tuple(value)
+    if any(not isinstance(record, Mapping) for record in records):
+        return "n/a"
+    try:
+        minimum_ari = min(record["adjusted_rand_index"] for record in records)
+        minimum_nmi = min(record["normalized_mutual_information"] for record in records)
+    except (KeyError, TypeError):
+        return "n/a"
+    return f"min ARI={minimum_ari}; min NMI={minimum_nmi}"
+
+
+def _chronological_stability_summary(value: object) -> str:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or not value:
+        return "n/a"
+    summaries = []
+    for record in value:
+        if not isinstance(record, Mapping) or not isinstance(record.get("centroid_matching"), Mapping):
+            return "n/a"
+        matching = record["centroid_matching"]
+        try:
+            summaries.append(
+                f"{record['block']}: mean={matching['mean_distance']}, max={matching['maximum_distance']}"
+            )
+        except KeyError:
+            return "n/a"
+    return "; ".join(summaries)
+
+
+def _prevalence_drift_summary(value: object) -> str:
+    if not isinstance(value, Mapping):
+        return "n/a"
+    try:
+        return f"max={value['maximum']}; L1={value['l1']}"
+    except KeyError:
+        return "n/a"
 
 
 def _best_effort_unlink(path: Path) -> None:
