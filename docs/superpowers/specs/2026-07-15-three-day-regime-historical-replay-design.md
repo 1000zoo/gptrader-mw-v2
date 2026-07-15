@@ -15,7 +15,9 @@ Replay exactly two existing candidates from the committed deterministic evidence
 
 Load their complete diagnostic fits from `docs/backtests/chart-regime-balance-btcusdt-3d-1d-2024-2026.json`. Validate the report kind, schema, registry, interval, content hash, candidate identity, fit fingerprints, shapes, covariance mode, and configuration before assignment.
 
-The replay must use the frozen retained feature names, training clipping bounds, medians, scales, component means, weights, diagonal covariances, distance thresholds, and assignment-probability configuration. It must not refit, relabel, recalibrate, or modify either model.
+The replay must use the frozen retained feature names, training clipping bounds, medians, scales, component means, weights, and diagonal covariances. The existing diagnostic GMM fits do not contain runtime selection thresholds or component distance thresholds, so the replay must not claim that such frozen gates exist. It must not refit, relabel, recalibrate, or modify either model.
+
+Reconstruct the original 727 training vectors from the verified training interval and assign them through the same frozen fits. These assignments provide a training-reference distribution for dominant posterior probability, posterior margin, and assigned-component Mahalanobis distance. Reference cutoffs are computed only from the training interval before historical metrics are evaluated; they are descriptive tail markers, not runtime selection thresholds.
 
 These remain diagnostic fits and must not be converted into runtime `RegimeModelArtifact` objects or loaded by the live runtime repository.
 
@@ -35,13 +37,13 @@ Calculate the following separately for K=4 and K=8.
 
 ### Assignment and confidence
 
-- assigned fingerprint and maximum GMM posterior probability for every anchor;
-- probability quantiles and count/share below the model's frozen assignment-probability threshold;
-- component distance and count/share above the frozen component distance threshold;
-- joint accepted count/share under the existing frozen assignment gates;
-- no new threshold chosen from historical data.
+- assigned fingerprint, maximum GMM posterior probability, posterior margin, and assigned-component Mahalanobis distance for every anchor;
+- historical and original-training quantiles for all three confidence diagnostics;
+- historical count/share below the original-training fifth percentile for dominant posterior and margin;
+- historical count/share above the original-training 99.5th percentile for assigned-component Mahalanobis distance, calculated separately by component before aggregation;
+- no cutoff chosen from historical data and no accepted/rejected classification state.
 
-Every finite vector receives a nearest/maximum-posterior label for distribution analysis, but labels failing frozen gates are reported as low-confidence or out-of-envelope rather than silently treated as valid classifications.
+Every finite vector receives a maximum-posterior label for distribution analysis. Tail exceedances are reported as low-confidence or distance extrapolation relative to the original training distribution, not as runtime acceptance decisions.
 
 ### Training-envelope extrapolation
 
@@ -68,18 +70,19 @@ Jensen-Shannon divergence is descriptive and uses the common frozen fingerprint 
 
 The report must separate three conclusions:
 
-1. **Coverage:** how often old vectors remain inside the training envelope and pass frozen probability/distance gates.
+1. **Coverage:** how often old vectors remain inside the training envelope and outside the low-confidence or high-distance tails defined by the original training distribution.
 2. **Balance:** whether all frozen clusters appear with usable prevalence across the whole interval and individual quarters.
 3. **Stability:** whether dependence-adjusted sample sizes and training-versus-history prevalence remain informative.
 
 No single arbitrary pass/fail score is introduced. K=4 and K=8 are compared in a compact table, and the report may name a preferred candidate for the later strategy-mapping experiment only when the preference follows the declared lexicographic diagnostic order:
 
-1. higher joint accepted share;
-2. lower any-feature clipping share;
-3. fewer quarter-level empty-cluster warnings;
-4. higher minimum effective sample size;
-5. lower Jensen-Shannon divergence;
-6. lower cluster count as the final tie-break.
+1. lower any-feature clipping share;
+2. lower share below the training posterior-margin fifth percentile;
+3. lower share above the component-specific training Mahalanobis 99.5th percentile;
+4. fewer quarter-level empty-cluster warnings;
+5. higher minimum effective sample size;
+6. lower Jensen-Shannon divergence;
+7. lower cluster count as the final tie-break.
 
 This is a research preference, not production-model selection or adoption.
 
@@ -93,7 +96,8 @@ Generate atomically as a paired report:
 The JSON contains stable archive provenance and combined hash, source model/report hashes, exact anchor boundaries, per-anchor classification diagnostics, aggregated metrics, and explicit flags:
 
 - `models_refit: false`;
-- `thresholds_recalibrated: false`;
+- `runtime_thresholds_present: false`;
+- `historical_cutoffs_fitted: false`;
 - `strategy_outcomes_read: false`;
 - `strategy_outcomes_evaluated: false`;
 - `production_model_selected: false`.
@@ -132,7 +136,7 @@ Tests must cover:
 - exact 1,274 anchors and half-open boundaries;
 - strict source-evidence and fit validation;
 - no refit or threshold mutation;
-- assignment probability and distance-gate accounting;
+- assignment posterior, margin, and Mahalanobis training-reference accounting;
 - pre-clipping envelope exceedance accounting;
 - cluster, quarter, bootstrap, ESS, and Jensen-Shannon calculations;
 - deterministic repeated canonical output under the existing single-thread diagnostic boundary;
