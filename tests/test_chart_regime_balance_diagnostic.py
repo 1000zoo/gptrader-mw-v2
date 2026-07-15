@@ -31,6 +31,7 @@ def test_defaults_and_production_grid_are_frozen() -> None:
     assert args.start == START
     assert args.end == END
     assert args.raw_root == Path(".research-data/binance-usdm")
+    assert args.raw_kline_root == Path(".research-data/binance-usdm/raw/klines")
     assert args.json_output.name.endswith(".json")
     assert args.markdown_output.name.endswith(".md")
 
@@ -328,7 +329,7 @@ def test_fixture_orchestration_reports_727_without_archive_downloads(tmp_path: P
     ])
     report = run_diagnostic(args, vector_source=vector_source, configs=build_primary_configs()[:1])
     assert calls == [{"symbol": "BTCUSDT", "start": START, "end": END,
-                      "raw_root": Path(".research-data/binance-usdm")}]
+                      "raw_root": Path(".research-data/binance-usdm/raw/klines")}]
     assert report["sample_count"] == 727
     assert len(report["candidate_configs"]) == 1
     assert report["candidate_configs"][0]["status"] == "accepted"

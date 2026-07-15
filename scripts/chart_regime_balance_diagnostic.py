@@ -75,10 +75,17 @@ class CandidateConfig:
 
 
 def _midnight_z(value: str) -> datetime:
-    try:
-        parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError("timestamp must be canonical YYYY-MM-DDT00:00:00Z") from error
+    formats = ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ")
+    for format_string in formats:
+        try:
+            parsed = datetime.strptime(value, format_string).replace(tzinfo=UTC)
+            break
+        except ValueError:
+            continue
+    else:
+        raise argparse.ArgumentTypeError(
+            "timestamp must be canonical YYYY-MM-DD or YYYY-MM-DDT00:00:00Z"
+        )
     if parsed.time() != datetime.min.time():
         raise argparse.ArgumentTypeError("timestamp must be canonical midnight UTC")
     return parsed
@@ -91,10 +98,23 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--symbol", default="BTCUSDT")
     parser.add_argument("--start", type=_midnight_z, default=DEFAULT_START)
     parser.add_argument("--end", type=_midnight_z, default=DEFAULT_END)
-    parser.add_argument("--raw-root", type=Path, default=Path(".research-data/binance-usdm"))
-    parser.add_argument("--json-output", type=Path, default=Path("docs/reports/chart-regime-balance-3d.json"))
-    parser.add_argument("--markdown-output", type=Path, default=Path("docs/reports/chart-regime-balance-3d.md"))
+    raw_group = parser.add_mutually_exclusive_group()
+    raw_group.add_argument("--raw-kline-root", type=Path)
+    raw_group.add_argument("--raw-root", type=Path)
+    parser.add_argument(
+        "--json-output", "--output-json", dest="json_output", type=Path,
+        default=Path("docs/reports/chart-regime-balance-3d.json"),
+    )
+    parser.add_argument(
+        "--markdown-output", "--output-markdown", dest="markdown_output", type=Path,
+        default=Path("docs/reports/chart-regime-balance-3d.md"),
+    )
     args = parser.parse_args(argv)
+    if args.raw_kline_root is None:
+        base = args.raw_root or Path(".research-data/binance-usdm")
+        args.raw_kline_root = base / "raw" / "klines" if args.raw_root is None else base / "klines"
+    if args.raw_root is None:
+        args.raw_root = Path(".research-data/binance-usdm")
     if args.symbol != args.symbol.strip().upper() or not args.symbol.endswith("USDT"):
         parser.error("symbol must be canonical uppercase and end in USDT")
     if args.end <= args.start:
@@ -210,7 +230,7 @@ def acquire_feature_vectors(
     for request in requests:
         if request.symbol != symbol or request.url != archive_url("klines", symbol, request.period, request.granularity):
             raise ValueError("archive request symbol or URL mismatch")
-        destination = raw_root / "klines" / symbol / request.filename
+        destination = raw_root / symbol / request.filename
         result = downloader.download(request.url, destination, source="klines")
         if result.status not in {"cached", "downloaded"} or not result.sha256:
             raise ValueError(f"required archive unavailable: {request.period} ({result.status})")
@@ -597,7 +617,9 @@ def run_diagnostic(
     args: argparse.Namespace, *, vector_source: Callable[..., object] = acquire_feature_vectors,
     configs: Sequence[CandidateConfig] | None = None, adapter: object | None = None,
 ) -> dict[str, object]:
-    vectors, provenance = vector_source(symbol=args.symbol, start=args.start, end=args.end, raw_root=args.raw_root)
+    vectors, provenance = vector_source(
+        symbol=args.symbol, start=args.start, end=args.end, raw_root=args.raw_kline_root,
+    )
     vectors = validate_vectors(vectors, symbol=args.symbol, start=args.start, end=args.end)
     candidates = evaluate_candidates(vectors, configs=configs, adapter=adapter)
     report = assemble_report(vectors=vectors, candidates=candidates, archive_provenance=provenance,
