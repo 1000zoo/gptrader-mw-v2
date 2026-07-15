@@ -65,6 +65,43 @@ def test_three_day_registry_has_frozen_schema_names_and_family_cap():
     assert max(family_counts.values()) <= 5
 
 
+def test_three_day_registry_has_exact_feature_families():
+    expected_families = {
+        "return_4h": "returns",
+        "return_12h": "returns",
+        "return_1d": "returns",
+        "return_2d": "returns",
+        "return_3d": "returns",
+        "rv_4h": "volatility",
+        "rv_1d": "volatility",
+        "rv_3d": "volatility",
+        "rv_ratio_1d_3d": "volatility",
+        "atr_ratio_1d": "range",
+        "atr_ratio_3d": "range",
+        "range_ratio_3d": "range",
+        "close_location_3d": "range",
+        "directional_efficiency_1d": "path",
+        "directional_efficiency_3d": "path",
+        "sign_change_rate_1d": "reversal",
+        "sign_change_rate_3d": "reversal",
+        "return_autocorr_1d": "reversal",
+        "return_autocorr_3d": "reversal",
+        "max_drawdown_3d": "excursion",
+        "max_runup_3d": "excursion",
+        "breakout_rate_3d": "structure",
+        "mean_body_ratio_3d": "structure",
+        "mean_upper_wick_ratio_3d": "structure",
+        "mean_lower_wick_ratio_3d": "structure",
+        "volume_cv_3d": "volume",
+        "top_decile_volume_share_3d": "volume",
+        "volume_ratio_1d_3d": "volume",
+    }
+
+    assert {
+        spec.name: spec.family for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1
+    } == expected_families
+
+
 def test_three_day_vector_fixes_schema_and_copies_values_immutably():
     original = values()
     vector = ThreeDayChartFeatureVector(
