@@ -122,6 +122,9 @@ class TrainingEnvelopeSummary:
         feature_exceedance_total = sum(row.lower_count + row.upper_count for row in rows.values())
         if (
             any(row.lower_count + row.upper_count > self.sample_count for row in rows.values())
+            or self.any_feature_exceedance_count < max(
+                row.lower_count + row.upper_count for row in rows.values()
+            )
             or not self.any_feature_exceedance_count <= feature_exceedance_total
             or feature_exceedance_total > self.any_feature_exceedance_count * len(names)
         ):

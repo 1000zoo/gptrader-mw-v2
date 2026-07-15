@@ -322,6 +322,18 @@ def test_envelope_summary_rejects_positive_any_count_when_all_feature_counts_are
         TrainingEnvelopeSummary(("a", "b"), 4, rows, 1, .25, {"p50": 0.0, "p95": 1.0, "max": 1.0})
 
 
+def test_envelope_summary_rejects_any_count_below_one_features_exceedance_count() -> None:
+    rows = {
+        "a": FeatureEnvelopeExceedance(1, 1, .25, .25),
+        "b": FeatureEnvelopeExceedance(0, 0, 0.0, 0.0),
+    }
+    with pytest.raises(ValueError, match="cross-field"):
+        TrainingEnvelopeSummary(
+            ("a", "b"), 4, rows, 1, .25,
+            {"p50": 0.0, "p95": 1.7, "max": 2.0},
+        )
+
+
 def test_candidate_summary_rejects_tied_fit_and_noncanonical_historical_quarters() -> None:
     fit = _fit()
     vectors = tuple(_vector(i, value) for i, value in enumerate((-1, -.25, .25, 1) * 10))
