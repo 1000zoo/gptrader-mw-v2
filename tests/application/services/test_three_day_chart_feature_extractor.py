@@ -215,6 +215,25 @@ def test_extractor_uses_closed_half_open_three_day_window():
     assert actual.anchor_at == ANCHOR
 
 
+def test_extractor_ignores_noncanonical_aware_outcome_candle():
+    from src.application.services.three_day_chart_feature_extractor import (
+        extract_three_day_chart_feature_vector,
+    )
+
+    valid = _minute_candles()
+    outcome = _minute_candles(count=4321)[-1]
+    korean_timezone = timezone(timedelta(hours=9))
+    noncanonical_outcome = replace(
+        outcome,
+        opened_at=outcome.opened_at.astimezone(korean_timezone),
+        closed_at=outcome.closed_at.astimezone(korean_timezone),
+    )
+
+    assert extract_three_day_chart_feature_vector(
+        valid + (noncanonical_outcome,), ANCHOR
+    ) == extract_three_day_chart_feature_vector(valid, ANCHOR)
+
+
 def test_registry_values_match_independent_formula_reference():
     from src.application.services.three_day_chart_feature_extractor import (
         calculate_three_day_registry_values,

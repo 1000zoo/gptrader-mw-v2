@@ -42,13 +42,20 @@ def extract_three_day_chart_feature_vector(
     window_start_at = anchor_at - timedelta(days=3)
     window_items = []
     for candle in candles:
+        try:
+            included = window_start_at <= candle.opened_at < anchor_at
+        except TypeError as error:
+            raise ValueError(
+                "complete three-day history requires canonical UTC timestamps"
+            ) from error
+        if not included:
+            continue
         if (
             candle.opened_at.tzinfo is not timezone.utc
             or candle.closed_at.tzinfo is not timezone.utc
         ):
             raise ValueError("complete three-day one-minute history is required")
-        if window_start_at <= candle.opened_at < anchor_at:
-            window_items.append(candle)
+        window_items.append(candle)
     window = tuple(window_items)
     _validate_window(window, window_start_at, anchor_at)
     bars_15m = aggregate_closed_candles(window, minutes=15)
