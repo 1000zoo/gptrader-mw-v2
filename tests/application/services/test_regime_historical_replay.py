@@ -1,7 +1,7 @@
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
-import copy
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -9,9 +9,12 @@ import pytest
 from src.application.services.regime_historical_replay import (
     ConfidenceComparison,
     ConfidenceReference,
+    FeatureEnvelopeExceedance,
     HistoricalReplayCandidateResult,
     QuarterWarning,
     ReplayAssignmentDiagnostic,
+    TrainingEnvelopeSummary,
+    _research_preference_key,
     build_confidence_reference,
     compare_confidence_to_training,
     diagnose_gmm_assignments,
@@ -27,11 +30,19 @@ from src.domain.regime.three_day_chart_features import (
     THREE_DAY_CHART_FEATURE_SCHEMA_VERSION,
     ThreeDayChartFeatureVector,
 )
-from src.application.services.regime_balance_diagnostics import summarize_cluster_balance
+from src.application.services.regime_balance_diagnostics import QuarterlyClusterCounts, summarize_cluster_balance
+from src.infrastructure.regime.historical_replay_source import load_historical_replay_source
 
 
 UTC = timezone.utc
 NAMES = tuple(spec.name for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+SOURCE_REPORT = Path("docs/backtests/chart-regime-balance-btcusdt-3d-1d-2024-2026.json")
+SOURCE_SHA256 = "2e656b11b89baf412d1f6af3217c8900165d45c14531c28f64795695baaa8f4c"
+REAL_FINGERPRINTS = {
+    4: ("0f705f28e5bf54678ca0ebe3", "6d0d1affcd5a616a8daf784b", "717c5b1f6e6900bf9f2a7d48", "baed8e58c11ce3b4f680e945"),
+    8: ("021cf5da658bbb8a891d3803", "340255b9bb291b2c8bf6951c", "4c135e31ff2eb6abf8897fc3", "50a4d2af865d577c31b3c85f",
+        "7e2850f05408573738b5e3d5", "98ee2ae3b65563954026199d", "be23e3975752ecc63885bc0d", "e27a95030541d7f7555832b9"),
+}
 
 
 def _fit(cluster_count: int = 4) -> ClusterDiagnosticFit:
@@ -168,13 +179,14 @@ def test_training_reference_uses_global_p05_and_component_specific_p995_only_fro
 
 @pytest.mark.parametrize("cluster_count", [4, 8])
 def test_reference_preserves_each_fixed_models_lexicographic_fingerprint_order(cluster_count: int) -> None:
-    fit = _fit(cluster_count)
+    source = load_historical_replay_source(SOURCE_REPORT, expected_sha256=SOURCE_SHA256)
+    fit = source.fits[f"gmm-diag-k{cluster_count}"]
     diagnostics = tuple(
         _diagnostic(index, fingerprint, .8, .4, index + 1)
         for index, fingerprint in enumerate(fit.fingerprints)
     )
     reference = build_confidence_reference(diagnostics, fit.fingerprints)
-    assert reference.fingerprints == fit.fingerprints == tuple(sorted(fit.fingerprints))
+    assert reference.fingerprints == fit.fingerprints == REAL_FINGERPRINTS[cluster_count]
 
 
 def test_jsd_matches_hand_formula_and_handles_common_zero_shares() -> None:
@@ -210,33 +222,11 @@ def test_integrated_summary_has_fourteen_quarters_frozen_order_and_overlap_diagn
 
 
 def test_ranking_applies_every_declared_lexicographic_tie_break() -> None:
-    fit = _fit()
-    vectors = tuple(_vector(index, (-1, -.25, .25, 1)[index % 4]) for index in range(40))
-    diagnostics = diagnose_gmm_assignments(fit, vectors, THREE_DAY_CHART_FEATURE_REGISTRY_V1)
-    reference = build_confidence_reference(diagnostics, fit.fingerprints)
-    base = summarize_historical_replay_candidate(
-        identity="z", fit=fit, vectors=vectors, diagnostics=diagnostics,
-        reference=reference, training_shares={name: .25 for name in fit.fingerprints},
-    )
-    fields = (
-        ("envelope", replace(base.envelope, any_feature_exceedance_count=1, any_feature_exceedance_share=1 / 40)),
-        ("confidence", replace(base.confidence, margin_below_reference_count=1, margin_below_reference_share=1 / 40)),
-        ("confidence", replace(base.confidence, component_distance_above_reference_count=1, component_distance_above_reference_share=1 / 40)),
-        ("quarter_warnings", (QuarterWarning("2021-Q1", (fit.fingerprints[0],), ()),)),
-        ("effective_sample_sizes", None),
-        ("jensen_shannon_divergence", .01),
-        ("cluster_count", base.cluster_count + 1),
-        ("identity", "zz"),
-    )
-    for field, worse_value in fields:
-        worse = replace(base, identity="a")
-        if field == "effective_sample_sizes":
-            worse_value = copy.copy(base.effective_sample_sizes)
-            object.__setattr__(worse_value, "minimum", base.effective_sample_sizes.minimum - 1)
-        object.__setattr__(worse, field, worse_value)
-        better = replace(base, identity="b")
-        assert rank_historical_replay_candidates((worse, better))[0] is better
-    assert tuple(item.identity for item in rank_historical_replay_candidates((replace(base, identity="b"), replace(base, identity="a")))) == ("a", "b")
+    base = (.0, .0, .0, 0, 100.0, .0, 4, "a")
+    for index, worse_value in enumerate((.1, .1, .1, 1, 99.0, .1, 8, "b")):
+        worse = list(base)
+        worse[index] = worse_value
+        assert _research_preference_key(*base) < _research_preference_key(*worse)
 
 
 @pytest.mark.parametrize(
@@ -291,7 +281,7 @@ def test_result_constructors_recompute_derived_summaries_and_copy_maps() -> None
     with pytest.raises(ValueError):
         ConfidenceComparison(4, 1, 0.0, 0, 0.0, 0, 0.0)
 
-    vectors = tuple(_vector(i, value) for i, value in enumerate((-1, -.25, .25, 1) * 10))
+    vectors = tuple(_vector(i, (-1, -.25, .25, 1)[i % 4]) for i in range(1274))
     rows = diagnose_gmm_assignments(fit, vectors, THREE_DAY_CHART_FEATURE_REGISTRY_V1)
     result = summarize_historical_replay_candidate(
         identity="gmm-diag-k4", fit=fit, vectors=vectors, diagnostics=rows,
@@ -302,7 +292,84 @@ def test_result_constructors_recompute_derived_summaries_and_copy_maps() -> None
     with pytest.raises(ValueError, match="diagnostic-derived"):
         replace(result, balance=forged)
 
+    envelope_rows = dict(result.envelope.per_feature)
+    envelope_rows[fit.feature_names[0]] = FeatureEnvelopeExceedance(1, 0, 1 / 1274, 0.0)
+    forged_envelope = TrainingEnvelopeSummary(
+        result.envelope.feature_names, 1274, envelope_rows, 1, 1 / 1274,
+        {"p50": 0.0, "p95": 0.0, "max": 1.0},
+    )
+    with pytest.raises(ValueError, match="per-anchor-diagnostic-derived"):
+        replace(result, envelope=forged_envelope)
+
 
 def test_mixed_boolean_raw_envelope_values_fail_closed() -> None:
     with pytest.raises(ValueError, match="booleans"):
         summarize_training_envelope([[True, 0.0], [0.0, 0.0]], ("a", "b"), (-1.0, -1.0), (1.0, 1.0))
+
+
+@pytest.mark.parametrize("lower,upper", [((True,), (1.0,)), ((-1.0,), (False,))])
+def test_boolean_envelope_bounds_fail_closed(lower, upper) -> None:
+    with pytest.raises(ValueError, match="booleans"):
+        summarize_training_envelope([[0.0]], ("a",), lower, upper)
+
+
+def test_envelope_summary_rejects_positive_any_count_when_all_feature_counts_are_zero() -> None:
+    rows = {
+        "a": FeatureEnvelopeExceedance(0, 0, 0.0, 0.0),
+        "b": FeatureEnvelopeExceedance(0, 0, 0.0, 0.0),
+    }
+    with pytest.raises(ValueError, match="cross-field"):
+        TrainingEnvelopeSummary(("a", "b"), 4, rows, 1, .25, {"p50": 0.0, "p95": 1.0, "max": 1.0})
+
+
+def test_candidate_summary_rejects_tied_fit_and_noncanonical_historical_quarters() -> None:
+    fit = _fit()
+    vectors = tuple(_vector(i, value) for i, value in enumerate((-1, -.25, .25, 1) * 10))
+    diagnostics = diagnose_gmm_assignments(fit, vectors, THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+    reference = build_confidence_reference(diagnostics, fit.fingerprints)
+    with pytest.raises(ValueError, match="canonical historical daily anchors"):
+        summarize_historical_replay_candidate(
+            identity="gmm-diag-k4", fit=fit, vectors=vectors, diagnostics=diagnostics,
+            reference=reference, training_shares={name: .25 for name in fit.fingerprints},
+        )
+
+    tied = replace(fit, config=RegimeModelConfig("gmm", 4, covariance_type="tied"), covariances=tuple((1.0,) for _ in range(4)))
+    historical_vectors = tuple(_vector(index, (-1, -.25, .25, 1)[index % 4]) for index in range(1274))
+    historical_diagnostics = diagnose_gmm_assignments(fit, historical_vectors, THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+    with pytest.raises(ValueError, match="diagonal"):
+        summarize_historical_replay_candidate(
+            identity="gmm-tied-k4", fit=tied, vectors=historical_vectors, diagnostics=historical_diagnostics,
+            reference=build_confidence_reference(historical_diagnostics[:100], fit.fingerprints),
+            training_shares={name: .25 for name in fit.fingerprints},
+        )
+
+
+def test_result_and_ranking_reject_incorrect_quarter_state() -> None:
+    fit = _fit()
+    vectors = tuple(_vector(index, (-1, -.25, .25, 1)[index % 4]) for index in range(1274))
+    diagnostics = diagnose_gmm_assignments(fit, vectors, THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+    result = summarize_historical_replay_candidate(
+        identity="gmm-diag-k4", fit=fit, vectors=vectors, diagnostics=diagnostics,
+        reference=build_confidence_reference(diagnostics[:100], fit.fingerprints),
+        training_shares={name: .25 for name in fit.fingerprints},
+    )
+    wrong_quarterly = QuarterlyClusterCounts(
+        fit.fingerprints, ("2021-Q1",),
+        {"2021-Q1": dict(result.balance.counts)}, 1274,
+    )
+    with pytest.raises(ValueError, match="quarter"):
+        replace(result, quarterly=wrong_quarterly)
+
+    noncanonical = copy_result = object.__new__(HistoricalReplayCandidateResult)
+    for field in result.__dataclass_fields__:
+        object.__setattr__(copy_result, field, getattr(result, field))
+    object.__setattr__(noncanonical, "quarterly", wrong_quarterly)
+    with pytest.raises(ValueError, match="quarter"):
+        rank_historical_replay_candidates((noncanonical,))
+
+    wrong_identity = object.__new__(HistoricalReplayCandidateResult)
+    for field in result.__dataclass_fields__:
+        object.__setattr__(wrong_identity, field, getattr(result, field))
+    object.__setattr__(wrong_identity, "identity", "wrong")
+    with pytest.raises(ValueError, match="identity"):
+        rank_historical_replay_candidates((wrong_identity,))

@@ -34,6 +34,15 @@ from src.infrastructure.regime.sklearn_cluster_diagnostic import SklearnClusterD
 
 QUANTILE_METHOD = "linear"
 _DISTRIBUTION_QUANTILES = (("p05", .05), ("p50", .5), ("p95", .95), ("p995", .995))
+_HISTORICAL_FIRST_ANCHOR = datetime(2021, 1, 4, tzinfo=timezone.utc)
+_HISTORICAL_LAST_ANCHOR = datetime(2024, 6, 30, tzinfo=timezone.utc)
+_HISTORICAL_SAMPLE_COUNT = 1274
+_HISTORICAL_QUARTERS = tuple(
+    f"{year}-Q{quarter}"
+    for year in range(2021, 2025)
+    for quarter in range(1, 5)
+    if year < 2024 or quarter <= 2
+)
 
 
 def _finite(value: object) -> bool:
@@ -110,10 +119,28 @@ class TrainingEnvelopeSummary:
                 row.upper_share, row.upper_count / self.sample_count
             ):
                 raise ValueError("per-feature envelope shares are not count-derived")
+        feature_exceedance_total = sum(row.lower_count + row.upper_count for row in rows.values())
+        if (
+            any(row.lower_count + row.upper_count > self.sample_count for row in rows.values())
+            or not self.any_feature_exceedance_count <= feature_exceedance_total
+            or feature_exceedance_total > self.any_feature_exceedance_count * len(names)
+        ):
+            raise ValueError("envelope cross-field counts are inconsistent")
         if tuple(quantiles) != ("p50", "p95", "max") or any(
             not _finite(value) or not 0 <= value <= len(names) for value in quantiles.values()
         ):
             raise ValueError("clipped-dimension quantiles are invalid")
+        if (
+            not quantiles["p50"] <= quantiles["p95"] <= quantiles["max"]
+            or quantiles["max"] != int(quantiles["max"])
+            or (feature_exceedance_total == 0 and any(value != 0 for value in quantiles.values()))
+            or (feature_exceedance_total > 0 and quantiles["max"] < 1)
+            or (
+                self.any_feature_exceedance_count > 0
+                and quantiles["max"] < math.ceil(feature_exceedance_total / self.any_feature_exceedance_count)
+            )
+        ):
+            raise ValueError("clipped-dimension quantiles are cross-field inconsistent")
         if self.quantile_method != QUANTILE_METHOD:
             raise ValueError("unsupported quantile method")
         object.__setattr__(self, "feature_names", names)
@@ -129,11 +156,16 @@ def summarize_training_envelope(
 ) -> TrainingEnvelopeSummary:
     names = _names(feature_names)
     raw_objects = np.asarray(raw_matrix, dtype=object)
-    if any(isinstance(value, (bool, np.bool_)) for value in raw_objects.flat):
-        raise ValueError("raw feature matrix cannot contain booleans")
+    lower_values = tuple(lower_bounds)
+    upper_values = tuple(upper_bounds)
+    bound_objects = (*lower_values, *upper_values)
+    if any(isinstance(value, (bool, np.bool_)) for value in raw_objects.flat) or any(
+        isinstance(value, (bool, np.bool_)) for value in bound_objects
+    ):
+        raise ValueError("raw feature matrix and bounds cannot contain booleans")
     matrix = np.asarray(raw_matrix, dtype=float)
-    lower = np.asarray(tuple(lower_bounds), dtype=float)
-    upper = np.asarray(tuple(upper_bounds), dtype=float)
+    lower = np.asarray(lower_values, dtype=float)
+    upper = np.asarray(upper_values, dtype=float)
     if (
         matrix.ndim != 2 or matrix.shape[0] == 0 or matrix.shape[1] != len(names)
         or lower.shape != (len(names),) or upper.shape != (len(names),)
@@ -433,6 +465,8 @@ class HistoricalReplayCandidateResult:
             raise ValueError("candidate identity must be canonical")
         if not isinstance(self.cluster_count, int) or isinstance(self.cluster_count, bool) or self.cluster_count != len(names):
             raise ValueError("candidate cluster count must match fingerprints")
+        if self.identity != f"gmm-diag-k{self.cluster_count}":
+            raise ValueError("candidate identity must match a fixed diagonal GMM cluster count")
         if any(not isinstance(value, expected) for value, expected in (
             (self.envelope, TrainingEnvelopeSummary), (self.confidence, ConfidenceComparison),
             (self.balance, ClusterBalanceSummary), (self.quarterly, QuarterlyClusterCounts),
@@ -440,15 +474,35 @@ class HistoricalReplayCandidateResult:
         )):
             raise ValueError("candidate summaries must use canonical result types")
         diagnostics = _validate_diagnostics(self.diagnostics, names)
+        _validate_historical_anchors(diagnostics)
+        clipped_counts = tuple(row.clipped_dimension_count for row in diagnostics)
+        expected_any_count = sum(count > 0 for count in clipped_counts)
+        expected_clipped_quantiles = {
+            "p50": float(np.quantile(clipped_counts, .5, method=QUANTILE_METHOD)),
+            "p95": float(np.quantile(clipped_counts, .95, method=QUANTILE_METHOD)),
+            "max": float(max(clipped_counts)),
+        }
         if not _finite(self.jensen_shannon_divergence) or not 0 <= self.jensen_shannon_divergence <= math.log(2) + 1e-12:
             raise ValueError("candidate JSD is invalid")
         labels = tuple(row.fingerprint for row in diagnostics)
         if self.balance != summarize_cluster_balance(labels, names):
             raise ValueError("candidate balance is not diagnostic-derived")
+        expected_episodes = tuple(DailyRegimeEpisode(
+            row.anchor_at, row.anchor_at - timedelta(days=3), row.anchor_at, row.anchor_at + timedelta(days=1)
+        ) for row in diagnostics)
+        if self.quarterly != quarterly_cluster_counts(expected_episodes, labels, names):
+            raise ValueError("candidate quarterly counts are not diagnostic-derived")
         if self.confidence.sample_count != len(diagnostics) or self.envelope.sample_count != len(diagnostics):
             raise ValueError("candidate summary sample counts disagree")
+        if (
+            self.envelope.any_feature_exceedance_count != expected_any_count
+            or dict(self.envelope.clipped_dimension_quantiles) != expected_clipped_quantiles
+        ):
+            raise ValueError("candidate envelope is not per-anchor-diagnostic-derived")
         if self.quarterly.total != len(diagnostics) or self.bootstrap.sample_count != len(diagnostics) or self.effective_sample_sizes.sample_count != len(diagnostics):
             raise ValueError("candidate overlap-aware summary counts disagree")
+        if self.quarterly.quarters != _HISTORICAL_QUARTERS:
+            raise ValueError("candidate replay must contain exactly the 14 canonical quarters")
         if tuple(self.balance.fingerprints) != names or tuple(self.quarterly.fingerprints) != names:
             raise ValueError("candidate summaries do not follow frozen fingerprints")
         if any(not isinstance(value, QuarterWarning) for value in self.quarter_warnings):
@@ -471,6 +525,13 @@ class HistoricalReplayCandidateResult:
             or self.effective_sample_sizes.max_lag != 30
         ):
             raise ValueError("candidate overlap-aware diagnostics do not use the frozen contract")
+        if self.effective_sample_sizes != effective_sample_sizes(labels, names, max_lag=30):
+            raise ValueError("candidate effective sample sizes are not diagnostic-derived")
+        if any(
+            not math.isclose(self.bootstrap.intervals[name].point, self.balance.shares[name], rel_tol=1e-12, abs_tol=1e-12)
+            for name in names
+        ):
+            raise ValueError("candidate bootstrap points are not diagnostic-derived")
         object.__setattr__(self, "fingerprints", names)
         object.__setattr__(self, "diagnostics", diagnostics)
 
@@ -496,10 +557,18 @@ def _summarize_historical_replay_candidate_single_thread(
     diagnostics: Sequence[ReplayAssignmentDiagnostic], reference: ConfidenceReference,
     training_shares: Mapping[str, float],
 ) -> HistoricalReplayCandidateResult:
-    if not isinstance(fit, ClusterDiagnosticFit):
-        raise ValueError("candidate fit must be canonical")
+    if (
+        not isinstance(fit, ClusterDiagnosticFit)
+        or fit.config.model_type != "gmm"
+        or fit.config.covariance_type != "diag"
+    ):
+        raise ValueError("candidate fit must be a fixed diagonal GMM diagnostic fit")
+    expected_identity = f"gmm-diag-k{fit.config.cluster_count}"
+    if identity != expected_identity:
+        raise ValueError("candidate identity must match the fixed diagonal GMM fit")
     values = tuple(vectors)
     rows = _validate_diagnostics(diagnostics, fit.fingerprints)
+    _validate_historical_anchors(rows)
     if len(values) != len(rows) or any(vector.anchor_at != row.anchor_at for vector, row in zip(values, rows)):
         raise ValueError("candidate vectors and diagnostics must align exactly")
     registry_names = tuple(spec.name for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1)
@@ -538,16 +607,62 @@ def rank_historical_replay_candidates(
         raise ValueError("historical replay candidates must be nonempty canonical results")
     if len({value.identity for value in values}) != len(values):
         raise ValueError("historical replay candidate identities must be unique")
-    return tuple(sorted(values, key=lambda item: (
+    for value in values:
+        _revalidate_candidate_result(value)
+    return tuple(sorted(values, key=lambda item: _research_preference_key(
         item.envelope.any_feature_exceedance_share,
         item.confidence.margin_below_reference_share,
         item.confidence.component_distance_above_reference_share,
         item.quarter_warning_count,
-        -item.effective_sample_sizes.minimum,
+        item.effective_sample_sizes.minimum,
         item.jensen_shannon_divergence,
         item.cluster_count,
         item.identity,
     )))
+
+
+def _research_preference_key(
+    clipping_share: float, margin_tail_share: float, distance_tail_share: float,
+    empty_quarter_warning_count: int, minimum_effective_sample_size: float,
+    divergence: float, cluster_count: int, identity: str,
+) -> tuple[float, float, float, int, float, float, int, str]:
+    shares = (clipping_share, margin_tail_share, distance_tail_share)
+    if any(not _finite(value) or not 0 <= value <= 1 for value in shares):
+        raise ValueError("research preference shares must be finite proportions")
+    if (
+        not isinstance(empty_quarter_warning_count, int) or isinstance(empty_quarter_warning_count, bool)
+        or empty_quarter_warning_count < 0
+        or not _finite(minimum_effective_sample_size) or minimum_effective_sample_size < 1
+        or not _finite(divergence) or not 0 <= divergence <= math.log(2) + 1e-12
+        or not isinstance(cluster_count, int) or isinstance(cluster_count, bool) or cluster_count <= 0
+        or not isinstance(identity, str) or not identity or identity != identity.strip()
+    ):
+        raise ValueError("research preference values are invalid")
+    return (
+        clipping_share, margin_tail_share, distance_tail_share,
+        empty_quarter_warning_count, -minimum_effective_sample_size,
+        divergence, cluster_count, identity,
+    )
+
+
+def _validate_historical_anchors(diagnostics: Sequence[ReplayAssignmentDiagnostic]) -> None:
+    anchors = tuple(row.anchor_at for row in diagnostics)
+    if (
+        len(anchors) != _HISTORICAL_SAMPLE_COUNT
+        or anchors[0] != _HISTORICAL_FIRST_ANCHOR
+        or anchors[-1] != _HISTORICAL_LAST_ANCHOR
+        or any(current != previous + timedelta(days=1) for previous, current in zip(anchors, anchors[1:]))
+    ):
+        raise ValueError("candidate replay must use the 1,274 canonical historical daily anchors")
+
+
+def _revalidate_candidate_result(value: HistoricalReplayCandidateResult) -> None:
+    HistoricalReplayCandidateResult(
+        value.identity, value.cluster_count, value.fingerprints, value.envelope,
+        value.confidence, value.balance, value.quarterly, value.quarter_warnings,
+        value.bootstrap, value.effective_sample_sizes, value.jensen_shannon_divergence,
+        value.diagnostics,
+    )
 
 
 __all__ = [
