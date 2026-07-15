@@ -132,7 +132,7 @@ def _destination_identity(path: Path) -> str:
 def _validate_distinct_destinations(json_path: Path, markdown_path: Path) -> None:
     destinations = (Path(json_path), Path(markdown_path))
     is_reserved = getattr(os.path, "isreserved", None)
-    if callable(is_reserved) and any(is_reserved(path.name) for path in destinations):
+    if callable(is_reserved) and any(is_reserved(os.fspath(path)) for path in destinations):
         raise ValueError("report destination uses a platform-reserved path name")
     if _destination_identity(json_path) == _destination_identity(markdown_path):
         raise ValueError("JSON and Markdown report destinations must be distinct")

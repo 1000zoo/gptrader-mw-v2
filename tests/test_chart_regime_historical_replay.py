@@ -101,6 +101,22 @@ def test_reserved_destination_is_rejected_before_render_or_parent_mutation(tmp_p
     assert not parent.exists()
 
 
+def test_reserved_parent_component_uses_full_path_before_mutation(tmp_path, monkeypatch):
+    import scripts.chart_regime_balance_diagnostic as shared
+
+    seen = []
+    def isreserved(value):
+        seen.append(os.fspath(value))
+        return "reserved-parent" in Path(value).parts
+
+    monkeypatch.setattr(shared.os.path, "isreserved", isreserved)
+    parent = tmp_path / "reserved-parent"
+    with pytest.raises(ValueError, match="reserved"):
+        write_reports_atomic({}, json_path=parent / "out.json", markdown_path=tmp_path / "safe.md")
+    assert any(Path(value) == parent / "out.json" for value in seen)
+    assert not parent.exists() and not tuple(tmp_path.rglob("*.tmp")) and not tuple(tmp_path.rglob("*.bak"))
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows reserved path semantics")
 @pytest.mark.parametrize("name", ("PRN", "AUX.json", "COM1.txt", "LPT1.md", "report.json:stream"))
 def test_windows_reserved_destinations_are_rejected_without_artifacts(tmp_path, name):
@@ -108,6 +124,15 @@ def test_windows_reserved_destinations_are_rejected_without_artifacts(tmp_path, 
     with pytest.raises(ValueError, match="reserved"):
         write_reports_atomic({}, json_path=parent / name, markdown_path=parent / "safe.md")
     assert not parent.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows reserved path semantics")
+@pytest.mark.parametrize("parent_name", ("PRN", "folder."))
+def test_windows_reserved_parent_component_is_rejected_without_mutation(tmp_path, parent_name):
+    parent = tmp_path / parent_name
+    with pytest.raises(ValueError, match="reserved"):
+        write_reports_atomic({}, json_path=parent / "out.json", markdown_path=tmp_path / "safe.md")
+    assert not parent.exists() and not tuple(tmp_path.rglob("*.tmp")) and not tuple(tmp_path.rglob("*.bak"))
 
 
 def test_resolved_destination_alias_is_rejected(tmp_path):
