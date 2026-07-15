@@ -140,6 +140,18 @@ def test_rejects_source_report_hash_mismatch(tmp_path: Path) -> None:
             "identity",
         ),
         (
+            lambda p: _candidate(p, "gmm-diag-k4")["model"].__setitem__(
+                "random_seed", 20260715
+            ),
+            "model config",
+        ),
+        (
+            lambda p: _candidate(p, "gmm-diag-k8")["model"].__setitem__(
+                "regularization", 2e-6
+            ),
+            "model config",
+        ),
+        (
             lambda p: _candidate(p, "gmm-diag-k4")["fit"]["means"][0].__setitem__(
                 0, _candidate(p, "gmm-diag-k4")["fit"]["means"][0][0] + 0.01
             ),
@@ -189,6 +201,8 @@ def test_rejects_source_report_hash_mismatch(tmp_path: Path) -> None:
         "schema-retained-name",
         "fit-retained-name",
         "config-identity",
+        "config-random-seed",
+        "config-regularization",
         "mean",
         "covariance",
         "weight",
@@ -231,4 +245,19 @@ def test_rejects_training_count_key_or_total_tampering(tmp_path: Path) -> None:
     path, digest = _write_payload(tmp_path, payload)
 
     with pytest.raises(ValueError, match="training counts"):
+        load_historical_replay_source(path, expected_sha256=digest)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("scale_invariant", 1), ("aggregation_minutes", 15.0)],
+)
+def test_rejects_registry_json_type_confusion(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    payload = deepcopy(_payload())
+    payload["feature_schema"]["registry"][0][field] = value
+    path, digest = _write_payload(tmp_path, payload)
+
+    with pytest.raises(ValueError, match="registry"):
         load_historical_replay_source(path, expected_sha256=digest)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -149,8 +149,8 @@ def _validate_feature_schema(value: object) -> None:
         raise ValueError("source feature schema is missing")
     if value.get("version") != THREE_DAY_CHART_FEATURE_SCHEMA_VERSION:
         raise ValueError("source feature schema version is incompatible")
-    expected_registry = [asdict(spec) for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1]
-    if value.get("registry") != expected_registry:
+    registry = _restore_feature_registry(value.get("registry"))
+    if registry != THREE_DAY_CHART_FEATURE_REGISTRY_V1:
         raise ValueError("source feature registry is incompatible")
     expected_retained = {
         identity: list(_RETAINED_NAMES) for identity in _CANDIDATE_IDENTITIES
@@ -177,6 +177,10 @@ def _validate_candidate_registry(value: object) -> dict[str, Mapping[str, object
         config = _restore_config(candidate.get("model"))
         if identity != _config_identity(config):
             raise ValueError("source candidate identity disagrees with model config")
+        if not _type_strict_mapping_equal(
+            candidate.get("model"), _expected_model_config(identity)
+        ):
+            raise ValueError("source candidate model config is incompatible")
         if candidate.get("status") != "accepted":
             raise ValueError("source candidate status is not accepted")
         if candidate.get("rejections") != []:
@@ -210,6 +214,62 @@ def _config_identity(config: RegimeModelConfig) -> str:
     if config.model_type == "kmeans":
         return f"kmeans-k{config.cluster_count}"
     return f"gmm-{config.covariance_type}-k{config.cluster_count}"
+
+
+def _expected_model_config(identity: str) -> dict[str, object]:
+    model, count_text = identity.rsplit("-k", 1)
+    if model == "kmeans":
+        model_type = "kmeans"
+        covariance_type = None
+    else:
+        model_type = "gmm"
+        covariance_type = model.removeprefix("gmm-")
+    return {
+        "model_type": model_type,
+        "cluster_count": int(count_text),
+        "random_seed": 20260714,
+        "covariance_type": covariance_type,
+        "regularization": 1e-6,
+    }
+
+
+def _type_strict_mapping_equal(value: object, expected: Mapping[str, object]) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == set(expected)
+        and all(
+            type(value[key]) is type(expected_value) and value[key] == expected_value
+            for key, expected_value in expected.items()
+        )
+    )
+
+
+def _restore_feature_registry(value: object) -> tuple[ChartFeatureSpec, ...]:
+    if not isinstance(value, list):
+        raise ValueError("source feature registry is incompatible")
+    field_types = {
+        "name": str,
+        "family": str,
+        "aggregation_minutes": int,
+        "lookback_minutes": int,
+        "formula": str,
+        "null_policy": str,
+        "clipping_policy": str,
+        "scale_invariant": bool,
+    }
+    restored: list[ChartFeatureSpec] = []
+    for item in value:
+        if (
+            not isinstance(item, dict)
+            or set(item) != set(field_types)
+            or any(
+                type(item[field]) is not expected
+                for field, expected in field_types.items()
+            )
+        ):
+            raise ValueError("source feature registry is incompatible")
+        restored.append(ChartFeatureSpec(**item))
+    return tuple(restored)
 
 
 def _restore_fit(candidate: Mapping[str, object]) -> ClusterDiagnosticFit:
