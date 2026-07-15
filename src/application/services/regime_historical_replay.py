@@ -301,6 +301,14 @@ class ConfidenceReference:
             raise ValueError("component distance references must follow frozen fingerprints")
         if any(tuple(row) != tuple(key for key, _ in _DISTRIBUTION_QUANTILES) or any(not _finite(value) for value in row.values()) for row in quantile_maps):
             raise ValueError("confidence quantiles are invalid")
+        for row in quantile_maps:
+            ordered = tuple(row[key] for key, _ in _DISTRIBUTION_QUANTILES)
+            if ordered != tuple(sorted(ordered)):
+                raise ValueError("confidence quantiles must be monotonic")
+        if any(not 0 <= value <= 1 for row in quantile_maps[:2] for value in row.values()):
+            raise ValueError("posterior and margin quantiles must lie in [0, 1]")
+        if any(value < 0 for value in quantile_maps[2].values()):
+            raise ValueError("distance quantiles must be nonnegative")
         if not _finite(self.posterior_fifth_percentile) or not math.isclose(self.posterior_fifth_percentile, quantile_maps[0]["p05"]):
             raise ValueError("posterior reference is inconsistent")
         if not _finite(self.margin_fifth_percentile) or not math.isclose(self.margin_fifth_percentile, quantile_maps[1]["p05"]):
@@ -574,6 +582,9 @@ def _summarize_historical_replay_candidate_single_thread(
     _validate_historical_anchors(rows)
     if len(values) != len(rows) or any(vector.anchor_at != row.anchor_at for vector, row in zip(values, rows)):
         raise ValueError("candidate vectors and diagnostics must align exactly")
+    recomputed = diagnose_gmm_assignments(fit, values, THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+    if rows != recomputed:
+        raise ValueError("supplied diagnostics do not match recomputed fixed-fit assignments")
     registry_names = tuple(spec.name for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1)
     indices = tuple(registry_names.index(name) for name in fit.feature_names)
     matrix = np.asarray([[tuple(vector.values.values())[index] for index in indices] for vector in values], dtype=float)

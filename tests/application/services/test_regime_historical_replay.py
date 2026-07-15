@@ -385,3 +385,49 @@ def test_result_and_ranking_reject_incorrect_quarter_state() -> None:
     object.__setattr__(wrong_identity, "identity", "wrong")
     with pytest.raises(ValueError, match="identity"):
         rank_historical_replay_candidates((wrong_identity,))
+
+
+def test_candidate_summary_rejects_anchor_aligned_fabricated_diagnostics() -> None:
+    fit = _fit()
+    vectors = tuple(_vector(index, (-1, -.25, .25, 1)[index % 4]) for index in range(1274))
+    canonical = diagnose_gmm_assignments(fit, vectors, THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+    fabricated = tuple(replace(row, fingerprint=fit.fingerprints[0]) for row in canonical)
+
+    with pytest.raises(ValueError, match="recomputed"):
+        summarize_historical_replay_candidate(
+            identity="gmm-diag-k4", fit=fit, vectors=vectors, diagnostics=fabricated,
+            reference=build_confidence_reference(canonical[:100], fit.fingerprints),
+            training_shares={name: .25 for name in fit.fingerprints},
+        )
+
+
+def _confidence_reference_values() -> dict[str, object]:
+    quantiles = {"p05": .1, "p50": .5, "p95": .9, "p995": .99}
+    return {
+        "fingerprints": ("a", "b"),
+        "sample_count": 10,
+        "posterior_fifth_percentile": .1,
+        "margin_fifth_percentile": .1,
+        "component_distance_995": {"a": 2.0, "b": 3.0},
+        "posterior_quantiles": quantiles,
+        "margin_quantiles": quantiles,
+        "distance_quantiles": {"p05": 0.0, "p50": 1.0, "p95": 2.0, "p995": 3.0},
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda values: values.update(posterior_quantiles={"p05": .9, "p50": .1, "p95": .95, "p995": .99}, posterior_fifth_percentile=.9),
+        lambda values: values.update(margin_quantiles={"p05": .9, "p50": .1, "p95": .95, "p995": .99}, margin_fifth_percentile=.9),
+        lambda values: values.update(posterior_quantiles={"p05": .1, "p50": .5, "p95": .9, "p995": 2.0}),
+        lambda values: values.update(margin_quantiles={"p05": -1.0, "p50": .5, "p95": .9, "p995": .99}, margin_fifth_percentile=-1.0),
+        lambda values: values.update(distance_quantiles={"p05": -1.0, "p50": 1.0, "p95": 2.0, "p995": 3.0}),
+        lambda values: values.update(component_distance_995={"a": -1.0, "b": 3.0}),
+    ],
+)
+def test_confidence_reference_rejects_nonmonotonic_out_of_range_and_negative_quantiles(mutation) -> None:
+    values = _confidence_reference_values()
+    mutation(values)
+    with pytest.raises(ValueError, match="quantile|reference"):
+        ConfidenceReference(**values)
