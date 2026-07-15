@@ -550,10 +550,16 @@ def _unused_sibling(final: Path, suffix: str) -> Path:
     return path
 
 
-def write_reports_atomic(payload: Mapping[str, object], *, json_path: Path, markdown_path: Path) -> None:
-    _validate_distinct_destinations(json_path, markdown_path)
-    json_content = canonical_json_bytes(payload)
-    markdown_content = render_markdown(payload).encode("utf-8")
+def write_bytes_pair_atomic(
+    first_content: bytes, second_content: bytes, *, first_path: Path, second_path: Path,
+) -> None:
+    """Publish a byte pair transactionally, retaining recoverable backups on rollback failure."""
+
+    if not isinstance(first_content, bytes) or not isinstance(second_content, bytes):
+        raise TypeError("paired report content must be bytes")
+    _validate_distinct_destinations(first_path, second_path)
+    json_content, markdown_content = first_content, second_content
+    json_path, markdown_path = first_path, second_path
     json_temp: Path | None = None
     markdown_temp: Path | None = None
     finals = (Path(json_path), Path(markdown_path))
@@ -597,6 +603,14 @@ def write_reports_atomic(payload: Mapping[str, object], *, json_path: Path, mark
         if publication_succeeded:
             for backup in backups.values():
                 _best_effort_unlink(backup)
+
+
+def write_reports_atomic(payload: Mapping[str, object], *, json_path: Path, markdown_path: Path) -> None:
+    _validate_distinct_destinations(json_path, markdown_path)
+    write_bytes_pair_atomic(
+        canonical_json_bytes(payload), render_markdown(payload).encode("utf-8"),
+        first_path=json_path, second_path=markdown_path,
+    )
 
 
 def run_diagnostic(

@@ -6,18 +6,21 @@ import argparse
 from collections.abc import Mapping, Sequence
 from dataclasses import fields, is_dataclass
 from datetime import datetime, timezone
+import hashlib
 import math
-import os
 from pathlib import Path
 import sys
-import tempfile
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.chart_regime_balance_diagnostic import canonical_json_bytes
+from scripts.chart_regime_balance_diagnostic import (
+    _validate_distinct_destinations,
+    canonical_json_bytes,
+    write_bytes_pair_atomic,
+)
 from src.application.services.regime_historical_replay import (
     build_confidence_reference,
     diagnose_gmm_assignments,
@@ -31,6 +34,7 @@ from src.infrastructure.regime.historical_replay_source import (
     HistoricalReplaySource,
     load_historical_replay_source,
 )
+from src.domain.regime import ThreeDayChartFeatureVector, build_daily_regime_episodes
 
 
 UTC = timezone.utc
@@ -106,11 +110,68 @@ def _validate_finite(value: Any) -> None:
             _validate_finite(item)
 
 
-def _model_payload(identity, fit, reference, result) -> dict[str, object]:
+def _canonical_provenance(values: Sequence[Mapping[str, object]], *, interval_name: str) -> list[dict[str, object]]:
+    required = ("period", "url", "sha256", "bytes", "member_identity")
+    rows = []
+    for raw in values:
+        if not isinstance(raw, Mapping) or tuple(raw) != required:
+            raise ValueError(f"{interval_name} archive provenance must use stable canonical field order")
+        row = {key: raw[key] for key in required}
+        sha = row["sha256"]
+        if (
+            not isinstance(row["period"], str) or not row["period"] or row["period"] != row["period"].strip()
+            or not isinstance(row["url"], str) or row["url"] != row["url"].strip() or not row["url"].startswith("https://")
+            or not isinstance(sha, str) or len(sha) != 64 or sha != sha.lower()
+            or any(char not in "0123456789abcdef" for char in sha)
+            or not isinstance(row["bytes"], int) or isinstance(row["bytes"], bool) or row["bytes"] <= 0
+            or not isinstance(row["member_identity"], str) or not row["member_identity"]
+            or row["member_identity"] != row["member_identity"].strip()
+            or "/" in row["member_identity"] or "\\" in row["member_identity"]
+            or row["url"].rsplit("/", 1)[-1] != row["member_identity"]
+        ):
+            raise ValueError(f"{interval_name} archive provenance is not canonical")
+        rows.append(row)
+    if not rows or len({(row["period"], row["url"], row["sha256"]) for row in rows}) != len(rows):
+        raise ValueError(f"{interval_name} archive provenance must be nonempty and unique")
+    return rows
+
+
+def _validate_vectors(values: Sequence, *, symbol: str, start: datetime, end: datetime, count: int, name: str):
+    vectors = tuple(values)
+    episodes = build_daily_regime_episodes(start, end)
+    if len(vectors) != count or len(episodes) != count:
+        raise ValueError(f"{name} vectors must contain exactly {count} canonical anchors")
+    if any(not isinstance(vector, ThreeDayChartFeatureVector) for vector in vectors):
+        raise ValueError(f"{name} vectors must be canonical three-day feature vectors")
+    if any(vector.symbol != symbol for vector in vectors):
+        raise ValueError(f"{name} vector symbol mismatch")
+    if tuple(vector.anchor_at for vector in vectors) != tuple(episode.anchor_at for episode in episodes):
+        raise ValueError(f"{name} vector anchors do not match the frozen interval")
+    if any(vector.window_start_at != episode.feature_start_at for vector, episode in zip(vectors, episodes)):
+        raise ValueError(f"{name} feature windows cross their anchor boundary")
+    return vectors
+
+
+def _model_payload(identity, fit, reference, result, training_counts) -> dict[str, object]:
+    historical = _plain(result)
+    historical_counts = historical["balance"]["counts"]
+    total = sum(training_counts.values())
+    training_shares = {name: training_counts[name] / total for name in fit.fingerprints}
+    prevalence_delta = {
+        name: historical["balance"]["shares"][name] - training_shares[name]
+        for name in fit.fingerprints
+    }
     return {
         "identity": identity,
         "config": _plain(fit.config),
         "fingerprints": list(fit.fingerprints),
+        "source_fit_sha256": hashlib.sha256(canonical_json_bytes(_plain(fit))).hexdigest(),
+        "training_distribution": {"counts": dict(training_counts), "shares": training_shares},
+        "historical_distribution": {
+            "counts": historical_counts,
+            "shares": historical["balance"]["shares"],
+            "prevalence_delta_vs_training": prevalence_delta,
+        },
         "reference_cutoffs": {
             "source": "training_only",
             "sample_count": reference.sample_count,
@@ -122,7 +183,7 @@ def _model_payload(identity, fit, reference, result) -> dict[str, object]:
             "margin_quantiles": dict(reference.margin_quantiles),
             "distance_quantiles": dict(reference.distance_quantiles),
         },
-        "historical": _plain(result),
+        "historical": historical,
     }
 
 
@@ -147,10 +208,16 @@ def build_report(
         raise ValueError("symbol or training interval disagrees with fixed source")
     if tuple(source.fits) != ("gmm-diag-k4", "gmm-diag-k8") or tuple(source.training_counts) != tuple(source.fits):
         raise ValueError("fixed replay source must contain exactly K4 and K8")
-    historical = tuple(historical_vectors)
-    training = tuple(training_vectors)
-    if len(historical) != HISTORICAL_SAMPLE_COUNT or len(training) != TRAINING_SAMPLE_COUNT:
-        raise ValueError("replay vector counts must be exactly 1,274 historical and 727 training")
+    historical = _validate_vectors(
+        historical_vectors, symbol=symbol, start=historical_start, end=historical_end,
+        count=HISTORICAL_SAMPLE_COUNT, name="historical",
+    )
+    training = _validate_vectors(
+        training_vectors, symbol=symbol, start=training_start, end=training_end,
+        count=TRAINING_SAMPLE_COUNT, name="training-reference",
+    )
+    historical_archive = _canonical_provenance(historical_provenance, interval_name="historical")
+    training_archive = _canonical_provenance(training_provenance, interval_name="training-reference")
 
     models = []
     results = []
@@ -167,7 +234,7 @@ def build_report(
             training_shares=training_shares,
         )
         results.append(result)
-        models.append(_model_payload(identity, fit, reference, result))
+        models.append(_model_payload(identity, fit, reference, result, counts))
     ranked = rank_historical_replay_candidates(results)
     report = {
         "kind": "three_day_regime_historical_replay",
@@ -177,10 +244,21 @@ def build_report(
         "training_reference_interval": {"start_inclusive": _z(training_start), "end_exclusive": _z(training_end)},
         "historical_sample_count": len(historical),
         "training_reference_sample_count": len(training),
+        "historical_first_anchor": _z(historical[0].anchor_at),
+        "historical_last_anchor": _z(historical[-1].anchor_at),
+        "training_reference_first_anchor": _z(training[0].anchor_at),
+        "training_reference_last_anchor": _z(training[-1].anchor_at),
         "source_report_sha256": source.report_sha256,
         "archive_provenance": {
-            "historical": _plain(tuple(historical_provenance)),
-            "training_reference": _plain(tuple(training_provenance)),
+            "historical": historical_archive,
+            "training_reference": training_archive,
+        },
+        "archive_combined_sha256": {
+            "historical": hashlib.sha256(canonical_json_bytes(historical_archive)).hexdigest(),
+            "training_reference": hashlib.sha256(canonical_json_bytes(training_archive)).hexdigest(),
+            "overall": hashlib.sha256(canonical_json_bytes({
+                "historical": historical_archive, "training_reference": training_archive,
+            })).hexdigest(),
         },
         "models": models,
         "research_preference": [item.identity for item in ranked],
@@ -221,6 +299,15 @@ def render_markdown(payload: Mapping[str, object]) -> str:
             f"- {model['identity']}: posterior p05={cutoff['dominant_posterior_p05']:.6f}, "
             f"margin p05={cutoff['posterior_margin_p05']:.6f}; component distance uses training p99.5 (linear quantile)."
         )
+    lines.extend(["", "## Prevalence comparison", ""])
+    for model in models:
+        training = model["training_distribution"]
+        historical = model["historical_distribution"]
+        lines.append(
+            f"- {model['identity']}: training counts/shares={training['counts']} / {training['shares']}; "
+            f"historical counts/shares={historical['counts']} / {historical['shares']}; "
+            f"historical-training deltas={historical['prevalence_delta_vs_training']}."
+        )
     lines.extend(["", "## Clipping and quarterly warnings", ""])
     for model in models:
         historical = model["historical"]
@@ -253,54 +340,12 @@ def render_markdown(payload: Mapping[str, object]) -> str:
     return "\n".join(lines)
 
 
-def _same_destination(left: Path, right: Path) -> bool:
-    a, b = Path(left), Path(right)
-    if a == b or os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b)):
-        return True
-    try:
-        return a.resolve(strict=False) == b.resolve(strict=False)
-    except OSError:
-        return False
-
-
 def write_reports_atomic(payload: Mapping[str, object], *, json_path: Path, markdown_path: Path) -> None:
-    if _same_destination(json_path, markdown_path):
-        raise ValueError("JSON and Markdown destinations must be distinct")
-    json_bytes = canonical_json_bytes(payload)
-    markdown_bytes = render_markdown(payload).encode("utf-8")
-    finals = (Path(json_path), Path(markdown_path))
-    temps: list[Path] = []
-    backups: dict[Path, Path] = {}
-    published: set[Path] = set()
-    try:
-        for final, content in zip(finals, (json_bytes, markdown_bytes)):
-            final.parent.mkdir(parents=True, exist_ok=True)
-            fd, name = tempfile.mkstemp(prefix=f".{final.name}.", suffix=".tmp", dir=final.parent)
-            temp = Path(name); temps.append(temp)
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(content); stream.flush(); os.fsync(stream.fileno())
-        for final in finals:
-            if final.exists():
-                fd, name = tempfile.mkstemp(prefix=f".{final.name}.", suffix=".bak", dir=final.parent)
-                os.close(fd); backup = Path(name); backup.unlink()
-                final.replace(backup); backups[final] = backup
-        for temp, final in zip(tuple(temps), finals):
-            temp.replace(final); temps.remove(temp); published.add(final)
-    except BaseException:
-        for final in finals:
-            try:
-                if final in published:
-                    final.unlink(missing_ok=True)
-                if final in backups:
-                    backups[final].replace(final)
-                    backups.pop(final, None)
-            except BaseException:
-                pass
-        raise
-    finally:
-        for path in (*temps, *backups.values()):
-            try: path.unlink(missing_ok=True)
-            except OSError: pass
+    _validate_distinct_destinations(json_path, markdown_path)
+    write_bytes_pair_atomic(
+        canonical_json_bytes(payload), render_markdown(payload).encode("utf-8"),
+        first_path=json_path, second_path=markdown_path,
+    )
 
 
 def run(args: argparse.Namespace) -> dict[str, object]:
