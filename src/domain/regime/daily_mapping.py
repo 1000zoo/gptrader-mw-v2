@@ -18,6 +18,7 @@ from src.domain.regime.three_day_daily_profile import (
     DailyRiskPolicy,
     ThreeDayDailyResearchProfile,
     ThreeDayDailyWalkForwardFold,
+    decimal_arithmetic_context,
 )
 
 
@@ -143,14 +144,15 @@ class DailyStrategyEvidence:
             _finite_decimal(getattr(self, field), field)
         if self.initial_equity <= 0:
             raise ValueError("initial_equity must be positive")
-        if self.final_equity != self.initial_equity + self.net_pnl:
-            raise ValueError("final equity and net PnL are inconsistent")
-        if self.gross_pnl - self.fees != self.net_pnl or self.fees < 0:
-            raise ValueError("gross PnL, fees, and net PnL are inconsistent")
-        if self.gross_return_ratio != self.gross_pnl / self.initial_equity:
-            raise ValueError("gross return ratio is inconsistent")
-        if self.net_return_ratio != self.net_pnl / self.initial_equity:
-            raise ValueError("net return ratio is inconsistent")
+        with decimal_arithmetic_context():
+            if self.final_equity != self.initial_equity + self.net_pnl:
+                raise ValueError("final equity and net PnL are inconsistent")
+            if self.gross_pnl - self.fees != self.net_pnl or self.fees < 0:
+                raise ValueError("gross PnL, fees, and net PnL are inconsistent")
+            if self.gross_return_ratio != self.gross_pnl / self.initial_equity:
+                raise ValueError("gross return ratio is inconsistent")
+            if self.net_return_ratio != self.net_pnl / self.initial_equity:
+                raise ValueError("net return ratio is inconsistent")
         _nonnegative_integer(self.closed_trade_count, "closed_trade_count")
         if not Decimal(0) <= self.exposure_ratio <= Decimal(1):
             raise ValueError("exposure_ratio must be between zero and one")
@@ -215,8 +217,9 @@ class DailyStrategyEvidence:
                 _finite_decimal(value, "trade PnL")
             if len(trade_pnls) != self.closed_trade_count:
                 raise ValueError("trade PnLs must match the closed trade count")
-            if sum(trade_pnls, Decimal(0)) != self.net_pnl:
-                raise ValueError("trade PnLs must reconcile to net PnL")
+            with decimal_arithmetic_context():
+                if sum(trade_pnls, Decimal(0)) != self.net_pnl:
+                    raise ValueError("trade PnLs must reconcile to net PnL")
 
     def canonical_payload(self) -> dict[str, object]:
         decimal_fields = (

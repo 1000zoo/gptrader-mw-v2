@@ -25,6 +25,8 @@ from src.domain.regime.three_day_daily_profile import (
     BOOTSTRAP_RESAMPLES,
     CLUSTER_COUNT,
     COVARIANCE_TYPE,
+    DECIMAL_ARITHMETIC_PRECISION,
+    DECIMAL_ARITHMETIC_ROUNDING,
     MIN_CALENDAR_MONTHS,
     MIN_CLOSED_TRADES,
     MIN_EPISODES,
@@ -37,6 +39,7 @@ from src.domain.regime.three_day_daily_profile import (
     DailyRiskPolicy,
     ThreeDayDailyResearchProfile,
     ThreeDayDailyWalkForwardFold,
+    decimal_arithmetic_context,
 )
 from src.domain.regime.temporal import (
     RegimeWalkForwardFold,
@@ -90,6 +93,8 @@ __all__ = [
     "BOOTSTRAP_RESAMPLES",
     "CLUSTER_COUNT",
     "COVARIANCE_TYPE",
+    "DECIMAL_ARITHMETIC_PRECISION",
+    "DECIMAL_ARITHMETIC_ROUNDING",
     "MIN_CALENDAR_MONTHS",
     "MIN_CLOSED_TRADES",
     "MIN_EPISODES",
@@ -102,6 +107,7 @@ __all__ = [
     "DailyRiskPolicy",
     "ThreeDayDailyResearchProfile",
     "ThreeDayDailyWalkForwardFold",
+    "decimal_arithmetic_context",
     "RegimeWalkForwardFold",
     "UtcInterval",
     "WeeklyEpisode",

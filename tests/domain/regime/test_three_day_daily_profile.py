@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+import src.domain.regime.three_day_daily_profile as profile_module
 from src.domain import regime
 from src.domain.regime import RegimeWalkForwardFold, UtcInterval
 from src.domain.regime.three_day_daily_profile import (
@@ -168,6 +169,19 @@ def test_risk_policies_have_exact_frozen_decimal_values():
         "looser": DailyRiskPolicy(
             Decimal("-0.04"), Decimal("-0.015"), Decimal("0.125"), Decimal("0.45"), Decimal("0.65")
         ),
+    }
+
+
+def test_research_profile_freezes_decimal_arithmetic_policy():
+    profile = ThreeDayDailyResearchProfile()
+
+    assert profile_module.DECIMAL_ARITHMETIC_PRECISION == 50
+    assert profile_module.DECIMAL_ARITHMETIC_ROUNDING == "ROUND_HALF_EVEN"
+    assert profile.decimal_arithmetic_precision == 50
+    assert profile.decimal_arithmetic_rounding == "ROUND_HALF_EVEN"
+    assert profile.canonical_payload()["decimal_arithmetic"] == {
+        "precision": 50,
+        "rounding": "ROUND_HALF_EVEN",
     }
 
 

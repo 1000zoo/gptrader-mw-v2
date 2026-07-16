@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
 import math
 from types import MappingProxyType
 from typing import Mapping
@@ -20,6 +20,17 @@ BOOTSTRAP_CONFIDENCE = 0.95
 MIN_EPISODES = 30
 MIN_CALENDAR_MONTHS = 3
 MIN_CLOSED_TRADES = 30
+DECIMAL_ARITHMETIC_PRECISION = 50
+DECIMAL_ARITHMETIC_ROUNDING = ROUND_HALF_EVEN
+
+
+def decimal_arithmetic_context():
+    return localcontext(
+        Context(
+            prec=DECIMAL_ARITHMETIC_PRECISION,
+            rounding=DECIMAL_ARITHMETIC_ROUNDING,
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -155,6 +166,8 @@ class ThreeDayDailyResearchProfile:
     minimum_episodes: int = MIN_EPISODES
     minimum_calendar_months: int = MIN_CALENDAR_MONTHS
     minimum_closed_trades: int = MIN_CLOSED_TRADES
+    decimal_arithmetic_precision: int = DECIMAL_ARITHMETIC_PRECISION
+    decimal_arithmetic_rounding: str = DECIMAL_ARITHMETIC_ROUNDING
     strict_risk_policy: DailyRiskPolicy = STRICT_RISK_POLICY
     sensitivity_policies: Mapping[str, DailyRiskPolicy] = field(
         default_factory=lambda: SENSITIVITY_POLICIES
@@ -188,6 +201,10 @@ class ThreeDayDailyResearchProfile:
             raise ValueError("minimum calendar months are frozen")
         if self.minimum_closed_trades != MIN_CLOSED_TRADES:
             raise ValueError("minimum closed trades are frozen")
+        if self.decimal_arithmetic_precision != DECIMAL_ARITHMETIC_PRECISION:
+            raise ValueError("decimal arithmetic precision is frozen")
+        if self.decimal_arithmetic_rounding != DECIMAL_ARITHMETIC_ROUNDING:
+            raise ValueError("decimal arithmetic rounding is frozen")
         if (
             not isinstance(self.regularization, (int, float))
             or isinstance(self.regularization, bool)
@@ -231,6 +248,10 @@ class ThreeDayDailyResearchProfile:
             "minimum_episodes": self.minimum_episodes,
             "minimum_calendar_months": self.minimum_calendar_months,
             "minimum_closed_trades": self.minimum_closed_trades,
+            "decimal_arithmetic": {
+                "precision": self.decimal_arithmetic_precision,
+                "rounding": self.decimal_arithmetic_rounding,
+            },
             "fold": {
                 name: _interval_payload(getattr(self.fold, name))
                 for name in ("cluster_fit", "mapping_fit", "validation", "test")
@@ -263,6 +284,8 @@ __all__ = [
     "BOOTSTRAP_RESAMPLES",
     "CLUSTER_COUNT",
     "COVARIANCE_TYPE",
+    "DECIMAL_ARITHMETIC_PRECISION",
+    "DECIMAL_ARITHMETIC_ROUNDING",
     "MIN_CALENDAR_MONTHS",
     "MIN_CLOSED_TRADES",
     "MIN_EPISODES",
@@ -275,4 +298,5 @@ __all__ = [
     "DailyRiskPolicy",
     "ThreeDayDailyResearchProfile",
     "ThreeDayDailyWalkForwardFold",
+    "decimal_arithmetic_context",
 ]

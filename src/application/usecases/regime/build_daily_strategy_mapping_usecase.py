@@ -32,6 +32,7 @@ from src.domain.regime.three_day_daily_profile import (
     RANDOM_SEED,
     STRICT_RISK_POLICY,
     ThreeDayDailyWalkForwardFold,
+    decimal_arithmetic_context,
 )
 
 
@@ -258,6 +259,7 @@ def _circular_moving_block_indices(
         raise ValueError("calendar length must be a positive integer")
     if not isinstance(block_days, int) or isinstance(block_days, bool) or block_days < 1:
         raise ValueError("block days must be a positive integer")
+    _validate_random_seed(random_seed)
     rng = np.random.default_rng(random_seed)
     return tuple(int(value) for value in _draw_block_indices(rng, calendar_length, block_days))
 
@@ -290,10 +292,19 @@ def _aligned_component_corrected_lower_bounds(
         raise ValueError("aligned bootstrap candidate coverage mismatch")
     if not isinstance(resamples, int) or isinstance(resamples, bool) or resamples < 1:
         raise ValueError("bootstrap resamples must be positive")
+    _validate_random_seed(random_seed)
+    if not isinstance(block_days, int) or isinstance(block_days, bool) or block_days < 1:
+        raise ValueError("block days must be a positive integer")
     if not 0 < confidence < 1:
         raise ValueError("bootstrap confidence must be between zero and one")
     if maximum_attempts is None:
         maximum_attempts = 100 * resamples
+    if (
+        not isinstance(maximum_attempts, int)
+        or isinstance(maximum_attempts, bool)
+        or maximum_attempts < 1
+    ):
+        raise ValueError("bootstrap maximum attempts must be a positive integer")
     if maximum_attempts < resamples:
         raise ValueError("bootstrap maximum attempts cannot be smaller than resamples")
 
@@ -334,9 +345,10 @@ def _aligned_component_corrected_lower_bounds(
         values[candidate] = calendar_values - np.where(mask, mean, 0.0)
         masks[candidate] = mask
         means[candidate] = mean
-        decimal_means[candidate] = sum(observed_decimals, Decimal(0)) / Decimal(
-            len(observed_decimals)
-        )
+        with decimal_arithmetic_context():
+            decimal_means[candidate] = sum(
+                observed_decimals, Decimal(0)
+            ) / Decimal(len(observed_decimals))
         standard_errors[candidate] = standard_error
         if zero_variance and observed_decimals[0] > 0:
             constant_positive.add(candidate)
@@ -397,7 +409,8 @@ def expected_shortfall_10(returns: Sequence[Decimal]) -> Decimal:
     if not values:
         return Decimal(0)
     count = max(1, math.ceil(len(values) * 0.10))
-    return sum(sorted(values)[:count], Decimal(0)) / Decimal(count)
+    with decimal_arithmetic_context():
+        return sum(sorted(values)[:count], Decimal(0)) / Decimal(count)
 
 
 def worst_seven_calendar_day_return(
@@ -415,14 +428,15 @@ def worst_seven_calendar_day_return(
 
 def maximum_drawdown(returns: Sequence[Decimal]) -> Decimal:
     values = _finite_returns(returns)
-    equity = Decimal(1)
-    peak = Decimal(1)
-    drawdown = Decimal(0)
-    for value in values:
-        equity *= Decimal(1) + value
-        peak = max(peak, equity)
-        drawdown = max(drawdown, (peak - equity) / peak)
-    return drawdown
+    with decimal_arithmetic_context():
+        equity = Decimal(1)
+        peak = Decimal(1)
+        drawdown = Decimal(0)
+        for value in values:
+            equity *= Decimal(1) + value
+            peak = max(peak, equity)
+            drawdown = max(drawdown, (peak - equity) / peak)
+        return drawdown
 
 
 def compounded_return_without_best_episode(returns: Sequence[Decimal]) -> Decimal:
@@ -440,16 +454,17 @@ def positive_profit_concentration_shares(
     trades = _finite_decimals(trade_pnls, "trade PnLs")
     positive_episodes = tuple(value for value in episodes if value > 0)
     positive_trades = tuple(value for value in trades if value > 0)
-    episode_total = sum(positive_episodes, Decimal(0))
-    trade_total = sum(positive_trades, Decimal(0))
-    return (
-        max(positive_episodes) / episode_total if episode_total else Decimal(0),
-        sum(sorted(positive_trades, reverse=True)[:5], Decimal(0)) / trade_total
-        if trade_total
-        else Decimal(0),
-        bool(episode_total),
-        bool(trade_total),
-    )
+    with decimal_arithmetic_context():
+        episode_total = sum(positive_episodes, Decimal(0))
+        trade_total = sum(positive_trades, Decimal(0))
+        return (
+            max(positive_episodes) / episode_total if episode_total else Decimal(0),
+            sum(sorted(positive_trades, reverse=True)[:5], Decimal(0)) / trade_total
+            if trade_total
+            else Decimal(0),
+            bool(episode_total),
+            bool(trade_total),
+        )
 
 
 def rejection_reasons(
@@ -496,11 +511,11 @@ def rejection_reasons(
 
 def _winner_order_key(item: DailyCandidateAssessment) -> tuple[object, ...]:
     return (
-        -item.corrected_lower_bound_ratio,
-        -item.return_without_best_episode_ratio,
-        -item.expected_shortfall_10_ratio,
+        item.corrected_lower_bound_ratio.copy_negate(),
+        item.return_without_best_episode_ratio.copy_negate(),
+        item.expected_shortfall_10_ratio.copy_negate(),
         item.maximum_drawdown_ratio,
-        -item.median_daily_return_ratio,
+        item.median_daily_return_ratio.copy_negate(),
         item.candidate_id,
     )
 
@@ -512,13 +527,14 @@ def _metrics(
 ) -> dict[str, Decimal | bool]:
     ordered = sorted(returns)
     if returns:
-        mean = sum(returns, Decimal(0)) / Decimal(len(returns))
-        middle = len(ordered) // 2
-        median = (
-            ordered[middle]
-            if len(ordered) % 2
-            else (ordered[middle - 1] + ordered[middle]) / Decimal(2)
-        )
+        with decimal_arithmetic_context():
+            mean = sum(returns, Decimal(0)) / Decimal(len(returns))
+            middle = len(ordered) // 2
+            median = (
+                ordered[middle]
+                if len(ordered) % 2
+                else (ordered[middle - 1] + ordered[middle]) / Decimal(2)
+            )
     else:
         mean = median = Decimal(0)
     episode_pnls = tuple(row.net_pnl for row in rows)
@@ -659,7 +675,7 @@ def _validate_evidence_grid(
                     not isinstance(value, Decimal) or not value.is_finite()
                     for value in row.trade_pnls
                 )
-                or sum(row.trade_pnls, Decimal(0)) != row.net_pnl
+                or _decimal_sum(row.trade_pnls) != row.net_pnl
             ):
                 raise ValueError("trade PnLs are inconsistent with available evidence")
         if row.candidate_hash != candidate_hashes[row.candidate_id]:
@@ -695,6 +711,20 @@ def _has_complete_seven_day_block(
     )
 
 
+def _validate_random_seed(random_seed: int) -> None:
+    if (
+        not isinstance(random_seed, int)
+        or isinstance(random_seed, bool)
+        or not 0 <= random_seed <= 2**64 - 1
+    ):
+        raise ValueError("random seed must be an integer between zero and 2**64 - 1")
+
+
+def _decimal_sum(values: Sequence[Decimal]) -> Decimal:
+    with decimal_arithmetic_context():
+        return sum(values, Decimal(0))
+
+
 def _finite_returns(values: Sequence[Decimal]) -> tuple[Decimal, ...]:
     result = _finite_decimals(values, "daily returns")
     if any(value <= Decimal("-1") for value in result):
@@ -725,10 +755,11 @@ def _finite_decimals(values: Sequence[Decimal], field: str) -> tuple[Decimal, ..
 
 def _compound(values: Sequence[Decimal]) -> Decimal:
     returns = _finite_returns(values)
-    result = Decimal(1)
-    for value in returns:
-        result *= Decimal(1) + value
-    return result - Decimal(1)
+    with decimal_arithmetic_context():
+        result = Decimal(1)
+        for value in returns:
+            result *= Decimal(1) + value
+        return result - Decimal(1)
 
 
 __all__ = [

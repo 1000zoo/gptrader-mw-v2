@@ -1,6 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, getcontext, localcontext
 import hashlib
 import json
 import math
@@ -22,7 +22,11 @@ from src.application.usecases.regime.build_daily_strategy_mapping_usecase import
     rejection_reasons,
     worst_seven_calendar_day_return,
 )
-from src.domain.regime import DailyCandidateAssessment, DailyStrategyEvidence
+from src.domain.regime import (
+    DailyCandidateAssessment,
+    DailyStrategyEvidence,
+    daily_mapping_artifact_hash,
+)
 from src.domain.regime.mapping import candidate_universe_hash
 from src.domain.regime.three_day_daily_profile import ThreeDayDailyWalkForwardFold
 
@@ -226,6 +230,44 @@ def test_zero_variance_streams_never_emit_nan() -> None:
     assert all(value.is_finite() for value in result.values())
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"random_seed": True},
+        {"random_seed": -1},
+        {"random_seed": 2**64},
+        {"block_days": True},
+        {"block_days": 0},
+    ],
+)
+def test_circular_bootstrap_rejects_invalid_private_controls(kwargs) -> None:
+    with pytest.raises(ValueError, match="random seed|block days"):
+        _circular_moving_block_indices(30, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"random_seed": True},
+        {"random_seed": -1},
+        {"random_seed": 2**64},
+        {"block_days": True},
+        {"block_days": 0},
+        {"maximum_attempts": True},
+        {"maximum_attempts": 0},
+    ],
+)
+def test_corrected_bounds_reject_invalid_private_bootstrap_controls(kwargs) -> None:
+    with pytest.raises(ValueError, match="random seed|block days|maximum attempts"):
+        _aligned_component_corrected_lower_bounds(
+            {"candidate": (Decimal("0.001"),) * 30},
+            ("target",) * 30,
+            "target",
+            resamples=1,
+            **kwargs,
+        )
+
+
 def test_expected_shortfall_is_mean_of_exact_worst_ceiling_ten_percent() -> None:
     values = tuple(map(Decimal, ["-0.20", "-0.10", *(["0.01"] * 9)]))
     assert expected_shortfall_10(values) == Decimal("-0.15")
@@ -258,7 +300,12 @@ def test_positive_profit_concentration_uses_positive_denominators_only() -> None
         (Decimal("5"), Decimal("3"), Decimal("-100")),
         (Decimal("4"), Decimal("3"), Decimal("2"), Decimal("1"), Decimal("1"), Decimal("1"), Decimal("-20")),
     )
-    assert shares == (Decimal("0.625"), Decimal("11") / Decimal("12"), True, True)
+    assert shares == (
+        Decimal("0.625"),
+        Decimal("0.91666666666666666666666666666666666666666666666667"),
+        True,
+        True,
+    )
     assert positive_profit_concentration_shares((ZERO,), (Decimal("-1"),)) == (ZERO, ZERO, False, False)
 
 
@@ -349,6 +396,51 @@ def valid_command(*, candidates: tuple[str, ...] = ("candidate-a",)) -> BuildDai
         component_assignments=assignments,
         evidence_rows=rows,
     )
+
+
+def precise_command() -> BuildDailyStrategyMappingCommand:
+    command = valid_command()
+    daily_return = Decimal(
+        "0.0012345678901234567890123456789012345678901234567"
+    )
+    final_equity = Decimal(
+        "1.0012345678901234567890123456789012345678901234567"
+    )
+    rows = tuple(
+        replace(
+            row,
+            initial_equity=Decimal(1),
+            final_equity=final_equity,
+            gross_pnl=daily_return,
+            net_pnl=daily_return,
+            gross_return_ratio=daily_return,
+            net_return_ratio=daily_return,
+            fees=Decimal(0),
+            closed_trade_count=1,
+            trade_pnls=(daily_return,),
+        )
+        for row in command.evidence_rows
+    )
+    return replace(command, evidence_rows=rows)
+
+
+def test_full_mapping_is_independent_of_ambient_decimal_context() -> None:
+    with localcontext() as context:
+        context.prec = 6
+        low_command = precise_command()
+        low = BuildDailyStrategyMappingUseCase().execute(low_command).artifact
+        assert getcontext().prec == 6
+    with localcontext() as context:
+        context.prec = 60
+        high_command = precise_command()
+        high = BuildDailyStrategyMappingUseCase().execute(high_command).artifact
+        assert getcontext().prec == 60
+
+    assert low_command == high_command
+    assert low.candidate_assessments == high.candidate_assessments
+    assert low.entries == high.entries
+    assert low.canonical_payload() == high.canonical_payload()
+    assert daily_mapping_artifact_hash(low) == daily_mapping_artifact_hash(high)
 
 
 def test_use_case_assesses_full_frozen_grid_and_emits_exactly_four_entries() -> None:

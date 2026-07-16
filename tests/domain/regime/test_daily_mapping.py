@@ -1,6 +1,6 @@
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, localcontext
+from decimal import Decimal, getcontext, localcontext
 import hashlib
 
 import pytest
@@ -238,6 +238,32 @@ def test_unavailable_evidence_requires_zero_performance_and_no_trade_ledger():
         unavailable_evidence(trade_pnls=())
 
 
+def test_daily_evidence_consistency_is_independent_of_ambient_decimal_context():
+    value = Decimal("0.1234567890123456789012345678901234567890123456789")
+    changes = {
+        "initial_equity": Decimal("1"),
+        "final_equity": Decimal("1.1234567890123456789012345678901234567890123456789"),
+        "gross_pnl": value,
+        "net_pnl": value,
+        "gross_return_ratio": value,
+        "net_return_ratio": value,
+        "fees": Decimal(0),
+        "closed_trade_count": 1,
+        "trade_pnls": (value,),
+    }
+
+    with localcontext() as context:
+        context.prec = 6
+        low = evidence(**changes)
+        assert getcontext().prec == 6
+    with localcontext() as context:
+        context.prec = 60
+        high = evidence(**changes)
+        assert getcontext().prec == 60
+
+    assert low == high
+
+
 def test_daily_mapping_contracts_are_exported_from_regime_api():
     expected = {
         "DailyCandidateAssessment": DailyCandidateAssessment,
@@ -439,6 +465,10 @@ def test_artifact_hash_is_canonical_and_binds_the_payload():
         "minimum_episodes": 30,
         "minimum_calendar_months": 3,
         "minimum_closed_trades": 30,
+        "decimal_arithmetic": {
+            "precision": 50,
+            "rounding": "ROUND_HALF_EVEN",
+        },
         "fold": {
             "cluster_fit": {"start_at": "2021-01-01T00:00:00Z", "end_at": "2025-06-30T00:00:00Z"},
             "mapping_fit": {"start_at": "2025-07-07T00:00:00Z", "end_at": "2026-01-01T00:00:00Z"},
