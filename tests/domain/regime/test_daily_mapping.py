@@ -1,0 +1,306 @@
+from dataclasses import FrozenInstanceError, replace
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+import hashlib
+
+import pytest
+
+from src.domain import regime
+from src.domain.regime.mapping import candidate_universe_hash
+from src.domain.regime.temporal import UtcInterval
+from src.domain.regime.three_day_chart_features import THREE_DAY_CHART_FEATURE_SCHEMA_VERSION
+from src.domain.regime.three_day_daily_profile import (
+    PROFILE_ID,
+    STRICT_RISK_POLICY,
+    ThreeDayDailyWalkForwardFold,
+)
+from src.domain.regime.daily_mapping import (
+    DAILY_STRATEGY_MAPPING_ARTIFACT_VERSION,
+    DailyCandidateAssessment,
+    DailyStrategyEvidence,
+    DailyStrategyMappingArtifact,
+    DailyStrategyMappingEntry,
+    daily_mapping_artifact_hash,
+)
+
+
+def dt(value: str) -> datetime:
+    return datetime.fromisoformat(value).replace(tzinfo=timezone.utc)
+
+
+def sha(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def evidence(**changes) -> DailyStrategyEvidence:
+    fields = {
+        "component_fingerprint": "component-a",
+        "candidate_id": "candidate-a",
+        "cluster_anchor_at": dt("2025-07-10"),
+        "outcome_start_at": dt("2025-07-10"),
+        "outcome_end_at": dt("2025-07-11"),
+        "initial_equity": Decimal("1000"),
+        "final_equity": Decimal("1005"),
+        "gross_pnl": Decimal("6"),
+        "net_pnl": Decimal("5"),
+        "gross_return_ratio": Decimal("0.006"),
+        "net_return_ratio": Decimal("0.005"),
+        "fees": Decimal("1"),
+        "closed_trade_count": 2,
+        "exposure_ratio": Decimal("0.50"),
+        "turnover_ratio": Decimal("1.25"),
+        "maximum_drawdown_ratio": Decimal("0.02"),
+        "maximum_adverse_excursion_ratio": Decimal("0.01"),
+        "profit_factor": Decimal("1.5"),
+        "downside_deviation_ratio": Decimal("0.003"),
+        "expected_shortfall_10_ratio": Decimal("-0.004"),
+        "median_daily_return_ratio": Decimal("0.005"),
+        "tenth_percentile_daily_return_ratio": Decimal("-0.002"),
+        "worst_seven_day_return_ratio": Decimal("-0.01"),
+        "return_without_best_episode_ratio": Decimal("0.02"),
+        "top_episode_profit_share": Decimal("0.20"),
+        "top_five_trade_profit_share": Decimal("0.40"),
+        "availability_status": "available",
+        "availability_reason": None,
+        "candidate_hash": sha("candidate-a"),
+        "model_artifact_hash": sha("model"),
+        "data_hash": sha("data"),
+        "cost_config_hash": sha("costs"),
+        "engine_config_hash": sha("engine"),
+        "trade_pnls": (Decimal("2"), Decimal("3")),
+    }
+    fields.update(changes)
+    return DailyStrategyEvidence(**fields)
+
+
+def assessment(component: str = "component-a", candidate: str = "candidate-a", **changes):
+    fields = {
+        "component_fingerprint": component,
+        "candidate_id": candidate,
+        "candidate_hash": sha(candidate),
+        "episode_count": 35,
+        "calendar_month_count": 4,
+        "closed_trade_count": 40,
+        "mean_daily_return_ratio": Decimal("0.003"),
+        "median_daily_return_ratio": Decimal("0.002"),
+        "corrected_lower_bound_ratio": Decimal("0.001"),
+        "worst_seven_day_return_ratio": Decimal("-0.02"),
+        "expected_shortfall_10_ratio": Decimal("-0.005"),
+        "maximum_drawdown_ratio": Decimal("0.05"),
+        "return_without_best_episode_ratio": Decimal("0.03"),
+        "top_episode_profit_share": Decimal("0.20"),
+        "top_five_trade_profit_share": Decimal("0.40"),
+        "eligible": True,
+        "rejection_reasons": (),
+    }
+    fields.update(changes)
+    return DailyCandidateAssessment(**fields)
+
+
+def artifact(**changes) -> DailyStrategyMappingArtifact:
+    components = ("component-a", "component-b", "component-c", "component-d")
+    candidates = ("candidate-a", "candidate-b")
+    entries = (
+        DailyStrategyMappingEntry("component-a", "strategy", "candidate-a"),
+        DailyStrategyMappingEntry("component-b", "cash", None, ("no_eligible_candidate",)),
+        DailyStrategyMappingEntry("component-c", "cash", None, ("insufficient_evidence",)),
+        DailyStrategyMappingEntry("component-d", "strategy", "candidate-b"),
+    )
+    candidate_hashes = {candidate: sha(candidate) for candidate in candidates}
+    assessments = tuple(
+        assessment(
+            component,
+            candidate,
+            eligible=(component, candidate)
+            in {("component-a", "candidate-a"), ("component-d", "candidate-b")},
+            rejection_reasons=()
+            if (component, candidate)
+            in {("component-a", "candidate-a"), ("component-d", "candidate-b")}
+            else ("not_eligible",),
+        )
+        for component in components
+        for candidate in candidates
+    )
+    fold = ThreeDayDailyWalkForwardFold.default()
+    fields = {
+        "artifact_version": DAILY_STRATEGY_MAPPING_ARTIFACT_VERSION,
+        "profile_id": PROFILE_ID,
+        "feature_schema_version": THREE_DAY_CHART_FEATURE_SCHEMA_VERSION,
+        "model_artifact_hash": sha("model"),
+        "candidate_universe_hash": candidate_universe_hash(candidates),
+        "candidate_ids": candidates,
+        "candidate_hashes": candidate_hashes,
+        "component_fingerprints": components,
+        "entries": entries,
+        "candidate_assessments": assessments,
+        "risk_policy": STRICT_RISK_POLICY,
+        "cluster_fit": fold.cluster_fit,
+        "mapping_fit": fold.mapping_fit,
+    }
+    fields.update(changes)
+    return DailyStrategyMappingArtifact(**fields)
+
+
+def test_daily_evidence_binds_three_day_anchor_to_exact_one_day_outcome():
+    item = evidence()
+
+    assert item.outcome_start_at == item.cluster_anchor_at
+    assert item.outcome_end_at - item.outcome_start_at == timedelta(days=1)
+    assert item.trade_pnls == (Decimal("2"), Decimal("3"))
+    with pytest.raises(FrozenInstanceError):
+        item.candidate_id = "changed"
+
+
+def test_daily_mapping_contracts_are_exported_from_regime_api():
+    expected = {
+        "DailyCandidateAssessment": DailyCandidateAssessment,
+        "DailyStrategyEvidence": DailyStrategyEvidence,
+        "DailyStrategyMappingArtifact": DailyStrategyMappingArtifact,
+        "DailyStrategyMappingEntry": DailyStrategyMappingEntry,
+        "daily_mapping_artifact_hash": daily_mapping_artifact_hash,
+    }
+
+    assert {name: getattr(regime, name) for name in expected} == expected
+    assert set(expected) <= set(regime.__all__)
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"cluster_anchor_at": dt("2025-07-09")}, "cluster anchor"),
+        ({"outcome_end_at": dt("2025-07-12")}, "exactly one day"),
+        ({"outcome_start_at": datetime(2025, 7, 10)}, "canonical midnight UTC"),
+        ({"outcome_start_at": dt("2025-07-10") + timedelta(hours=1)}, "canonical midnight UTC"),
+        ({"model_artifact_hash": "bad"}, "SHA256"),
+        ({"net_return_ratio": Decimal("NaN")}, "finite Decimal"),
+        ({"availability_status": "available", "availability_reason": "gap"}, "availability"),
+        ({"availability_status": "unavailable", "availability_reason": None}, "availability"),
+    ],
+)
+def test_daily_evidence_rejects_interval_identity_and_availability_drift(changes, message):
+    with pytest.raises(ValueError, match=message):
+        evidence(**changes)
+
+
+def test_cash_mapping_entry_is_explicit_and_requires_a_rejection_reason():
+    entry = DailyStrategyMappingEntry(
+        component_fingerprint="component-a",
+        decision="cash",
+        strategy_candidate_id=None,
+        rejection_reasons=("no_eligible_candidate",),
+    )
+
+    assert entry.decision == "cash"
+    with pytest.raises(ValueError, match="cannot contain a strategy candidate"):
+        replace(entry, strategy_candidate_id="candidate-a")
+    with pytest.raises(ValueError, match="rejection reason"):
+        replace(entry, rejection_reasons=())
+
+
+def test_artifact_requires_exactly_four_unique_component_entries_and_freezes_collections():
+    result = artifact()
+
+    assert tuple(entry.component_fingerprint for entry in result.entries) == result.component_fingerprints
+    assert len(result.entries) == 4
+    with pytest.raises(FrozenInstanceError):
+        result.entries = ()
+
+    with pytest.raises(ValueError, match="exactly four unique"):
+        artifact(component_fingerprints=("component-a",) * 4)
+    with pytest.raises(ValueError, match="component coverage"):
+        artifact(entries=result.entries[:-1])
+    with pytest.raises(ValueError, match="sorted"):
+        artifact(
+            component_fingerprints=tuple(reversed(result.component_fingerprints)),
+            entries=tuple(reversed(result.entries)),
+        )
+
+
+def test_artifact_enforces_model_and_candidate_universe_compatibility():
+    result = artifact()
+
+    with pytest.raises(ValueError, match="candidate universe hash"):
+        replace(result, candidate_universe_hash=sha("wrong"))
+    with pytest.raises(ValueError, match="candidate universe"):
+        replace(result, candidate_ids=("candidate-a",))
+    with pytest.raises(ValueError, match="candidate universe"):
+        replace(
+            result,
+            entries=(
+                replace(result.entries[0], strategy_candidate_id="candidate-unknown"),
+                *result.entries[1:],
+            ),
+        )
+    with pytest.raises(ValueError, match="model artifact hash"):
+        replace(result, model_artifact_hash="A" * 64)
+    with pytest.raises(ValueError, match="candidate assessment hash"):
+        replace(
+            result,
+            candidate_hashes={**result.candidate_hashes, "candidate-a": sha("drift")},
+        )
+    with pytest.raises(ValueError, match="assessment coverage"):
+        replace(result, candidate_assessments=result.candidate_assessments[:-1])
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "mean_daily_return_ratio",
+        "corrected_lower_bound_ratio",
+        "expected_shortfall_10_ratio",
+        "maximum_drawdown_ratio",
+        "top_episode_profit_share",
+    ],
+)
+def test_assessment_rejects_nonfinite_statistics(field):
+    with pytest.raises(ValueError, match="finite Decimal"):
+        assessment(**{field: Decimal("NaN")})
+
+
+def test_artifact_hash_is_canonical_and_binds_the_payload():
+    first = artifact()
+    second = artifact()
+    reordered = replace(first, candidate_assessments=tuple(reversed(first.candidate_assessments)))
+
+    assert daily_mapping_artifact_hash(first) == daily_mapping_artifact_hash(second)
+    assert daily_mapping_artifact_hash(first) == daily_mapping_artifact_hash(reordered)
+    assert len(daily_mapping_artifact_hash(first)) == 64
+    assert daily_mapping_artifact_hash(first) != daily_mapping_artifact_hash(
+        replace(first, model_artifact_hash=sha("different-model"))
+    )
+    assert first.canonical_payload()["research_profile"] == {
+        "profile_id": PROFILE_ID,
+        "random_seed": 20260714,
+        "model_type": "gmm",
+        "covariance_type": "diag",
+        "cluster_count": 4,
+        "regularization": "0.000001",
+        "feature_window_days": 3,
+        "outcome_window_days": 1,
+        "bootstrap_block_days": 7,
+        "bootstrap_resamples": 5000,
+        "bootstrap_confidence": "0.95",
+        "minimum_episodes": 30,
+        "minimum_calendar_months": 3,
+        "minimum_closed_trades": 30,
+        "fold": {
+            "cluster_fit": {"start_at": "2021-01-01T00:00:00Z", "end_at": "2025-06-30T00:00:00Z"},
+            "mapping_fit": {"start_at": "2025-07-07T00:00:00Z", "end_at": "2026-01-01T00:00:00Z"},
+            "validation": {"start_at": "2026-01-04T00:00:00Z", "end_at": "2026-04-01T00:00:00Z"},
+            "test": {"start_at": "2026-04-04T00:00:00Z", "end_at": "2026-07-01T00:00:00Z"},
+        },
+    }
+
+
+def test_artifact_rejects_fit_interval_or_frozen_schema_drift():
+    result = artifact()
+
+    with pytest.raises(ValueError, match="profile"):
+        replace(result, profile_id="other")
+    with pytest.raises(ValueError, match="feature schema"):
+        replace(result, feature_schema_version="other")
+    with pytest.raises(ValueError, match="Mapping Fit"):
+        replace(
+            result,
+            mapping_fit=UtcInterval(dt("2025-07-08"), result.mapping_fit.end_at),
+        )
