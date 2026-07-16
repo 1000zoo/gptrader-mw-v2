@@ -133,9 +133,11 @@ def _artifact() -> ThreeDayK4ModelArtifact:
             "gmm_margin_threshold": 0.10,
             "minimum_observed_dominant_probability": 0.8,
             "minimum_observed_probability_margin": 0.2,
-            "distance_threshold": "not_applicable_for_gmm",
-            "distance_result": "not_applicable_for_gmm",
-            "distance_threshold_policy": "not_applicable_for_gmm",
+            "distance_threshold": 14.860259000560243,
+            "distance_result": True,
+            "distance_threshold_policy": "maximum_chi_square_995_squared_mahalanobis",
+            "distance_exceedance_rate": 0.01,
+            "maximum_distance_exceedance_rate_threshold": 0.02,
             "feature_registry_version_expected": "three-day-chart-feature-registry-v1",
             "feature_registry_exact": True,
             "feature_family_cap_maximum_count": 5,
@@ -188,6 +190,7 @@ def test_artifact_round_trip_is_canonical_context_independent_and_assignment_equ
     assert actual.fingerprint == restored.numeric_index_to_fingerprint[expected_index]
     assert actual.dominant_probability == pytest.approx(expected.dominant_probability, abs=1e-15)
     assert actual.second_probability == pytest.approx(expected.second_probability, abs=1e-15)
+    assert actual.distance == pytest.approx(expected.distance, abs=1e-15)
 
 
 def test_artifact_component_ids_use_original_feature_space_profiles() -> None:
@@ -318,7 +321,7 @@ def test_artifact_normal_binary_scaled_profiles_preserve_diagnostic_assignment_p
         assert actual.fingerprint == artifact.numeric_index_to_fingerprint[expected_index]
         assert actual.dominant_probability == pytest.approx(expected.dominant_probability, abs=4e-15)
         assert actual.second_probability == pytest.approx(expected.second_probability, abs=4e-15)
-        assert actual.distance is expected.distance is None
+        assert actual.distance == pytest.approx(expected.distance, abs=4e-15)
 
 
 @pytest.mark.parametrize(

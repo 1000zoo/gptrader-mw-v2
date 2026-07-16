@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Protocol
+from typing import Any, Protocol, TypeVar, runtime_checkable
 
 from src.application.usecases.regime.select_strategy_usecase import (
     SelectStrategyCommand,
@@ -10,7 +10,11 @@ from src.application.usecases.regime.select_strategy_usecase import (
 from src.domain.ports.regime_selection_state_repository_port import (
     RegimeSelectionStateRepositoryPort,
 )
-from src.domain.regime.selection import RegimeSelectionState, SelectStrategyResult
+from src.domain.regime.selection import (
+    RegimeSelectionState,
+    SelectionEventType,
+    SelectStrategyResult,
+)
 from src.observability.logging import runtime_logger
 
 
@@ -18,10 +22,28 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class RegimeSelectorPort(Protocol):
+@runtime_checkable
+class RegimeSelectionResultPort(Protocol):
+    """Observable selector result shared by canonical and audited decisions."""
+
+    @property
+    def state(self) -> RegimeSelectionState: ...
+
+    @property
+    def events(self) -> tuple[SelectionEventType, ...]: ...
+
+    @property
+    def selection_input_hash(self) -> str: ...
+
+
+CommandT = TypeVar("CommandT", contravariant=True)
+ResultT = TypeVar("ResultT", bound=RegimeSelectionResultPort, covariant=True)
+
+
+class RegimeSelectorPort(Protocol[CommandT, ResultT]):
     """Structural selector boundary shared by production and research selectors."""
 
-    def execute(self, command: object) -> object:
+    def execute(self, command: CommandT) -> ResultT:
         ...
 
 
@@ -38,7 +60,17 @@ def _command_input_hash(command: object) -> str:
     return value
 
 
-def _base_result(result: object) -> SelectStrategyResult:
+def _base_result(result: RegimeSelectionResultPort) -> SelectStrategyResult:
+    if not isinstance(result, RegimeSelectionResultPort):
+        raise ValueError("selector must return a structural selection result")
+    if not isinstance(result.state, RegimeSelectionState):
+        raise ValueError("selection result state must be canonical")
+    if (
+        not isinstance(result.events, tuple)
+        or not result.events
+        or any(not isinstance(event, SelectionEventType) for event in result.events)
+    ):
+        raise ValueError("selection result events must be canonical")
     if isinstance(result, SelectStrategyResult):
         return result
     base = getattr(result, "base_result", None)
@@ -52,7 +84,7 @@ class ScheduledRegimeSelection:
     schedule_name: str
     started_at: datetime
     finished_at: datetime
-    result: object | None = None
+    result: RegimeSelectionResultPort | None = None
     error: Exception | None = None
 
     def __post_init__(self) -> None:
@@ -82,7 +114,7 @@ class ScheduledRegimeSelection:
 class RegimeSelectionScheduler:
     def __init__(
         self,
-        usecase: RegimeSelectorPort,
+        usecase: RegimeSelectorPort[Any, RegimeSelectionResultPort],
         repository: RegimeSelectionStateRepositoryPort,
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -161,4 +193,9 @@ class RegimeSelectionScheduler:
         )
 
 
-__all__ = ["RegimeSelectionScheduler", "RegimeSelectorPort", "ScheduledRegimeSelection"]
+__all__ = [
+    "RegimeSelectionResultPort",
+    "RegimeSelectionScheduler",
+    "RegimeSelectorPort",
+    "ScheduledRegimeSelection",
+]

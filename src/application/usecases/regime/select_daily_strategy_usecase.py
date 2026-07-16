@@ -4,8 +4,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 from types import MappingProxyType
 from typing import Mapping, Protocol
+
+from scipy.stats import chi2
 
 from src.application.services.three_day_chart_feature_extractor import (
     extract_three_day_chart_feature_vector,
@@ -39,6 +42,8 @@ class ThreeDayAssignmentArtifactPort(Protocol):
     profile_id: str
     feature_schema_version: str
     component_fingerprints: tuple[str, ...]
+    feature_names: tuple[str, ...]
+    assignment_confidence_policy: str
     model_gates: Mapping[str, object]
 
     def assign(self, vector: object) -> ClusterAssignment: ...
@@ -76,6 +81,8 @@ class DailySelectStrategyCommand:
     _model_profile_id: object = field(init=False, repr=False)
     _model_feature_schema_version: object = field(init=False, repr=False)
     _model_component_fingerprints: tuple[object, ...] = field(init=False, repr=False)
+    _model_feature_names: tuple[object, ...] = field(init=False, repr=False)
+    _model_assignment_confidence_policy: object = field(init=False, repr=False)
     _model_gates: Mapping[str, object] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -102,6 +109,10 @@ class DailySelectStrategyCommand:
         except (AttributeError, TypeError):
             component_fingerprints = ()
         try:
+            feature_names = tuple(self.model_artifact.feature_names)
+        except (AttributeError, TypeError):
+            feature_names = ()
+        try:
             model_gates = MappingProxyType(dict(self.model_artifact.model_gates))
         except (AttributeError, TypeError, ValueError):
             model_gates = MappingProxyType({})
@@ -118,6 +129,12 @@ class DailySelectStrategyCommand:
             getattr(self.model_artifact, "feature_schema_version", None),
         )
         object.__setattr__(self, "_model_component_fingerprints", component_fingerprints)
+        object.__setattr__(self, "_model_feature_names", feature_names)
+        object.__setattr__(
+            self,
+            "_model_assignment_confidence_policy",
+            getattr(self.model_artifact, "assignment_confidence_policy", None),
+        )
         object.__setattr__(self, "_model_gates", model_gates)
         previous = self.previous_state
         if previous is not None:
@@ -266,6 +283,17 @@ class SelectDailyStrategyUseCase:
             else:
                 try:
                     assigned = model.assign(vector)
+                    distance = getattr(assigned, "distance", None)
+                    if distance is None:
+                        raise ValueError("assignment distance is missing")
+                    if (
+                        not isinstance(distance, (int, float))
+                        or isinstance(distance, bool)
+                        or not math.isfinite(distance)
+                    ):
+                        raise ValueError("assignment distance must be finite")
+                    if distance < 0:
+                        raise ValueError("assignment distance must be nonnegative")
                     if not isinstance(assigned, ClusterAssignment):
                         raise ValueError("assignment artifact returned an invalid assignment")
                     assignment = assigned
@@ -287,6 +315,8 @@ class SelectDailyStrategyUseCase:
                             "low confidence assignment: probability or margin is below "
                             "the frozen model policy"
                         )
+                    elif assignment.distance > command._model_gates["distance_threshold"]:
+                        reason = "assignment distance exceeds the frozen maximum threshold"
                     elif assignment.fingerprint not in mapping.component_fingerprints:
                         reason = "unknown component fingerprint"
                     else:
@@ -421,6 +451,26 @@ def _compatibility_reason(command: DailySelectStrategyCommand) -> str | None:
             and gates.get("passed") is True
             and gates.get("gmm_probability_threshold") == 0.65
             and gates.get("gmm_margin_threshold") == 0.10
+            and command._model_assignment_confidence_policy
+            == "gmm_top_two_posterior_and_chi_square_distance_v2"
+            and gates.get("distance_threshold_policy")
+            == "maximum_chi_square_995_squared_mahalanobis"
+            and isinstance(gates.get("distance_threshold"), (int, float))
+            and not isinstance(gates.get("distance_threshold"), bool)
+            and math.isfinite(gates["distance_threshold"])
+            and gates["distance_threshold"] > 0
+            and math.isclose(
+                gates["distance_threshold"],
+                float(chi2.ppf(0.995, df=len(command._model_feature_names))),
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+            and gates.get("distance_result") is True
+            and gates.get("maximum_distance_exceedance_rate_threshold") == 0.02
+            and isinstance(gates.get("distance_exceedance_rate"), (int, float))
+            and not isinstance(gates.get("distance_exceedance_rate"), bool)
+            and math.isfinite(gates["distance_exceedance_rate"])
+            and 0 <= gates["distance_exceedance_rate"] <= 0.02
         )
     except (AttributeError, TypeError, ValueError):
         compatible = False

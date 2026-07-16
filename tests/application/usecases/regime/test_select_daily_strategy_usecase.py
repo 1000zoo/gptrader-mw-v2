@@ -2,6 +2,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import hashlib
+import math
+from types import SimpleNamespace
 
 import pytest
 
@@ -123,6 +125,8 @@ class _FrozenModel:
     profile_id: str = PROFILE_ID
     feature_schema_version: str = THREE_DAY_CHART_FEATURE_SCHEMA_VERSION
     component_fingerprints: tuple[str, ...] = COMPONENTS
+    feature_names: tuple[str, ...] = ("return_4h", "rv_4h", "atr_ratio_1d", "directional_efficiency_1d")
+    assignment_confidence_policy: str = "gmm_top_two_posterior_and_chi_square_distance_v2"
     model_gates: object = None
     calls: object = None
 
@@ -131,6 +135,11 @@ class _FrozenModel:
             object.__setattr__(self, "model_gates", {
                 "gmm_probability_threshold": 0.65,
                 "gmm_margin_threshold": 0.10,
+                "distance_threshold_policy": "maximum_chi_square_995_squared_mahalanobis",
+                "distance_threshold": 14.860259000560243,
+                "distance_result": True,
+                "distance_exceedance_rate": 0.01,
+                "maximum_distance_exceedance_rate_threshold": 0.02,
                 "passed": True,
             })
         if self.calls is None:
@@ -168,7 +177,7 @@ def _command(*, model=None, mapping=None, candles=None, previous=None, boundary=
         previous_state=previous,
         symbol="BTCUSDT",
         boundary_at=boundary,
-        model_artifact=model or _FrozenModel(ClusterAssignment(COMPONENTS[0], 0.9, 0.05, None)),
+        model_artifact=model or _FrozenModel(ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0)),
         mapping_artifact=mapping or _mapping(),
         candles=_candles() if candles is None else candles,
     )
@@ -214,7 +223,7 @@ def test_incomplete_or_contaminated_history_fails_closed(mutation) -> None:
 
 
 def test_assigns_exact_extracted_vector_once_and_activates_first_candidate_immediately() -> None:
-    model = _FrozenModel(ClusterAssignment(COMPONENTS[0], 0.9, 0.05, None))
+    model = _FrozenModel(ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0))
 
     result = SelectDailyStrategyUseCase().execute(_command(model=model))
 
@@ -232,7 +241,7 @@ def test_assigns_exact_extracted_vector_once_and_activates_first_candidate_immed
 
 
 def test_explicit_cash_mapping_is_immediate_and_audited() -> None:
-    model = _FrozenModel(ClusterAssignment(COMPONENTS[2], 0.9, 0.05, None))
+    model = _FrozenModel(ClusterAssignment(COMPONENTS[2], 0.9, 0.05, 1.0))
     result = SelectDailyStrategyUseCase().execute(_command(model=model))
     assert result.state.active_strategy_profile_id is None
     assert not result.state.new_entries_enabled
@@ -242,14 +251,14 @@ def test_explicit_cash_mapping_is_immediate_and_audited() -> None:
 
 @pytest.mark.parametrize("case", ["low-probability", "low-margin", "unknown", "model-hash"])
 def test_invalid_or_incompatible_selection_fails_closed_with_readable_audit(case) -> None:
-    assignment = ClusterAssignment(COMPONENTS[0], 0.9, 0.05, None)
+    assignment = ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0)
     mapping = _mapping()
     if case == "low-probability":
-        assignment = ClusterAssignment(COMPONENTS[0], 0.64, 0.20, None)
+        assignment = ClusterAssignment(COMPONENTS[0], 0.64, 0.20, 1.0)
     elif case == "low-margin":
-        assignment = ClusterAssignment(COMPONENTS[0], 0.51, 0.49, None)
+        assignment = ClusterAssignment(COMPONENTS[0], 0.51, 0.49, 1.0)
     elif case == "unknown":
-        assignment = ClusterAssignment("unknown-component", 0.9, 0.05, None)
+        assignment = ClusterAssignment("unknown-component", 0.9, 0.05, 1.0)
     else:
         mapping = _mapping(model_hash=_hash("other-model"))
     result = SelectDailyStrategyUseCase().execute(
@@ -268,7 +277,7 @@ def test_same_candidate_component_change_records_only_component_transition() -> 
         previous=first.state,
         boundary=BOUNDARY + timedelta(days=1),
         candles=_candles(start=BOUNDARY - timedelta(days=2)),
-        model=_FrozenModel(ClusterAssignment(COMPONENTS[1], 0.9, 0.05, None)),
+        model=_FrozenModel(ClusterAssignment(COMPONENTS[1], 0.9, 0.05, 1.0)),
     ))
     assert second.state.active_strategy_profile_id == CANDIDATES[0]
     assert second.events == (SelectionEventType.CLUSTER_TRANSITION,)
@@ -281,7 +290,7 @@ def test_candidate_and_cash_transitions_record_previous_and_current() -> None:
     changed = SelectDailyStrategyUseCase().execute(_command(
         previous=first.state, boundary=BOUNDARY + timedelta(days=1),
         candles=_candles(start=BOUNDARY - timedelta(days=2)),
-        model=_FrozenModel(ClusterAssignment(COMPONENTS[3], 0.9, 0.05, None)),
+        model=_FrozenModel(ClusterAssignment(COMPONENTS[3], 0.9, 0.05, 1.0)),
     ))
     assert changed.events == (
         SelectionEventType.CLUSTER_TRANSITION,
@@ -292,7 +301,7 @@ def test_candidate_and_cash_transitions_record_previous_and_current() -> None:
     cash = SelectDailyStrategyUseCase().execute(_command(
         previous=changed.state, boundary=BOUNDARY + timedelta(days=2),
         candles=_candles(start=BOUNDARY - timedelta(days=1)),
-        model=_FrozenModel(ClusterAssignment(COMPONENTS[2], 0.9, 0.05, None)),
+        model=_FrozenModel(ClusterAssignment(COMPONENTS[2], 0.9, 0.05, 1.0)),
     ))
     assert cash.events == (
         SelectionEventType.CLUSTER_TRANSITION,
@@ -317,9 +326,16 @@ def test_model_and_mapping_snapshot_is_captured_once_before_assignment() -> None
         profile_id = PROFILE_ID
         feature_schema_version = THREE_DAY_CHART_FEATURE_SCHEMA_VERSION
         component_fingerprints = COMPONENTS
+        feature_names = ("return_4h", "rv_4h", "atr_ratio_1d", "directional_efficiency_1d")
+        assignment_confidence_policy = "gmm_top_two_posterior_and_chi_square_distance_v2"
         model_gates = {
             "gmm_probability_threshold": 0.65,
             "gmm_margin_threshold": 0.10,
+            "distance_threshold_policy": "maximum_chi_square_995_squared_mahalanobis",
+            "distance_threshold": 14.860259000560243,
+            "distance_result": True,
+            "distance_exceedance_rate": 0.01,
+            "maximum_distance_exceedance_rate_threshold": 0.02,
             "passed": True,
         }
 
@@ -330,7 +346,7 @@ def test_model_and_mapping_snapshot_is_captured_once_before_assignment() -> None
                 "gmm_margin_threshold": 0.99,
                 "passed": False,
             }
-            return ClusterAssignment(COMPONENTS[0], 0.9, 0.05, None)
+            return ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0)
 
     model = ReplacingModel()
     command = _command(model=model)
@@ -339,3 +355,61 @@ def test_model_and_mapping_snapshot_is_captured_once_before_assignment() -> None
     assert result.audit.status == "selected"
     assert result.audit.model_artifact_hash == MODEL_HASH
     assert result.evaluated_artifact_identity == command.artifact_snapshot.artifact_identity
+
+
+@pytest.mark.parametrize(
+    ("distance", "reason"),
+    [
+        (None, "missing"),
+        (14.860259000560244, "exceeds"),
+        (float("nan"), "finite"),
+        (-1.0, "nonnegative"),
+    ],
+)
+def test_distance_confidence_failures_commit_cash_with_distinct_reason(distance, reason) -> None:
+    assignment = (
+        ClusterAssignment(COMPONENTS[0], 0.9, 0.05, distance)
+        if distance is None or (math.isfinite(distance) and distance >= 0)
+        else SimpleNamespace(
+            fingerprint=COMPONENTS[0],
+            dominant_probability=0.9,
+            second_probability=0.05,
+            distance=distance,
+        )
+    )
+    result = SelectDailyStrategyUseCase().execute(
+        _command(model=_FrozenModel(assignment))
+    )
+    assert result.audit.status == "fail_closed"
+    assert reason in result.audit.reason
+    assert result.state.active_strategy_profile_id is None
+
+
+def test_distance_exact_threshold_passes() -> None:
+    result = SelectDailyStrategyUseCase().execute(
+        _command(
+            model=_FrozenModel(
+                ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 14.860259000560243)
+            )
+        )
+    )
+    assert result.audit.status == "selected"
+
+
+@pytest.mark.parametrize("change", ["policy", "gate"])
+def test_distance_policy_or_failed_model_gate_is_incompatible(change) -> None:
+    gates = dict(_FrozenModel(ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0)).model_gates)
+    if change == "policy":
+        gates["distance_threshold_policy"] = "unsupported"
+    else:
+        gates["distance_result"] = False
+    result = SelectDailyStrategyUseCase().execute(
+        _command(
+            model=_FrozenModel(
+                ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0),
+                model_gates=gates,
+            )
+        )
+    )
+    assert result.audit.status == "fail_closed"
+    assert "incompatible" in result.audit.reason

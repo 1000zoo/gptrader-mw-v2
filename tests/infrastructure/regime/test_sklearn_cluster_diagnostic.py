@@ -107,10 +107,10 @@ def test_array_only_assignment_is_reconstructible_and_model_specific(config):
 
     assert len(assignments) == len(vectors)
     assert all(0 <= item.second_probability <= item.dominant_probability <= 1 for item in assignments)
-    if config.model_type == "kmeans":
-        assert all(item.distance is not None and item.distance >= 0 for item in assignments)
-    else:
+    if config.model_type == "gmm" and config.covariance_type == "tied":
         assert all(item.distance is None for item in assignments)
+    else:
+        assert all(item.distance is not None and item.distance >= 0 for item in assignments)
 
 
 def test_correlation_pruning_uses_supplied_registry_priority():

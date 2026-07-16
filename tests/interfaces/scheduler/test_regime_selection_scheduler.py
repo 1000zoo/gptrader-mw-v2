@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 from concurrent.futures import ThreadPoolExecutor
+from typing import get_type_hints
 
 import pytest
 
@@ -21,6 +22,8 @@ from src.domain.regime.selection import (
 )
 from src.infrastructure.persistence import SqliteRegimeSelectionStateRepository
 from src.interfaces.scheduler.regime_selection_scheduler import (
+    RegimeSelectionResultPort,
+    RegimeSelectorPort,
     RegimeSelectionScheduler,
     ScheduledRegimeSelection,
 )
@@ -293,6 +296,14 @@ def test_scheduled_selection_validates_invariants(kwargs, message) -> None:
         ScheduledRegimeSelection(**values)
 
 
+def test_scheduler_exposes_structural_selector_and_result_protocols() -> None:
+    production = _result()
+
+    assert isinstance(production, RegimeSelectionResultPort)
+    assert "object" not in str(get_type_hints(RegimeSelectorPort.execute)["return"])
+    assert "object" not in str(get_type_hints(ScheduledRegimeSelection)["result"])
+
+
 def test_scheduler_accepts_daily_selector_and_commits_consecutive_midnights(tmp_path) -> None:
     repository = SqliteRegimeSelectionStateRepository(tmp_path / "daily-state.sqlite3")
     scheduler = RegimeSelectionScheduler(
@@ -309,7 +320,7 @@ def test_scheduler_accepts_daily_selector_and_commits_consecutive_midnights(tmp_
             boundary=DAILY_BOUNDARY + timedelta(days=1),
             candles=daily_candles(start=DAILY_BOUNDARY - timedelta(days=2)),
             model=_FrozenModel(
-                ClusterAssignment(DAILY_COMPONENTS[1], 0.9, 0.05, None)
+                ClusterAssignment(DAILY_COMPONENTS[1], 0.9, 0.05, 1.0)
             ),
         ),
     )

@@ -12,6 +12,7 @@ import tempfile
 import zipfile
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from scipy.stats import chi2
 from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score, silhouette_score
 from collections import OrderedDict, deque
 from dataclasses import dataclass, replace
@@ -75,6 +76,8 @@ from src.infrastructure.regime.json_regime_artifact_repository import (
 from src.infrastructure.regime.sklearn_regime_model import SklearnRegimeModel
 from src.infrastructure.regime.sklearn_cluster_diagnostic import SklearnClusterDiagnostic
 from src.infrastructure.regime.three_day_k4_model_artifact import (
+    DISTANCE_THRESHOLD_POLICY,
+    MAXIMUM_DISTANCE_EXCEEDANCE_RATE,
     ThreeDayK4ModelArtifact,
     validate_three_day_k4_source_provenance,
 )
@@ -815,6 +818,7 @@ MODEL_GATE_THRESHOLDS = {
     "maximum_matched_centroid_distance": 0.5,
     "maximum_prevalence_drift": 0.2,
     "maximum_low_confidence_rate": 0.25,
+    "maximum_distance_exceedance_rate": MAXIMUM_DISTANCE_EXCEEDANCE_RATE,
 }
 
 
@@ -956,6 +960,16 @@ def fit_fold_local_three_day_k4_model(
             or item.dominant_probability - item.second_probability < 0.10
             for item in assignments
         ) / len(assignments)
+        distance_threshold = float(chi2.ppf(0.995, df=len(primary.feature_names)))
+        if any(item.distance is None or not math.isfinite(item.distance) for item in assignments):
+            raise ValueError("diagonal GMM assignments require finite squared Mahalanobis distance")
+        distance_exceedance_rate = sum(
+            item.distance > distance_threshold for item in assignments
+        ) / len(assignments)
+        distance_result = (
+            distance_exceedance_rate
+            <= MODEL_GATE_THRESHOLDS["maximum_distance_exceedance_rate"]
+        )
         nondegenerate_confidence = low_confidence_rate <= MODEL_GATE_THRESHOLDS["maximum_low_confidence_rate"]
         passed = (
             represented and block_represented
@@ -964,6 +978,7 @@ def fit_fold_local_three_day_k4_model(
             and maximum_centroid_distance <= MODEL_GATE_THRESHOLDS["maximum_matched_centroid_distance"]
             and maximum_prevalence_drift <= MODEL_GATE_THRESHOLDS["maximum_prevalence_drift"]
             and nondegenerate_confidence
+            and distance_result
         )
         gates = {
             "convergence_required": True,
@@ -998,9 +1013,13 @@ def fit_fold_local_three_day_k4_model(
             "gmm_margin_threshold": 0.10,
             "minimum_observed_dominant_probability": min(item.dominant_probability for item in assignments),
             "minimum_observed_probability_margin": min(item.dominant_probability - item.second_probability for item in assignments),
-            "distance_threshold": "not_applicable_for_gmm",
-            "distance_result": "not_applicable_for_gmm",
-            "distance_threshold_policy": "not_applicable_for_gmm",
+            "distance_threshold": distance_threshold,
+            "distance_result": distance_result,
+            "distance_threshold_policy": DISTANCE_THRESHOLD_POLICY,
+            "distance_exceedance_rate": distance_exceedance_rate,
+            "maximum_distance_exceedance_rate_threshold": MODEL_GATE_THRESHOLDS[
+                "maximum_distance_exceedance_rate"
+            ],
             "feature_registry_version_expected": "three-day-chart-feature-registry-v1",
             "feature_registry_exact": True,
             "feature_family_cap_maximum_count": 5,

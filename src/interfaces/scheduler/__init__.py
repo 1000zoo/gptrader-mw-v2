@@ -4,6 +4,8 @@ from src.interfaces.scheduler.strategy_lifecycle_scheduler import (
     StrategyLifecycleScheduler,
 )
 from src.interfaces.scheduler.regime_selection_scheduler import (
+    RegimeSelectionResultPort,
+    RegimeSelectorPort,
     RegimeSelectionScheduler,
     ScheduledRegimeSelection,
 )
@@ -22,6 +24,8 @@ __all__ = [
     "ScheduledTradeExecution",
     "ScheduledRegimeSelection",
     "RegimeSelectionScheduler",
+    "RegimeSelectionResultPort",
+    "RegimeSelectorPort",
     "StrategyLifecycleScheduler",
     "TradeScheduler",
 ]

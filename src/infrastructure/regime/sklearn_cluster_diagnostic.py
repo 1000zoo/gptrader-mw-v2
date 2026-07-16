@@ -117,6 +117,11 @@ class SklearnClusterDiagnostic:
             distance_thresholds=fit.distance_thresholds,
         )
         probabilities, distances = _assign_probabilities(fit.config, scaled, fitted)
+        if fit.config.model_type == "gmm" and fit.config.covariance_type == "diag":
+            delta = scaled[:, None, :] - np.asarray(fit.means)[None, :, :]
+            distances = np.sum(
+                delta * delta / np.asarray(fit.covariances)[None, :, :], axis=2
+            )
 
         assignments = []
         for row_index, row in enumerate(probabilities):

@@ -13,6 +13,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 import numpy as np
+from scipy.stats import chi2
 
 from src.domain.regime.cluster_diagnostic import ClusterDiagnosticFit
 from src.domain.regime.model import ClusterAssignment, RegimeModelConfig, component_fingerprint
@@ -30,13 +31,15 @@ from src.infrastructure.exchange.binance.research_data.historical_feature_loader
 )
 
 
-THREE_DAY_K4_MODEL_ARTIFACT_VERSION = "three-day-k4-model-v1"
+THREE_DAY_K4_MODEL_ARTIFACT_VERSION = "three-day-k4-model-v2"
 THREE_DAY_FEATURE_REGISTRY_VERSION = "three-day-chart-feature-registry-v1"
 THREE_DAY_FEATURE_HISTORY_CONTRACT_VERSION = "three-day-feature-history-v1"
 THREE_DAY_FEATURE_EXTRACTOR_VERSION = "three-day-chart-feature-extractor-v1"
 MISSING_VALUE_POLICY = "reject_nonfinite_no_imputation"
 FAMILY_CAP_POLICY = "maximum_five_and_no_more_than_half"
-ASSIGNMENT_CONFIDENCE_POLICY = "gmm_top_two_posterior_v1"
+ASSIGNMENT_CONFIDENCE_POLICY = "gmm_top_two_posterior_and_chi_square_distance_v2"
+DISTANCE_THRESHOLD_POLICY = "maximum_chi_square_995_squared_mahalanobis"
+MAXIMUM_DISTANCE_EXCEEDANCE_RATE = 0.02
 _HEX24 = re.compile(r"[0-9a-f]{24}\Z")
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 _REGISTRY_NAMES = tuple(spec.name for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1)
@@ -334,6 +337,7 @@ class ThreeDayK4ModelArtifact:
             "gmm_probability_threshold", "gmm_margin_threshold", "distance_threshold_policy",
             "minimum_observed_dominant_probability", "minimum_observed_probability_margin",
             "distance_threshold", "distance_result",
+            "distance_exceedance_rate", "maximum_distance_exceedance_rate_threshold",
             "low_confidence_rate", "maximum_low_confidence_rate_threshold", "nondegenerate_confidence",
             "feature_registry_version_expected", "feature_registry_exact",
             "feature_family_cap_maximum_count", "feature_family_cap_maximum_share",
@@ -347,12 +351,13 @@ class ThreeDayK4ModelArtifact:
             "finite_model_parameters_required", "finite_model_parameters", "positive_weights_required",
             "all_components_represented_required", "all_components_represented",
             "all_chronological_blocks_represented_required", "all_chronological_blocks_represented",
-            "nondegenerate_confidence", "feature_registry_exact", "feature_family_cap_passed", "passed",
+            "nondegenerate_confidence", "distance_result", "feature_registry_exact",
+            "feature_family_cap_passed", "passed",
         )
         if any(gates[name] is not True for name in required_true):
             raise ValueError("model stability gates did not pass")
         nonnumeric = set(required_true) | {
-            "distance_threshold_policy", "distance_threshold", "distance_result",
+            "distance_threshold_policy",
             "feature_registry_version_expected",
         }
         numeric = tuple(gates[name] for name in required_gates - nonnumeric)
@@ -372,6 +377,7 @@ class ThreeDayK4ModelArtifact:
             "component_count_expected": 4,
             "gmm_probability_threshold": 0.65,
             "gmm_margin_threshold": 0.10,
+            "maximum_distance_exceedance_rate_threshold": MAXIMUM_DISTANCE_EXCEEDANCE_RATE,
             "feature_family_cap_maximum_count": 5,
             "feature_family_cap_maximum_share": 0.5,
         }
@@ -395,10 +401,18 @@ class ThreeDayK4ModelArtifact:
             raise ValueError("serialized model gate results do not pass frozen thresholds")
         finite_scaler = all(math.isfinite(value) for values in (self.fit.lower_bounds, self.fit.upper_bounds, self.fit.medians, self.fit.scales) for value in values)
         finite_model = all(math.isfinite(value) for values in (*self.fit.means, self.fit.weights, *self.fit.covariances) for value in values)
+        expected_distance_threshold = float(chi2.ppf(0.995, df=len(self.fit.feature_names)))
         if (
-            gates["distance_threshold_policy"] != "not_applicable_for_gmm"
-            or gates["distance_threshold"] != "not_applicable_for_gmm"
-            or gates["distance_result"] != "not_applicable_for_gmm"
+            gates["distance_threshold_policy"] != DISTANCE_THRESHOLD_POLICY
+            or not math.isclose(
+                gates["distance_threshold"],
+                expected_distance_threshold,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+            or not 0 <= gates["distance_exceedance_rate"] <= 1
+            or gates["distance_exceedance_rate"] > MAXIMUM_DISTANCE_EXCEEDANCE_RATE
+            or gates["distance_result"] is not True
             or gates["feature_registry_version_expected"] != THREE_DAY_FEATURE_REGISTRY_VERSION
             or gates["finite_scaler"] != finite_scaler
             or gates["finite_model_parameters"] != finite_model
@@ -523,7 +537,7 @@ class ThreeDayK4ModelArtifact:
             fingerprint=self.numeric_index_to_fingerprint[winner],
             dominant_probability=float(probabilities[winner]),
             second_probability=float(probabilities[runner_up]),
-            distance=None,
+            distance=float(np.sum(delta[winner] * delta[winner] / covariances[winner])),
         )
 
     def _payload(self, *, include_hash: bool) -> dict[str, object]:
@@ -664,6 +678,8 @@ class ThreeDayK4ModelArtifact:
 
 
 __all__ = [
-    "THREE_DAY_K4_MODEL_ARTIFACT_VERSION", "ThreeDayK4ModelArtifact",
+    "ASSIGNMENT_CONFIDENCE_POLICY", "DISTANCE_THRESHOLD_POLICY",
+    "MAXIMUM_DISTANCE_EXCEEDANCE_RATE", "THREE_DAY_K4_MODEL_ARTIFACT_VERSION",
+    "ThreeDayK4ModelArtifact",
     "validate_three_day_k4_source_provenance",
 ]
