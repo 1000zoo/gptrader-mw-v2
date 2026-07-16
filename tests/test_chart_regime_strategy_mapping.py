@@ -1905,3 +1905,77 @@ def test_mapping_reconstructs_drawdown_and_allows_equity_below_zero(monkeypatch)
     forged["enabled"] = False
     rows = run_mapping_episodes(_minute_market(start, 1), **kwargs)
     assert Decimal(rows[0]["max_drawdown_ratio"]) > Decimal("1")
+
+
+def test_three_day_k4_loader_uses_context_only_before_first_fit_anchor(monkeypatch, tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    captured = {}
+    sentinel_vectors = (object(),)
+    sentinel_provenance = ({"archive": "sentinel"},)
+
+    def fake_loader(**kwargs):
+        captured.update(kwargs)
+        return sentinel_vectors, sentinel_provenance
+
+    def fake_fit(vectors, **kwargs):
+        captured["fit_vectors"] = vectors
+        captured["fit_provenance"] = kwargs["source_provenance"]
+        return "sentinel-outcome"
+
+    monkeypatch.setattr(module, "load_three_day_feature_history", fake_loader)
+    monkeypatch.setattr(module, "fit_fold_local_three_day_k4_model", fake_fit)
+    outcome = module.load_and_fit_fold_local_three_day_k4_model(
+        raw_root=tmp_path,
+        code_provenance_hash="a" * 64,
+    )
+
+    assert outcome == "sentinel-outcome"
+    assert captured["start"] == datetime(2020, 12, 29, tzinfo=timezone.utc)
+    assert captured["end"] == datetime(2025, 6, 30, tzinfo=timezone.utc)
+    assert captured["expected_anchor_count"] == 1641
+    assert captured["fit_vectors"] is sentinel_vectors
+    assert captured["fit_provenance"] is sentinel_provenance
+
+
+def test_three_day_k4_loader_corruption_fails_before_fit(monkeypatch, tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    called = []
+
+    def corrupt_loader(**kwargs):
+        raise ValueError("archive checksum mismatch")
+
+    monkeypatch.setattr(module, "load_three_day_feature_history", corrupt_loader)
+    monkeypatch.setattr(module, "fit_fold_local_three_day_k4_model", lambda *args, **kwargs: called.append(True))
+    with pytest.raises(ValueError, match="checksum"):
+        module.load_and_fit_fold_local_three_day_k4_model(
+            raw_root=tmp_path,
+            code_provenance_hash="a" * 64,
+        )
+    assert called == []
+
+
+def test_three_day_k4_rejects_provenance_before_diagnostic_fit() -> None:
+    from src.domain.regime import THREE_DAY_CHART_FEATURE_REGISTRY_V1, ThreeDayChartFeatureVector
+    from scripts.chart_regime_strategy_mapping import fit_fold_local_three_day_k4_model
+
+    class SpyDiagnostic:
+        def fit(self, *args, **kwargs):
+            raise AssertionError("fit must not run")
+
+    start = datetime(2021, 1, 1, tzinfo=timezone.utc)
+    values = {spec.name: 0.0 for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1}
+    vectors = tuple(
+        ThreeDayChartFeatureVector(
+            "BTCUSDT", start + timedelta(days=index), start + timedelta(days=index - 3), values
+        )
+        for index in range(1641)
+    )
+    with pytest.raises(ValueError, match="provenance"):
+        fit_fold_local_three_day_k4_model(
+            vectors,
+            source_provenance=({"forged": True},),
+            code_provenance_hash="a" * 64,
+            diagnostic=SpyDiagnostic(),
+        )

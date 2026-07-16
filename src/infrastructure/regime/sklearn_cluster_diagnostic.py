@@ -83,6 +83,9 @@ class SklearnClusterDiagnostic:
             weights=fitted.weights,
             covariances=fitted.covariances,
             distance_thresholds=fitted.distance_thresholds,
+            converged=fitted.converged,
+            iterations=fitted.iterations,
+            lower_bound=fitted.lower_bound,
         )
 
     def assign(

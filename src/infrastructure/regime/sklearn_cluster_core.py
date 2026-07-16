@@ -17,6 +17,9 @@ class _ClusterArrays:
     weights: tuple[float, ...]
     covariances: tuple[tuple[float, ...], ...]
     distance_thresholds: tuple[float, ...]
+    converged: bool = True
+    iterations: int = 1
+    lower_bound: float = 0.0
 
 
 def _fit_components(
@@ -37,8 +40,10 @@ def _fit_components(
 
     if config.model_type == "kmeans":
         fitted_parameters = _fit_kmeans(config, values)
+        converged, iterations, lower_bound = True, 1, 0.0
     else:
-        fitted_parameters = _fit_gmm(config, values)
+        fitted_parameters, iterations, lower_bound = _fit_gmm(config, values)
+        converged = True
 
     parameters = []
     for mean, weight, covariance, threshold in fitted_parameters:
@@ -64,6 +69,9 @@ def _fit_components(
         weights=tuple(item[2] for item in records),
         covariances=tuple(item[3] for item in records) if config.model_type == "gmm" else (),
         distance_thresholds=tuple(item[4] for item in records) if config.model_type == "kmeans" else (),
+        converged=converged,
+        iterations=iterations,
+        lower_bound=lower_bound,
     )
 
 
@@ -98,7 +106,7 @@ def _fit_kmeans(
 def _fit_gmm(
     config: RegimeModelConfig,
     scaled: np.ndarray,
-) -> list[tuple[np.ndarray, float, tuple[float, ...], float]]:
+) -> tuple[list[tuple[np.ndarray, float, tuple[float, ...], float]], int, float]:
     with warnings.catch_warnings():
         warnings.simplefilter("error", ConvergenceWarning)
         try:
@@ -124,7 +132,13 @@ def _fit_gmm(
         _validate_covariance(covariance, config.covariance_type, regularization=config.regularization)
         flattened = tuple(float(value) for value in covariance.reshape(-1))
         records.append((means[component], float(weights[component]), flattened, 0.0))
-    return records
+    if (
+        not isinstance(estimator.n_iter_, (int, np.integer))
+        or int(estimator.n_iter_) <= 0
+        or not math.isfinite(float(estimator.lower_bound_))
+    ):
+        raise ValueError("gmm convergence metadata is invalid")
+    return records, int(estimator.n_iter_), float(estimator.lower_bound_)
 
 
 def _validate_covariance(

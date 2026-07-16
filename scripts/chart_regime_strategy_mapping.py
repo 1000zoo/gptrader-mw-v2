@@ -73,6 +73,11 @@ from src.infrastructure.regime.json_regime_artifact_repository import (
     model_fingerprint_hash,
 )
 from src.infrastructure.regime.sklearn_regime_model import SklearnRegimeModel
+from src.infrastructure.regime.sklearn_cluster_diagnostic import SklearnClusterDiagnostic
+from src.infrastructure.regime.three_day_k4_model_artifact import ThreeDayK4ModelArtifact
+from src.infrastructure.exchange.binance.research_data.three_day_feature_history import (
+    load_three_day_feature_history,
+)
 from src.application.services.chart_feature_extractor import ChartFeatureExtractor
 from src.application.services.daily_strategy_evidence import (
     DailyCandidateCatalog,
@@ -94,6 +99,11 @@ from src.domain.regime import (
     build_weekly_episodes,
     candidate_definition_hash,
     candidate_universe_hash,
+)
+from src.domain.regime import (
+    THREE_DAY_CHART_FEATURE_REGISTRY_V1,
+    ThreeDayChartFeatureVector,
+    ThreeDayDailyResearchProfile,
 )
 
 
@@ -803,6 +813,251 @@ MODEL_GATE_THRESHOLDS = {
     "maximum_prevalence_drift": 0.2,
     "maximum_low_confidence_rate": 0.25,
 }
+
+
+@dataclass(frozen=True)
+class ThreeDayK4FitOutcome:
+    """Leakage-safe boundary consumed by later daily research stages."""
+
+    status: str
+    artifact: ThreeDayK4ModelArtifact | None
+    rejection_reasons: tuple[str, ...] = ()
+
+
+def _three_day_vector_hash(vectors: tuple[ThreeDayChartFeatureVector, ...]) -> str:
+    return _canonical_hash(
+        {
+            "schema_version": vectors[0].schema_version if vectors else None,
+            "registry_names": [spec.name for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1],
+            "vectors": [
+                {
+                    "symbol": vector.symbol,
+                    "anchor_at": vector.anchor_at.isoformat(),
+                    "window_start_at": vector.window_start_at.isoformat(),
+                    "values": list(vector.values.items()),
+                }
+                for vector in vectors
+            ],
+        }
+    )
+
+
+def _validate_three_day_fit_provenance(
+    provenance: Sequence[Mapping[str, object]], code_provenance_hash: str
+) -> tuple[Mapping[str, object], ...]:
+    rows = tuple(provenance)
+    expected = {"period", "url", "sha256", "bytes", "member_identity"}
+    if not rows:
+        raise ValueError("source provenance cannot be empty")
+    for row in rows:
+        if not isinstance(row, Mapping) or set(row) != expected:
+            raise ValueError("source provenance fields are incompatible")
+        if any(not isinstance(row[name], str) or not row[name] for name in ("period", "url", "member_identity")):
+            raise ValueError("source provenance identity is invalid")
+        if (
+            not row["url"].startswith("https://data.binance.vision/")
+            or not row["url"].endswith("/" + row["member_identity"])
+        ):
+            raise ValueError("source provenance URL and member identity are incompatible")
+        digest = row["sha256"]
+        if not isinstance(digest, str) or len(digest) != 64 or digest != digest.lower() or any(character not in "0123456789abcdef" for character in digest):
+            raise ValueError("source provenance checksum is invalid")
+        if not isinstance(row["bytes"], int) or isinstance(row["bytes"], bool) or row["bytes"] <= 0:
+            raise ValueError("source provenance byte count is invalid")
+    if (
+        not isinstance(code_provenance_hash, str)
+        or len(code_provenance_hash) != 64
+        or code_provenance_hash != code_provenance_hash.lower()
+        or any(character not in "0123456789abcdef" for character in code_provenance_hash)
+    ):
+        raise ValueError("code provenance hash is invalid")
+    return rows
+
+
+def fit_fold_local_three_day_k4_model(
+    vectors: Sequence[ThreeDayChartFeatureVector],
+    *,
+    source_provenance: Sequence[Mapping[str, object]],
+    code_provenance_hash: str,
+    diagnostic: SklearnClusterDiagnostic | None = None,
+) -> ThreeDayK4FitOutcome:
+    """Fit and freeze the normative K4 model using Cluster Fit anchors only.
+
+    The callable deliberately has no strategy outcomes or later-phase loader. A
+    caller may supply a history containing the three context days and later fold
+    phases; only exact anchors in the frozen half-open Cluster Fit are retained.
+    """
+    profile = ThreeDayDailyResearchProfile()
+    interval = profile.fold.cluster_fit
+    history = tuple(vectors)
+    if not history or any(not isinstance(vector, ThreeDayChartFeatureVector) for vector in history):
+        raise ValueError("audited three-day feature history is required")
+    anchors = tuple(vector.anchor_at for vector in history)
+    if any(current <= previous for previous, current in zip(anchors, anchors[1:])):
+        raise ValueError("feature history contains a gap, duplicate, or out-of-order anchor")
+    fit_vectors = tuple(vector for vector in history if interval.start_at <= vector.anchor_at < interval.end_at)
+    expected_count = (interval.end_at - interval.start_at).days
+    expected_anchors = tuple(interval.start_at + timedelta(days=index) for index in range(expected_count))
+    if tuple(vector.anchor_at for vector in fit_vectors) != expected_anchors:
+        raise ValueError("Cluster Fit feature history has a gap or incorrect half-open coverage")
+    if any(vector.window_start_at != vector.anchor_at - timedelta(days=3) for vector in fit_vectors):
+        raise ValueError("Cluster Fit feature windows must exclude the anchor")
+    if any(tuple(vector.values) != tuple(spec.name for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1) for vector in fit_vectors):
+        raise ValueError("feature history registry is incompatible")
+    validated_provenance = _validate_three_day_fit_provenance(
+        source_provenance, code_provenance_hash
+    )
+
+    engine = diagnostic or SklearnClusterDiagnostic()
+    config = RegimeModelConfig("gmm", 4, profile.random_seed, "diag", profile.regularization)
+    try:
+        primary = engine.fit(config, fit_vectors, THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+        assignments = engine.assign(primary, fit_vectors, THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+        labels = tuple(item.fingerprint for item in assignments)
+        represented = set(labels) == set(primary.fingerprints)
+        midpoint = len(fit_vectors) // 2
+        blocks = (fit_vectors[:midpoint], fit_vectors[midpoint:])
+        block_represented = all(
+            set(item.fingerprint for item in engine.assign(primary, block, THREE_DAY_CHART_FEATURE_REGISTRY_V1))
+            == set(primary.fingerprints)
+            for block in blocks
+        )
+        seed_scores = []
+        for seed in (profile.random_seed + 1, profile.random_seed + 2):
+            refit = engine.fit(
+                replace(config, random_seed=seed),
+                fit_vectors,
+                THREE_DAY_CHART_FEATURE_REGISTRY_V1,
+                retained_feature_names=primary.feature_names,
+            )
+            comparison = engine.assign(refit, fit_vectors, THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+            comparison_labels = tuple(item.fingerprint for item in comparison)
+            seed_scores.append((
+                float(adjusted_rand_score(labels, comparison_labels)),
+                float(normalized_mutual_info_score(labels, comparison_labels)),
+            ))
+        minimum_ari = min(score[0] for score in seed_scores)
+        minimum_nmi = min(score[1] for score in seed_scores)
+
+        block_fits = tuple(
+            engine.fit(
+                config, block, THREE_DAY_CHART_FEATURE_REGISTRY_V1,
+                retained_feature_names=primary.feature_names,
+            )
+            for block in blocks
+        )
+        maximum_centroid_distance = 0.0
+        block_shares = []
+        for block, block_fit in zip(blocks, block_fits):
+            projected = _project_centroids_to_primary_coordinates(block_fit, primary)
+            distances = np.linalg.norm(np.asarray(primary.means)[:, None, :] - projected[None, :, :], axis=2)
+            rows, columns = linear_sum_assignment(distances)
+            maximum_centroid_distance = max(
+                maximum_centroid_distance,
+                max(float(distances[row, column]) for row, column in zip(rows, columns)),
+            )
+            mapping = {block_fit.fingerprints[column]: primary.fingerprints[row] for row, column in zip(rows, columns)}
+            block_labels = tuple(
+                mapping[item.fingerprint]
+                for item in engine.assign(block_fit, block, THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+            )
+            block_shares.append({fingerprint: block_labels.count(fingerprint) / len(block_labels) for fingerprint in primary.fingerprints})
+        maximum_prevalence_drift = max(
+            abs(block_shares[0][fingerprint] - block_shares[1][fingerprint])
+            for fingerprint in primary.fingerprints
+        )
+        low_confidence_rate = sum(
+            item.dominant_probability < 0.65
+            or item.dominant_probability - item.second_probability < 0.10
+            for item in assignments
+        ) / len(assignments)
+        nondegenerate_confidence = low_confidence_rate <= MODEL_GATE_THRESHOLDS["maximum_low_confidence_rate"]
+        passed = (
+            represented and block_represented
+            and minimum_ari >= MODEL_GATE_THRESHOLDS["minimum_seed_ari"]
+            and minimum_nmi >= MODEL_GATE_THRESHOLDS["minimum_seed_nmi"]
+            and maximum_centroid_distance <= MODEL_GATE_THRESHOLDS["maximum_matched_centroid_distance"]
+            and maximum_prevalence_drift <= MODEL_GATE_THRESHOLDS["maximum_prevalence_drift"]
+            and nondegenerate_confidence
+        )
+        gates = {
+            "converged": primary.converged,
+            "iterations": primary.iterations,
+            "lower_bound": primary.lower_bound,
+            "minimum_adjusted_rand_index": minimum_ari,
+            "minimum_adjusted_rand_index_threshold": MODEL_GATE_THRESHOLDS["minimum_seed_ari"],
+            "minimum_normalized_mutual_information": minimum_nmi,
+            "minimum_normalized_mutual_information_threshold": MODEL_GATE_THRESHOLDS["minimum_seed_nmi"],
+            "maximum_matched_centroid_distance": maximum_centroid_distance,
+            "maximum_matched_centroid_distance_threshold": MODEL_GATE_THRESHOLDS["maximum_matched_centroid_distance"],
+            "maximum_prevalence_drift": maximum_prevalence_drift,
+            "maximum_prevalence_drift_threshold": MODEL_GATE_THRESHOLDS["maximum_prevalence_drift"],
+            "low_confidence_rate": low_confidence_rate,
+            "maximum_low_confidence_rate_threshold": MODEL_GATE_THRESHOLDS["maximum_low_confidence_rate"],
+            "all_components_represented": represented,
+            "all_chronological_blocks_represented": block_represented,
+            "nondegenerate_confidence": nondegenerate_confidence,
+            "passed": passed,
+        }
+        if not passed:
+            return ThreeDayK4FitOutcome("failed-model-cash", None, ("fixed-k4-model-gates",))
+        vector_hash = _three_day_vector_hash(fit_vectors)
+        artifact = ThreeDayK4ModelArtifact.from_fit(
+            primary,
+            training_start_at=interval.start_at,
+            training_end_at=interval.end_at,
+            first_usable_anchor_at=fit_vectors[0].anchor_at,
+            last_usable_anchor_at=fit_vectors[-1].anchor_at,
+            usable_anchor_count=len(fit_vectors),
+            source_provenance=validated_provenance,
+            feature_history_hash=vector_hash,
+            fit_input_vector_hash=vector_hash,
+            code_provenance_hash=code_provenance_hash,
+            stability_gates=gates,
+        )
+    except (TypeError, ValueError) as error:
+        return ThreeDayK4FitOutcome("failed-model-cash", None, (str(error),))
+    return ThreeDayK4FitOutcome("model-fit", artifact)
+
+
+def load_and_fit_fold_local_three_day_k4_model(
+    *,
+    raw_root: Path,
+    code_provenance_hash: str,
+    symbol: str = "BTCUSDT",
+    downloader=None,
+    request_factory=None,
+    row_reader=None,
+    diagnostic: SklearnClusterDiagnostic | None = None,
+) -> ThreeDayK4FitOutcome:
+    """Load only the audited Cluster Fit archive span, then fit frozen K4.
+
+    Archive reads begin three days before the first fit anchor. The loader's
+    canonical episode contract therefore emits 2021-01-01 as its first vector;
+    2020-12-29..31 exist solely as pre-anchor feature context.
+    """
+    profile = ThreeDayDailyResearchProfile()
+    interval = profile.fold.cluster_fit
+    kwargs = {
+        "symbol": symbol,
+        "start": interval.start_at - timedelta(days=3),
+        "end": interval.end_at,
+        "raw_root": raw_root,
+        "expected_anchor_count": (interval.end_at - interval.start_at).days,
+    }
+    if downloader is not None:
+        kwargs["downloader"] = downloader
+    if request_factory is not None:
+        kwargs["request_factory"] = request_factory
+    if row_reader is not None:
+        kwargs["row_reader"] = row_reader
+    vectors, provenance = load_three_day_feature_history(**kwargs)
+    return fit_fold_local_three_day_k4_model(
+        vectors,
+        source_provenance=provenance,
+        code_provenance_hash=code_provenance_hash,
+        diagnostic=diagnostic,
+    )
 COMPARISON_NAMES = (
     "cash",
     "adopted_fixed",

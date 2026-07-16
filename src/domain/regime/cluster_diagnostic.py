@@ -26,6 +26,9 @@ class ClusterDiagnosticFit:
     weights: tuple[float, ...]
     covariances: tuple[tuple[float, ...], ...]
     distance_thresholds: tuple[float, ...]
+    converged: bool = True
+    iterations: int = 1
+    lower_bound: float = 0.0
 
     def __post_init__(self) -> None:
         if (
@@ -76,6 +79,12 @@ class ClusterDiagnosticFit:
             raise ValueError("diagnostic fingerprints must be unique and deterministically ordered")
         if not isinstance(self.covariances, tuple) or not isinstance(self.distance_thresholds, tuple):
             raise ValueError("diagnostic covariance and distance parameters must use immutable tuples")
+        if self.converged is not True:
+            raise ValueError("diagnostic fit must have converged")
+        if not isinstance(self.iterations, int) or isinstance(self.iterations, bool) or self.iterations <= 0:
+            raise ValueError("diagnostic iterations must be a positive integer")
+        if not isinstance(self.lower_bound, (int, float)) or isinstance(self.lower_bound, bool) or not math.isfinite(self.lower_bound):
+            raise ValueError("diagnostic lower bound must be finite")
 
         numeric_groups = (
             self.lower_bounds,
