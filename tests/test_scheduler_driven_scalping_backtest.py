@@ -10,8 +10,10 @@ import pytest
 
 from scripts.scheduler_driven_scalping_backtest import (
     BacktestPosition,
+    BacktestTrade,
     BacktestMarketSnapshot,
     _maximum_adverse_excursion_ratio,
+    _trade_payload,
     SchedulerBacktestCandidate,
     StrategyCandidateSpec,
     alpha_entry_candidates,
@@ -69,6 +71,17 @@ def test_maximum_adverse_excursion_is_directional_and_includes_exit_candle(direc
                                 Decimal("80"), 0, Decimal("0"), Decimal("100"))
 
     assert _maximum_adverse_excursion_ratio(position, market, 1) == expected
+
+
+def test_trade_detail_serialization_rejects_missing_mae_audit() -> None:
+    trade = BacktestTrade(
+        entry_price=Decimal("100"), exit_price=Decimal("101"),
+        direction=SignalDirection.LONG, quantity=Decimal("1"), margin=Decimal("50"),
+        gross_pnl=Decimal("1"), net_pnl=Decimal("0.9"), fee_paid=Decimal("0.1"),
+        exit_reason="test", holding_bars=1, maximum_adverse_excursion_ratio=None,
+    )
+    with pytest.raises(ValueError, match="adverse excursion"):
+        _trade_payload(trade)
 from scripts.chart_regime_strategy_mapping import _validation_replay_metrics
 from src.domain.strategy import StrategyResult
 from src.domain.signal import Signal
@@ -809,6 +822,7 @@ def test_scheduler_backtest_default_payload_has_frozen_json_schema() -> None:
 
     assert tuple(result) == (
         "engine",
+        "engine_version",
         "candidate_id",
         "symbol",
         "scheduler_path",
@@ -835,10 +849,11 @@ def test_scheduler_backtest_default_payload_has_frozen_json_schema() -> None:
         "feature_source_coverage",
         "feature_unavailable_counts",
         "feature_provenance",
+        "feature_cache_schema_version",
         "future_feature_access_count",
     )
     assert {key: type(value) for key, value in result.items()} == {
-        "engine": str, "candidate_id": str, "symbol": str, "scheduler_path": str,
+        "engine": str, "engine_version": str, "candidate_id": str, "symbol": str, "scheduler_path": str,
         "cost_model": dict, "start_at": str, "end_at": str, "trade_count": int,
         "trades_per_day": str, "daily_return_ratio": str, "net_win_rate": str,
             "return_ratio": str, "gross_pnl": str, "net_pnl": str, "fee_paid": str,
@@ -847,7 +862,8 @@ def test_scheduler_backtest_default_payload_has_frozen_json_schema() -> None:
         "average_net_trade_expectancy_ratio": str, "signal_count": int,
         "skipped_by_guard": int, "candidate": dict, "candidate_definition_hash": str,
         "feature_cache_hash": type(None), "feature_source_coverage": dict,
-        "feature_unavailable_counts": dict, "feature_provenance": dict,
+            "feature_unavailable_counts": dict, "feature_provenance": dict,
+            "feature_cache_schema_version": str,
         "future_feature_access_count": int,
     }
     assert isinstance(json.dumps(result, sort_keys=True), str)

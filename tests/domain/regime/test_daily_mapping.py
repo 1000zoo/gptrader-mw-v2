@@ -54,7 +54,8 @@ def evidence(**changes) -> DailyStrategyEvidence:
         "turnover_ratio": Decimal("1.25"),
         "maximum_drawdown_ratio": Decimal("0.02"),
         "maximum_adverse_excursion_ratio": Decimal("0.01"),
-        "profit_factor": Decimal("1.5"),
+        "profit_factor": Decimal("6"),
+        "profit_factor_status": "finite",
         "downside_deviation_ratio": Decimal("0.003"),
         "expected_shortfall_10_ratio": Decimal("-0.004"),
         "median_daily_return_ratio": Decimal("0.005"),
@@ -70,7 +71,7 @@ def evidence(**changes) -> DailyStrategyEvidence:
         "data_hash": sha("data"),
         "cost_config_hash": sha("costs"),
         "engine_config_hash": sha("engine"),
-        "trade_pnls": (Decimal("2"), Decimal("3")),
+        "trade_pnls": (Decimal("6"), Decimal("-1")),
     }
     fields.update(changes)
     return DailyStrategyEvidence(**fields)
@@ -89,7 +90,8 @@ def unavailable_evidence(**changes) -> DailyStrategyEvidence:
         "turnover_ratio": Decimal(0),
         "maximum_drawdown_ratio": Decimal(0),
         "maximum_adverse_excursion_ratio": Decimal(0),
-        "profit_factor": Decimal(0),
+        "profit_factor": None,
+        "profit_factor_status": "no_realized_pnl",
         "downside_deviation_ratio": Decimal(0),
         "expected_shortfall_10_ratio": Decimal(0),
         "median_daily_return_ratio": Decimal(0),
@@ -104,6 +106,22 @@ def unavailable_evidence(**changes) -> DailyStrategyEvidence:
     }
     fields.update(changes)
     return evidence(**fields)
+
+
+def test_daily_evidence_profit_factor_status_is_explicit_and_hash_bound() -> None:
+    no_losses = evidence(
+        gross_pnl=Decimal("5"), net_pnl=Decimal("5"), fees=Decimal(0),
+        gross_return_ratio=Decimal("0.005"), net_return_ratio=Decimal("0.005"),
+        profit_factor=None, profit_factor_status="positive_without_losses",
+        trade_pnls=(Decimal("2"), Decimal("3")),
+    )
+    assert no_losses.canonical_payload()["profit_factor"] is None
+    assert no_losses.canonical_payload()["profit_factor_status"] == "positive_without_losses"
+
+    with pytest.raises(ValueError, match="profit factor"):
+        evidence(profit_factor=None, profit_factor_status="finite")
+    with pytest.raises(ValueError, match="profit factor"):
+        evidence(profit_factor=Decimal(1), profit_factor_status="positive_without_losses")
 
 
 def assessment(component: str = "component-a", candidate: str = "candidate-a", **changes):
@@ -204,7 +222,7 @@ def test_daily_evidence_binds_three_day_anchor_to_exact_one_day_outcome():
     )
     assert item.outcome_start_at == item.cluster_anchor_at
     assert item.outcome_end_at - item.outcome_start_at == timedelta(days=1)
-    assert item.trade_pnls == (Decimal("2"), Decimal("3"))
+    assert item.trade_pnls == (Decimal("6"), Decimal("-1"))
     with pytest.raises(FrozenInstanceError):
         item.candidate_id = "changed"
 
@@ -223,6 +241,8 @@ def test_available_evidence_requires_an_exact_tuple_trade_ledger():
         net_return_ratio=Decimal(0),
         fees=Decimal(0),
         closed_trade_count=0,
+        profit_factor=None,
+        profit_factor_status="no_realized_pnl",
         trade_pnls=(),
     )
     assert zero_trade.trade_pnls == ()
@@ -249,6 +269,8 @@ def test_daily_evidence_consistency_is_independent_of_ambient_decimal_context():
         "net_return_ratio": value,
         "fees": Decimal(0),
         "closed_trade_count": 1,
+        "profit_factor": None,
+        "profit_factor_status": "positive_without_losses",
         "trade_pnls": (value,),
     }
 

@@ -7,6 +7,7 @@ import json
 import os
 import time
 import uuid
+import re
 from fnmatch import fnmatchcase
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ from scripts.scheduler_driven_scalping_backtest import (
     counter_microstructure_candidates,
     discovered_metrics_candidates,
     exact_historical_candidates,
+    feature_provider_config_hash,
     metrics_positioning_candidates,
     microstructure_alpha_candidates,
     multi_frequency_candidates,
@@ -42,9 +44,14 @@ from scripts.scheduler_driven_scalping_backtest import (
 )
 from src.domain.market import MarketSnapshot, Symbol
 from src.domain.regime import DailyStrategyEvidence
+from src.domain.regime.three_day_chart_features import THREE_DAY_CHART_FEATURE_SCHEMA_VERSION
+from src.domain.regime.three_day_daily_profile import decimal_arithmetic_context
+from src.domain.regime.three_day_daily_profile import PROFILE_ID
 
 
 EXPECTED_THREE_DAY_DAILY_CANDIDATE_COUNT = 459
+DAILY_EVIDENCE_CODE_VERSION = "daily-strategy-evidence-service-v1"
+DAILY_EVIDENCE_SCHEMA_VERSION = "daily-strategy-evidence-v1"
 DAILY_EVIDENCE_KEY_FIELDS = (
     "run_identity",
     "phase",
@@ -63,6 +70,17 @@ _CANDIDATE_FACTORIES = MappingProxyType({
     "microstructure": microstructure_alpha_candidates,
     "multi": multi_frequency_candidates,
 })
+_EXPECTED_CANDIDATE_GROUPS = frozenset(_CANDIDATE_FACTORIES)
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _canonical_cost_model() -> dict[str, str]:
+    return {
+        "venue": "binance_usd_m_futures",
+        "fee_rate_per_side": str(FEE_RATE),
+        "slippage_rate_per_side": str(SLIPPAGE_RATE),
+        "funding_fee": "excluded",
+    }
 
 
 def _canonical_json(value: object) -> str:
@@ -116,9 +134,11 @@ class DailyEvidenceRunIdentity:
     ordered_candidate_definition_hashes: tuple[tuple[str, str], ...]
     market_data_hash: str
     feature_cache_hash: str | None
-    feature_config_hash: str
+    feature_config_hash: str | None
     feature_cache_schema_version: str
     feature_provenance_hash: str
+    feature_source_coverage_hash: str
+    feature_unavailable_counts_hash: str
     engine_version: str
     cost_model: Mapping[str, object]
     symbol: str
@@ -134,6 +154,21 @@ class DailyEvidenceRunIdentity:
             raise ValueError("run identity phase interval must be increasing")
         if not isinstance(self.initial_equity, Decimal) or self.initial_equity <= 0:
             raise ValueError("run identity initial equity must be a positive Decimal")
+        if self.profile_id != PROFILE_ID or self.feature_schema_version != THREE_DAY_CHART_FEATURE_SCHEMA_VERSION:
+            raise ValueError("run identity research profile or feature schema is not canonical")
+        if self.code_version != DAILY_EVIDENCE_CODE_VERSION or self.evidence_schema_version != DAILY_EVIDENCE_SCHEMA_VERSION:
+            raise ValueError("run identity code or evidence schema version is not canonical")
+        for field in (
+            "model_artifact_hash", "candidate_universe_hash", "market_data_hash",
+            "feature_provenance_hash", "feature_source_coverage_hash",
+            "feature_unavailable_counts_hash",
+        ):
+            if _SHA256.fullmatch(str(getattr(self, field))) is None:
+                raise ValueError(f"run identity {field} must be a lowercase SHA256 hash")
+        for field in ("feature_cache_hash", "feature_config_hash"):
+            value = getattr(self, field)
+            if value is not None and _SHA256.fullmatch(str(value)) is None:
+                raise ValueError(f"run identity {field} must be null or a lowercase SHA256 hash")
         object.__setattr__(self, "ordered_candidate_definition_hashes",
                            tuple(self.ordered_candidate_definition_hashes))
         object.__setattr__(self, "cost_model", _freeze(dict(self.cost_model)))
@@ -155,6 +190,8 @@ class DailyEvidenceRunIdentity:
             "feature_config_hash": self.feature_config_hash,
             "feature_cache_schema_version": self.feature_cache_schema_version,
             "feature_provenance_hash": self.feature_provenance_hash,
+            "feature_source_coverage_hash": self.feature_source_coverage_hash,
+            "feature_unavailable_counts_hash": self.feature_unavailable_counts_hash,
             "engine_version": self.engine_version,
             "cost_model": _thaw(self.cost_model),
             "symbol": self.symbol,
@@ -167,6 +204,19 @@ class DailyEvidenceRunIdentity:
     @property
     def digest(self) -> str:
         return candidate_definition_hash(self.canonical_payload())
+
+
+def market_snapshot_hash(market: MarketSnapshot) -> str:
+    digest = hashlib.sha256()
+    for candle in market.candles:
+        payload = (
+            candle.opened_at.isoformat(), candle.closed_at.isoformat(),
+            str(candle.open_price), str(candle.high_price), str(candle.low_price),
+            str(candle.close_price), str(candle.volume),
+        )
+        digest.update(_canonical_json(payload).encode("utf-8"))
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def build_three_day_daily_candidate_manifest(
@@ -183,6 +233,10 @@ def build_three_day_daily_candidate_manifest(
     supplied = candidate_groups or {
         name: factory() for name, factory in _CANDIDATE_FACTORIES.items()
     }
+    if set(supplied) != _EXPECTED_CANDIDATE_GROUPS:
+        raise ValueError("candidate manifest requires exactly all eight public groups")
+    if any(not tuple(candidates) for candidates in supplied.values()):
+        raise ValueError("every public candidate group must be nonempty")
     unknown_groups = sorted(set(supplied) - set(status_by_group))
     if unknown_groups:
         raise ValueError(f"candidate groups are absent from deferred registry: {', '.join(unknown_groups)}")
@@ -358,6 +412,8 @@ def run_daily_strategy_evidence(
         raise ValueError("candidate universe hash does not match run identity")
     if manifest.ordered_definition_hashes != run_identity.ordered_candidate_definition_hashes:
         raise ValueError("candidate definition hashes do not match run identity")
+    if market_snapshot_hash(market) != run_identity.market_data_hash:
+        raise ValueError("market data hash does not match run identity")
     replay = replay_callable or run_scheduler_driven_backtest
     selected_symbol = symbol or market.symbol
     if selected_symbol != market.symbol or selected_symbol.pair != run_identity.symbol:
@@ -414,6 +470,13 @@ def run_daily_strategy_evidence(
                 initial_equity=run_identity.initial_equity,
                 include_trade_details=True,
                 force_close_at_end=True,
+            )
+            _validate_replay_provenance(
+                replay_result,
+                identity=run_identity,
+                provider=market_feature_provider,
+                outcome_start_at=outcome_start_at,
+                outcome_end_at=outcome_end_at,
             )
             evidence = _available_evidence(
                 replay_result, entry=entry, run_identity=run_identity,
@@ -490,6 +553,79 @@ def _hashes(identity: DailyEvidenceRunIdentity):
     }
 
 
+def _validate_replay_provenance(replay, *, identity, provider, outcome_start_at, outcome_end_at):
+    if not isinstance(replay, Mapping):
+        raise ValueError("canonical replay result must be a mapping")
+    required = {
+        "engine", "engine_version", "cost_model", "start_at", "end_at",
+        "feature_cache_hash", "feature_config_hash", "feature_cache_schema_version",
+        "feature_source_coverage", "feature_unavailable_counts", "feature_provenance",
+        "future_feature_access_count",
+    }
+    missing = sorted(required - set(replay))
+    if missing:
+        raise ValueError(f"canonical replay omitted provenance fields: {', '.join(missing)}")
+    if replay["engine"] != "scheduler_driven" or replay["engine_version"] != BACKTEST_ENGINE_VERSION:
+        raise ValueError("canonical replay engine identity mismatch")
+    if identity.engine_version != BACKTEST_ENGINE_VERSION:
+        raise ValueError("run identity engine version is not canonical")
+    expected_cost = _canonical_cost_model()
+    if replay["cost_model"] != expected_cost or _thaw(identity.cost_model) != expected_cost:
+        raise ValueError("canonical replay cost model mismatch")
+    if replay["start_at"] != outcome_start_at.isoformat() or replay["end_at"] != outcome_end_at.isoformat():
+        raise ValueError("canonical replay interval mismatch")
+    if replay["future_feature_access_count"] != 0:
+        raise ValueError("canonical replay reported future feature access")
+
+    if provider is not None:
+        required_provider_fields = (
+            "feature_cache_hash", "feature_cache_schema_version", "feature_source_coverage",
+            "feature_unavailable_counts", "feature_provenance",
+        )
+        missing_provider = tuple(field for field in required_provider_fields if not hasattr(provider, field))
+        if missing_provider:
+            raise ValueError(f"feature provider omitted provenance fields: {', '.join(missing_provider)}")
+    expected_cache = getattr(provider, "feature_cache_hash", None) if provider is not None else None
+    expected_coverage = getattr(provider, "feature_source_coverage", {}) if provider is not None else {}
+    expected_unavailable = getattr(provider, "feature_unavailable_counts", {}) if provider is not None else {}
+    expected_provenance = getattr(provider, "feature_provenance", {}) if provider is not None else {}
+    expected_schema = getattr(provider, "feature_cache_schema_version", None) if provider is not None else "none"
+    expected_config = feature_provider_config_hash(provider)
+    actual = {
+        "feature_cache_hash": expected_cache,
+        "feature_config_hash": expected_config,
+        "feature_cache_schema_version": expected_schema,
+        "feature_source_coverage": expected_coverage,
+        "feature_unavailable_counts": expected_unavailable,
+        "feature_provenance": expected_provenance,
+    }
+    for field, value in actual.items():
+        if replay[field] != value:
+            label = field.removeprefix("feature_").replace("_", " ")
+            raise ValueError(f"canonical replay {label} mismatch")
+    if provider is not None and expected_schema is None:
+        raise ValueError("feature cache schema is required")
+    if provider is not None and (
+        _SHA256.fullmatch(str(expected_cache)) is None
+        or not isinstance(expected_coverage, Mapping)
+        or not isinstance(expected_unavailable, Mapping)
+        or not isinstance(expected_provenance, Mapping)
+    ):
+        raise ValueError("feature provider provenance values are invalid")
+    if identity.feature_cache_hash != expected_cache:
+        raise ValueError("run identity feature cache hash mismatch")
+    if identity.feature_config_hash != expected_config:
+        raise ValueError("run identity feature config hash mismatch")
+    if identity.feature_cache_schema_version != expected_schema:
+        raise ValueError("run identity feature cache schema mismatch")
+    if identity.feature_provenance_hash != candidate_definition_hash(expected_provenance):
+        raise ValueError("run identity feature provenance mismatch")
+    if identity.feature_source_coverage_hash != candidate_definition_hash(expected_coverage):
+        raise ValueError("run identity feature source coverage mismatch")
+    if identity.feature_unavailable_counts_hash != candidate_definition_hash(expected_unavailable):
+        raise ValueError("run identity feature unavailable counts mismatch")
+
+
 def _base_evidence_fields(entry, identity, component_fingerprint, outcome_start_at):
     return {
         "component_fingerprint": component_fingerprint,
@@ -512,7 +648,8 @@ def _unavailable_evidence(*, reason, entry, run_identity, component_fingerprint,
         final_equity=run_identity.initial_equity, gross_pnl=zero, net_pnl=zero,
         gross_return_ratio=zero, net_return_ratio=zero, fees=zero, closed_trade_count=0,
         exposure_ratio=zero, turnover_ratio=zero, maximum_drawdown_ratio=zero,
-        maximum_adverse_excursion_ratio=zero, profit_factor=zero,
+        maximum_adverse_excursion_ratio=zero, profit_factor=None,
+        profit_factor_status="no_realized_pnl",
         downside_deviation_ratio=zero, expected_shortfall_10_ratio=zero,
         median_daily_return_ratio=zero, tenth_percentile_daily_return_ratio=zero,
         worst_seven_day_return_ratio=zero, return_without_best_episode_ratio=zero,
@@ -525,8 +662,8 @@ def _available_evidence(replay, *, entry, run_identity, component_fingerprint,
                         outcome_start_at, market):
     """Map one canonical day to the domain's finite single-day statistics.
 
-    Profit factor uses net trade PnLs and is zero when there is no loss
-    denominator. With one daily observation, median, p10, ES10, and worst-7-day
+    Profit factor uses net trade PnLs with an explicit undefined status when
+    there is no loss denominator. With one daily observation, median, p10, ES10, and worst-7-day
     are that observation; downside deviation is its negative-part magnitude;
     removing the sole best episode yields zero.
     """
@@ -540,28 +677,49 @@ def _available_evidence(replay, *, entry, run_identity, component_fingerprint,
         raise ValueError("canonical replay candidate hash mismatch")
     if replay["position_open_at_end"] is not False:
         raise ValueError("canonical daily replay left a position open")
-    initial = Decimal(str(replay["initial_equity"]))
-    final = Decimal(str(replay["final_equity"]))
-    gross = Decimal(str(replay["gross_pnl"]))
-    net = Decimal(str(replay["net_pnl"]))
-    fees = Decimal(str(replay["fee_paid"]))
+    initial = _replay_decimal(replay["initial_equity"], "initial equity", positive=True)
+    final = _replay_decimal(replay["final_equity"], "final equity")
+    gross = _replay_decimal(replay["gross_pnl"], "gross PnL")
+    net = _replay_decimal(replay["net_pnl"], "net PnL")
+    fees = _replay_decimal(replay["fee_paid"], "fees", nonnegative=True)
     if initial != run_identity.initial_equity or final != initial + net or gross - fees != net:
         raise ValueError("canonical replay accounting does not reconcile")
+    if not isinstance(replay["trades"], list):
+        raise ValueError("canonical replay trades must be a JSON list")
     trades = tuple(replay["trades"])
-    if int(replay["trade_count"]) != len(trades):
+    if (not isinstance(replay["trade_count"], int) or isinstance(replay["trade_count"], bool)
+            or replay["trade_count"] < 0 or replay["trade_count"] != len(trades)):
         raise ValueError("canonical replay trade count mismatch")
-    trade_pnls = tuple(Decimal(str(trade["net_pnl"])) for trade in trades)
-    if sum(trade_pnls, Decimal(0)) != net:
-        raise ValueError("canonical replay trade ledger does not reconcile")
-    positive = sum((value for value in trade_pnls if value > 0), Decimal(0))
-    negative = -sum((value for value in trade_pnls if value < 0), Decimal(0))
-    profit_factor = positive / negative if negative else Decimal(0)
-    exposure = min(Decimal(1), sum((Decimal(str(trade.get("holding_bars", 0))) for trade in trades), Decimal(0)) / Decimal(1440))
-    turnover = sum((
-        (Decimal(str(trade["entry_price"])) + Decimal(str(trade["exit_price"])))
-        * Decimal(str(trade["quantity"])) for trade in trades
-    ), Decimal(0)) / initial
-    daily_return = net / initial
+    audited = tuple(_validate_trade_payload(trade, entry) for trade in trades)
+    with decimal_arithmetic_context():
+        trade_pnls = tuple(item["net_pnl"] for item in audited)
+        trade_gross = sum((item["gross_pnl"] for item in audited), Decimal(0))
+        trade_fees = sum((item["fee_paid"] for item in audited), Decimal(0))
+        if sum(trade_pnls, Decimal(0)) != net or trade_gross != gross or trade_fees != fees:
+            raise ValueError("canonical replay trade ledger does not reconcile")
+        positive = sum((value for value in trade_pnls if value > 0), Decimal(0))
+        negative = -sum((value for value in trade_pnls if value < 0), Decimal(0))
+        profit_factor = positive / negative if negative else None
+        profit_factor_status = (
+            "finite" if negative else "positive_without_losses" if positive else "no_realized_pnl"
+        )
+        exposure = sum((Decimal(item["holding_bars"]) for item in audited), Decimal(0)) / Decimal(1440)
+        if not Decimal(0) <= exposure <= Decimal(1):
+            raise ValueError("canonical replay exposure is outside one isolated day")
+        turnover = sum((
+            (item["entry_price"] + item["exit_price"]) * item["quantity"] for item in audited
+        ), Decimal(0)) / initial
+        daily_return = net / initial
+    reported_return = _replay_decimal(replay["return_ratio"], "return ratio")
+    if reported_return != daily_return:
+        raise ValueError("canonical replay return ratio mismatch")
+    drawdown = _replay_decimal(replay["max_drawdown_ratio"], "maximum drawdown", nonnegative=True)
+    aggregate_mae = _replay_decimal(
+        replay["maximum_adverse_excursion_ratio"], "maximum adverse excursion", nonnegative=True
+    )
+    expected_mae = max((item["maximum_adverse_excursion_ratio"] for item in audited), default=Decimal(0))
+    if aggregate_mae != expected_mae:
+        raise ValueError("canonical replay maximum adverse excursion aggregate mismatch")
     downside = -daily_return if daily_return < 0 else Decimal(0)
     top_five = (
         sum(sorted((value for value in trade_pnls if value > 0), reverse=True)[:5], Decimal(0)) / positive
@@ -572,9 +730,10 @@ def _available_evidence(replay, *, entry, run_identity, component_fingerprint,
         final_equity=final, gross_pnl=gross, net_pnl=net,
         gross_return_ratio=gross / initial, net_return_ratio=daily_return, fees=fees,
         closed_trade_count=len(trades), exposure_ratio=exposure, turnover_ratio=turnover,
-        maximum_drawdown_ratio=Decimal(str(replay["max_drawdown_ratio"])),
-        maximum_adverse_excursion_ratio=Decimal(str(replay["maximum_adverse_excursion_ratio"])),
+        maximum_drawdown_ratio=drawdown,
+        maximum_adverse_excursion_ratio=aggregate_mae,
         profit_factor=profit_factor,
+        profit_factor_status=profit_factor_status,
         downside_deviation_ratio=downside, expected_shortfall_10_ratio=daily_return,
         median_daily_return_ratio=daily_return, tenth_percentile_daily_return_ratio=daily_return,
         worst_seven_day_return_ratio=daily_return, return_without_best_episode_ratio=Decimal(0),
@@ -584,11 +743,83 @@ def _available_evidence(replay, *, entry, run_identity, component_fingerprint,
     )
 
 
+_REQUIRED_TRADE_FIELDS = frozenset({
+    "entry_at", "exit_at", "entry_price", "exit_price", "direction", "quantity",
+    "margin", "gross_pnl", "net_pnl", "fee_paid", "exit_reason", "holding_bars",
+    "owner_strategy_profile_id", "owner_candidate_definition_hash", "owner_guard_hash",
+    "owner_leverage", "owner_max_holding_bars", "maximum_adverse_excursion_ratio",
+})
+
+
+def _replay_decimal(value, field, *, positive=False, nonnegative=False):
+    try:
+        result = Decimal(str(value))
+    except Exception as error:
+        raise ValueError(f"canonical replay {field} must be a decimal") from error
+    if not result.is_finite() or (positive and result <= 0) or (nonnegative and result < 0):
+        raise ValueError(f"canonical replay {field} is invalid")
+    return result
+
+
+def _validate_trade_payload(trade, entry):
+    if not isinstance(trade, Mapping):
+        raise ValueError("canonical replay trade must be an object")
+    missing = sorted(_REQUIRED_TRADE_FIELDS - set(trade))
+    if missing:
+        raise ValueError(f"canonical replay trade omitted {' '.join(missing).replace('_', ' ')}")
+    holding = trade["holding_bars"]
+    if not isinstance(holding, int) or isinstance(holding, bool) or holding < 0:
+        raise ValueError("canonical replay trade holding bars is invalid")
+    if trade["direction"] not in {"long", "short"}:
+        raise ValueError("canonical replay trade direction is invalid")
+    if not isinstance(trade["exit_reason"], str) or not trade["exit_reason"]:
+        raise ValueError("canonical replay trade exit reason is invalid")
+    if trade["owner_strategy_profile_id"] != entry.candidate_id:
+        raise ValueError("canonical replay trade owner candidate mismatch")
+    if trade["owner_candidate_definition_hash"] != entry.definition_hash:
+        raise ValueError("canonical replay trade owner candidate hash mismatch")
+    if _SHA256.fullmatch(str(trade["owner_guard_hash"])) is None:
+        raise ValueError("canonical replay trade owner guard hash is invalid")
+    if (not isinstance(trade["owner_max_holding_bars"], int)
+            or isinstance(trade["owner_max_holding_bars"], bool)
+            or trade["owner_max_holding_bars"] <= 0):
+        raise ValueError("canonical replay trade owner maximum holding bars is invalid")
+    for field in ("entry_at", "exit_at"):
+        try:
+            timestamp = datetime.fromisoformat(str(trade[field]))
+        except ValueError as error:
+            raise ValueError(f"canonical replay trade {field.replace('_', ' ')} is invalid") from error
+        if timestamp.tzinfo is not timezone.utc:
+            raise ValueError(f"canonical replay trade {field.replace('_', ' ')} must be canonical UTC")
+    audited = {
+        "entry_price": _replay_decimal(trade["entry_price"], "trade entry price", positive=True),
+        "exit_price": _replay_decimal(trade["exit_price"], "trade exit price", positive=True),
+        "quantity": _replay_decimal(trade["quantity"], "trade quantity", positive=True),
+        "margin": _replay_decimal(trade["margin"], "trade margin", positive=True),
+        "gross_pnl": _replay_decimal(trade["gross_pnl"], "trade gross PnL"),
+        "net_pnl": _replay_decimal(trade["net_pnl"], "trade net PnL"),
+        "fee_paid": _replay_decimal(trade["fee_paid"], "trade fees", nonnegative=True),
+        "holding_bars": holding,
+        "maximum_adverse_excursion_ratio": _replay_decimal(
+            trade["maximum_adverse_excursion_ratio"], "trade maximum adverse excursion", nonnegative=True
+        ),
+    }
+    _replay_decimal(trade["owner_leverage"], "trade owner leverage", positive=True)
+    expected_gross = (
+        (audited["exit_price"] - audited["entry_price"]) * audited["quantity"]
+        if trade["direction"] == "long"
+        else (audited["entry_price"] - audited["exit_price"]) * audited["quantity"]
+    )
+    if audited["gross_pnl"] != expected_gross or audited["gross_pnl"] - audited["fee_paid"] != audited["net_pnl"]:
+        raise ValueError("canonical replay trade accounting does not reconcile")
+    return audited
+
+
 def _evidence_from_payload(payload: Mapping[str, object]) -> DailyStrategyEvidence:
     decimals = {
         "initial_equity", "final_equity", "gross_pnl", "net_pnl", "gross_return_ratio",
         "net_return_ratio", "fees", "exposure_ratio", "turnover_ratio",
-        "maximum_drawdown_ratio", "maximum_adverse_excursion_ratio", "profit_factor",
+        "maximum_drawdown_ratio", "maximum_adverse_excursion_ratio",
         "downside_deviation_ratio", "expected_shortfall_10_ratio", "median_daily_return_ratio",
         "tenth_percentile_daily_return_ratio", "worst_seven_day_return_ratio",
         "return_without_best_episode_ratio", "top_episode_profit_share", "top_five_trade_profit_share",
@@ -608,6 +839,8 @@ def _evidence_from_payload(payload: Mapping[str, object]) -> DailyStrategyEviden
         candidate_hash=str(payload["candidate_hash"]), model_artifact_hash=str(payload["model_artifact_hash"]),
         data_hash=str(payload["data_hash"]), cost_config_hash=str(payload["cost_config_hash"]),
         engine_config_hash=str(payload["engine_config_hash"]),
+        profit_factor=None if payload["profit_factor"] is None else Decimal(str(payload["profit_factor"])),
+        profit_factor_status=str(payload["profit_factor_status"]),
         trade_pnls=None if payload["trade_pnls"] is None else tuple(Decimal(str(value)) for value in payload["trade_pnls"]),
         **values,
     )
@@ -637,6 +870,11 @@ class AppendOnlyEvidenceLedger:
         return key
 
     def load(self) -> LoadedEvidenceRows:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with evidence_file_lock(self.path):
+            return self._load_unlocked()
+
+    def _load_unlocked(self) -> LoadedEvidenceRows:
         if not self.path.exists():
             return LoadedEvidenceRows()
         rows = []
@@ -652,11 +890,7 @@ class AppendOnlyEvidenceLedger:
                 line_number += 1
                 if not raw.strip():
                     continue
-                try:
-                    row = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError) as error:
-                    if raw.endswith(b"\n"):
-                        raise ValueError(f"malformed interior JSONL row on line {line_number}") from error
+                if not raw.endswith(b"\n"):
                     digest = hashlib.sha256(raw).hexdigest()
                     quarantine = self.path.with_name(
                         f"{self.path.name}.truncated-{digest[:12]}.jsonl"
@@ -674,6 +908,10 @@ class AppendOnlyEvidenceLedger:
                         "truncated_to_byte": offset,
                     }
                     break
+                try:
+                    row = json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise ValueError(f"malformed interior JSONL row on line {line_number}") from error
                 if not isinstance(row, dict):
                     raise ValueError(f"JSONL row on line {line_number} must be an object")
                 key = self._key(row)
@@ -695,7 +933,7 @@ class AppendOnlyEvidenceLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         selected_lock = lock_factory or evidence_file_lock
         with selected_lock(self.path):
-            rows = rows_loader() if rows_loader is not None else self.load()
+            rows = rows_loader() if rows_loader is not None else self._load_unlocked()
             if self.strict_identity and rows and rows[0].get("run_identity") != normalized.get("run_identity"):
                 raise ValueError("run_identity does not match existing evidence ledger")
             key = self._key(normalized)
@@ -858,9 +1096,12 @@ def _windows_process_is_alive(pid: int) -> bool:
 
 __all__ = [
     "AppendOnlyEvidenceLedger",
+    "DAILY_EVIDENCE_CODE_VERSION",
     "DAILY_EVIDENCE_KEY_FIELDS",
+    "DAILY_EVIDENCE_SCHEMA_VERSION",
     "DailyCandidateManifestEntry",
     "LoadedEvidenceRows",
     "ThreeDayDailyCandidateManifest",
     "build_three_day_daily_candidate_manifest",
+    "market_snapshot_hash",
 ]

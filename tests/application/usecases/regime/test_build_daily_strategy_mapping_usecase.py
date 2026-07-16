@@ -63,6 +63,12 @@ def evidence(
     net_pnl = initial * daily_return if available else ZERO
     if trades is None:
         trades = (net_pnl,) if available else None
+    positive = sum((value for value in (trades or ()) if value > 0), ZERO)
+    losses = -sum((value for value in (trades or ()) if value < 0), ZERO)
+    profit_factor = positive / losses if losses else None
+    profit_factor_status = (
+        "finite" if losses else "positive_without_losses" if positive else "no_realized_pnl"
+    )
     return DailyStrategyEvidence(
         component_fingerprint=component,
         candidate_id=candidate,
@@ -83,7 +89,8 @@ def evidence(
         turnover_ratio=Decimal("0.1") if available else ZERO,
         maximum_drawdown_ratio=ZERO,
         maximum_adverse_excursion_ratio=ZERO,
-        profit_factor=Decimal("1") if available else ZERO,
+        profit_factor=profit_factor,
+        profit_factor_status=profit_factor_status,
         downside_deviation_ratio=ZERO,
         expected_shortfall_10_ratio=daily_return if available else ZERO,
         median_daily_return_ratio=daily_return if available else ZERO,
@@ -662,8 +669,10 @@ def test_no_eligible_candidate_produces_explicit_cash_with_all_reasons() -> None
             net_pnl=ZERO,
             gross_return_ratio=ZERO,
             net_return_ratio=ZERO,
-            closed_trade_count=0,
-            trade_pnls=(),
+                closed_trade_count=0,
+                profit_factor=None,
+                profit_factor_status="no_realized_pnl",
+                trade_pnls=(),
         )
         for row in command.evidence_rows
     )

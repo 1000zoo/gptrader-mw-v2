@@ -134,6 +134,8 @@ Each Mapping Fit and Validation day runs every available candidate through the a
 
 Evidence stores net return, gross return, fees, trade count, exposure, turnover, maximum drawdown, adverse excursion, profit factor, downside deviation, expected shortfall, median and 10th-percentile daily return, worst block, return without the best day, top-one-day PnL share, top-five-trade PnL share, and chronological coverage.
 
+Profit factor is never represented by a numeric sentinel. Evidence binds either an exact finite gain/loss ratio with status `finite`, `positive_without_losses` with a null ratio, or `no_realized_pnl` with a null ratio.
+
 ## Strict Mapping Eligibility
 
 Daily returns remain serially dependent. Eligibility therefore uses a moving-block bootstrap with:

@@ -653,7 +653,6 @@ def _validate_evidence_grid(
                     row.turnover_ratio,
                     row.maximum_drawdown_ratio,
                     row.maximum_adverse_excursion_ratio,
-                    row.profit_factor,
                     row.downside_deviation_ratio,
                     row.expected_shortfall_10_ratio,
                     row.median_daily_return_ratio,
@@ -664,8 +663,10 @@ def _validate_evidence_grid(
                     row.top_five_trade_profit_share,
                 )
             )
-            or row.closed_trade_count != 0
-            or row.trade_pnls is not None
+                or row.closed_trade_count != 0
+                or row.trade_pnls is not None
+                or row.profit_factor is not None
+                or row.profit_factor_status != "no_realized_pnl"
         ):
             raise ValueError("unavailable evidence cannot contain performance")
         if row.availability_status == "available":

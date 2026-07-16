@@ -79,7 +79,8 @@ class DailyStrategyEvidence:
     turnover_ratio: Decimal
     maximum_drawdown_ratio: Decimal
     maximum_adverse_excursion_ratio: Decimal
-    profit_factor: Decimal
+    profit_factor: Decimal | None
+    profit_factor_status: Literal["finite", "positive_without_losses", "no_realized_pnl"]
     downside_deviation_ratio: Decimal
     expected_shortfall_10_ratio: Decimal
     median_daily_return_ratio: Decimal
@@ -130,7 +131,6 @@ class DailyStrategyEvidence:
             "turnover_ratio",
             "maximum_drawdown_ratio",
             "maximum_adverse_excursion_ratio",
-            "profit_factor",
             "downside_deviation_ratio",
             "expected_shortfall_10_ratio",
             "median_daily_return_ratio",
@@ -156,8 +156,8 @@ class DailyStrategyEvidence:
         _nonnegative_integer(self.closed_trade_count, "closed_trade_count")
         if not Decimal(0) <= self.exposure_ratio <= Decimal(1):
             raise ValueError("exposure_ratio must be between zero and one")
-        if self.turnover_ratio < 0 or self.profit_factor < 0 or self.downside_deviation_ratio < 0:
-            raise ValueError("turnover, profit factor, and downside deviation must be nonnegative")
+        if self.turnover_ratio < 0 or self.downside_deviation_ratio < 0:
+            raise ValueError("turnover and downside deviation must be nonnegative")
         for field in (
             "maximum_drawdown_ratio",
             "maximum_adverse_excursion_ratio",
@@ -188,7 +188,6 @@ class DailyStrategyEvidence:
                     self.turnover_ratio,
                     self.maximum_drawdown_ratio,
                     self.maximum_adverse_excursion_ratio,
-                    self.profit_factor,
                     self.downside_deviation_ratio,
                     self.expected_shortfall_10_ratio,
                     self.median_daily_return_ratio,
@@ -220,6 +219,26 @@ class DailyStrategyEvidence:
             with decimal_arithmetic_context():
                 if sum(trade_pnls, Decimal(0)) != self.net_pnl:
                     raise ValueError("trade PnLs must reconcile to net PnL")
+            with decimal_arithmetic_context():
+                positive = sum((value for value in trade_pnls if value > 0), Decimal(0))
+                losses = -sum((value for value in trade_pnls if value < 0), Decimal(0))
+                self._validate_profit_factor(positive, losses)
+        else:
+            self._validate_profit_factor(Decimal(0), Decimal(0))
+
+    def _validate_profit_factor(self, positive: Decimal, losses: Decimal) -> None:
+        if self.profit_factor_status == "finite":
+            _finite_decimal(self.profit_factor, "profit factor")
+            if losses <= 0 or self.profit_factor < 0 or self.profit_factor != positive / losses:
+                raise ValueError("finite profit factor requires losses and the exact gain/loss ratio")
+        elif self.profit_factor_status == "positive_without_losses":
+            if self.profit_factor is not None or positive <= 0 or losses != 0:
+                raise ValueError("positive-without-losses profit factor requires gains, no losses, and no value")
+        elif self.profit_factor_status == "no_realized_pnl":
+            if self.profit_factor is not None or positive != 0 or losses != 0:
+                raise ValueError("no-realized-PnL profit factor requires no gains, losses, or value")
+        else:
+            raise ValueError("profit factor status is invalid")
 
     def canonical_payload(self) -> dict[str, object]:
         decimal_fields = (
@@ -234,7 +253,6 @@ class DailyStrategyEvidence:
             "turnover_ratio",
             "maximum_drawdown_ratio",
             "maximum_adverse_excursion_ratio",
-            "profit_factor",
             "downside_deviation_ratio",
             "expected_shortfall_10_ratio",
             "median_daily_return_ratio",
@@ -267,6 +285,8 @@ class DailyStrategyEvidence:
             "trade_pnls": None
             if self.trade_pnls is None
             else [_decimal_text(value) for value in self.trade_pnls],
+            "profit_factor": None if self.profit_factor is None else _decimal_text(self.profit_factor),
+            "profit_factor_status": self.profit_factor_status,
         }
         payload.update(
             {field: _decimal_text(getattr(self, field)) for field in decimal_fields}

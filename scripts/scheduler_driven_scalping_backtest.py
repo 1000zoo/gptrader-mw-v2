@@ -95,6 +95,7 @@ from src.interfaces.scheduler import RegimeSelectionScheduler  # noqa: E402
 SYMBOL = Symbol("BTC", "USDT")
 TIMEFRAME = Timeframe(1, "m")
 BACKTEST_ENGINE_VERSION = "scheduler-driven-scalping-v2"
+FEATURE_CACHE_SCHEMA_VERSION = "scheduler-market-feature-cache-v1"
 GENERATOR_ID = "scheduler-driven-live-scalp-multi-t1-r1-b4-tbr"
 CANDLE_LIMIT = 262
 INITIAL_EQUITY = Decimal("10000")
@@ -236,7 +237,7 @@ class BacktestTrade:
     owner_guard_hash: str | None = None
     owner_leverage: Decimal | None = None
     owner_max_holding_bars: int | None = None
-    maximum_adverse_excursion_ratio: Decimal = Decimal("0")
+    maximum_adverse_excursion_ratio: Decimal | None = None
 
 
 class BacktestMarketSnapshot:
@@ -444,6 +445,7 @@ def load_market_feature_cache(
     provider.feature_source_coverage = dict(sorted(source_coverage.items()))
     provider.feature_unavailable_counts = dict(sorted(unavailable_counts.items()))
     provider.feature_provenance = provenance
+    provider.feature_cache_schema_version = FEATURE_CACHE_SCHEMA_VERSION
     return LoadedMarketFeatureCache(
         provider=provider,
         cache_hash=cache_hash,
@@ -898,6 +900,7 @@ def run_scheduler_driven_backtest(
     )
     result = {
         "engine": "scheduler_driven",
+        "engine_version": BACKTEST_ENGINE_VERSION,
         "candidate_id": candidate.candidate_id,
         "symbol": symbol.pair,
         "scheduler_path": "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute",
@@ -929,6 +932,11 @@ def run_scheduler_driven_backtest(
         "feature_source_coverage": feature_source_coverage,
         "feature_unavailable_counts": feature_unavailable_counts,
         "feature_provenance": feature_provenance,
+        "feature_cache_schema_version": getattr(
+            feature_provider,
+            "feature_cache_schema_version",
+            "none" if market_feature_provider is None else None,
+        ),
         "future_feature_access_count": 0,
     }
     if include_trade_details:
@@ -3270,6 +3278,12 @@ def _maximum_adverse_excursion_ratio(
 
 
 def _trade_payload(trade: BacktestTrade) -> dict[str, object]:
+    if (
+        not isinstance(trade.maximum_adverse_excursion_ratio, Decimal)
+        or not trade.maximum_adverse_excursion_ratio.is_finite()
+        or trade.maximum_adverse_excursion_ratio < 0
+    ):
+        raise ValueError("trade maximum adverse excursion audit is required")
     return {
         "entry_at": trade.entry_at.isoformat() if trade.entry_at is not None else None,
         "exit_at": trade.exit_at.isoformat() if trade.exit_at is not None else None,
