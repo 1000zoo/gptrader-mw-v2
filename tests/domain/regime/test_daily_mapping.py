@@ -81,7 +81,10 @@ def assessment(component: str = "component-a", candidate: str = "candidate-a", *
         "component_fingerprint": component,
         "candidate_id": candidate,
         "candidate_hash": sha(candidate),
+        "assigned_day_count": 40,
         "episode_count": 35,
+        "unavailable_day_count": 5,
+        "unavailable_reason_counts": (("feature_unavailable", 5),),
         "calendar_month_count": 4,
         "closed_trade_count": 40,
         "mean_daily_return_ratio": Decimal("0.003"),
@@ -98,6 +101,24 @@ def assessment(component: str = "component-a", candidate: str = "candidate-a", *
     }
     fields.update(changes)
     return DailyCandidateAssessment(**fields)
+
+
+def test_assessment_binds_assigned_available_and_unavailable_audit_counts():
+    item = assessment()
+
+    assert item.assigned_day_count == 40
+    assert item.episode_count == 35
+    assert item.unavailable_day_count == 5
+    assert item.unavailable_reason_counts == (("feature_unavailable", 5),)
+
+    with pytest.raises(ValueError, match="assigned day count"):
+        assessment(assigned_day_count=39)
+    with pytest.raises(ValueError, match="unavailable reason counts"):
+        assessment(unavailable_reason_counts=(("feature_unavailable", 4),))
+    with pytest.raises(ValueError, match="canonical sorted"):
+        assessment(
+            unavailable_reason_counts=(("warmup_missing", 2), ("feature_unavailable", 3))
+        )
 
 
 def artifact(**changes) -> DailyStrategyMappingArtifact:
@@ -387,6 +408,22 @@ def test_artifact_hash_preserves_adjacent_high_precision_decimals():
     ) != daily_mapping_artifact_hash(
         replace(first, candidate_assessments=adjacent_assessments)
     )
+
+
+def test_artifact_hash_binds_unavailable_audit_counts():
+    first = artifact()
+    changed = replace(
+        first,
+        candidate_assessments=(
+            replace(
+                first.candidate_assessments[0],
+                unavailable_reason_counts=(("different_reason", 5),),
+            ),
+            *first.candidate_assessments[1:],
+        ),
+    )
+
+    assert daily_mapping_artifact_hash(first) != daily_mapping_artifact_hash(changed)
 
 
 def test_artifact_hash_is_independent_of_decimal_context_precision():

@@ -249,7 +249,10 @@ class DailyCandidateAssessment:
     component_fingerprint: str
     candidate_id: str
     candidate_hash: str
+    assigned_day_count: int
     episode_count: int
+    unavailable_day_count: int
+    unavailable_reason_counts: tuple[tuple[str, int], ...]
     calendar_month_count: int
     closed_trade_count: int
     mean_daily_return_ratio: Decimal
@@ -268,8 +271,36 @@ class DailyCandidateAssessment:
         _text(self.component_fingerprint, "component_fingerprint")
         _text(self.candidate_id, "candidate_id")
         _hash(self.candidate_hash, "candidate_hash")
-        for field in ("episode_count", "calendar_month_count", "closed_trade_count"):
+        for field in (
+            "assigned_day_count",
+            "episode_count",
+            "unavailable_day_count",
+            "calendar_month_count",
+            "closed_trade_count",
+        ):
             _nonnegative_integer(getattr(self, field), field)
+        if self.assigned_day_count != self.episode_count + self.unavailable_day_count:
+            raise ValueError("assigned day count must equal available and unavailable days")
+        unavailable_reason_counts = tuple(self.unavailable_reason_counts)
+        if any(
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not isinstance(item[0], str)
+            or not item[0]
+            or item[0] != item[0].strip()
+            or not isinstance(item[1], int)
+            or isinstance(item[1], bool)
+            or item[1] <= 0
+            for item in unavailable_reason_counts
+        ):
+            raise ValueError("unavailable reason counts must contain canonical reasons and positive counts")
+        if unavailable_reason_counts != tuple(sorted(unavailable_reason_counts)) or len(
+            {reason for reason, _ in unavailable_reason_counts}
+        ) != len(unavailable_reason_counts):
+            raise ValueError("unavailable reason counts must be unique and canonical sorted")
+        if sum((count for _, count in unavailable_reason_counts), 0) != self.unavailable_day_count:
+            raise ValueError("unavailable reason counts must sum to unavailable day count")
+        object.__setattr__(self, "unavailable_reason_counts", unavailable_reason_counts)
         decimal_fields = (
             "mean_daily_return_ratio",
             "median_daily_return_ratio",
@@ -490,7 +521,13 @@ class DailyStrategyMappingArtifact:
                     "component_fingerprint": item.component_fingerprint,
                     "candidate_id": item.candidate_id,
                     "candidate_hash": item.candidate_hash,
+                    "assigned_day_count": item.assigned_day_count,
                     "episode_count": item.episode_count,
+                    "unavailable_day_count": item.unavailable_day_count,
+                    "unavailable_reason_counts": [
+                        [reason, count]
+                        for reason, count in item.unavailable_reason_counts
+                    ],
                     "calendar_month_count": item.calendar_month_count,
                     "closed_trade_count": item.closed_trade_count,
                     "mean_daily_return_ratio": _decimal_text(item.mean_daily_return_ratio),

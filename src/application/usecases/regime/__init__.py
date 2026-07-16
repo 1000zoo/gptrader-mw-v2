@@ -19,6 +19,11 @@ from src.application.usecases.regime.build_strategy_mapping_usecase import (
     BuildStrategyMappingUseCase,
     corrected_lower_bound,
 )
+from src.application.usecases.regime.build_daily_strategy_mapping_usecase import (
+    BuildDailyStrategyMappingCommand,
+    BuildDailyStrategyMappingResult,
+    BuildDailyStrategyMappingUseCase,
+)
 from src.application.usecases.regime.select_strategy_usecase import (
     SelectStrategyCommand,
     SelectStrategyUseCase,
@@ -42,6 +47,9 @@ __all__ = [
     "BuildStrategyMappingResult",
     "BuildStrategyMappingUseCase",
     "corrected_lower_bound",
+    "BuildDailyStrategyMappingCommand",
+    "BuildDailyStrategyMappingResult",
+    "BuildDailyStrategyMappingUseCase",
     "SelectStrategyCommand",
     "SelectStrategyUseCase",
     "SelectionConfidenceThresholds",
