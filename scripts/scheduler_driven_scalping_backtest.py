@@ -9,6 +9,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from enum import Enum
 from pathlib import Path
 from typing import Mapping, Protocol
 
@@ -32,13 +33,17 @@ from src.application.usecases.trade import (  # noqa: E402
 from src.domain.execution import OrderRequest, OrderResult  # noqa: E402
 from src.domain.indicator import IndicatorSet  # noqa: E402
 from src.domain.market import MarketSnapshot, Symbol, Timeframe  # noqa: E402
-from src.domain.market_feature import MarketFeatureSet, MarketFeatureValue  # noqa: E402
+from src.domain.market_feature import (  # noqa: E402
+    MARKET_FEATURES_METADATA_KEY,
+    MarketFeatureSet,
+    MarketFeatureValue,
+)
 from src.domain.ports import MarketFeatureProviderPort, SignalLogEntry  # noqa: E402
 from src.domain.risk import ExposureLimit  # noqa: E402
 from src.domain.signal import Signal, SignalDirection  # noqa: E402
 from src.domain.signal_generator import CompositeSignalGenerator  # noqa: E402
 from src.domain.signal_generator.signal_generator import GeneratedSignal  # noqa: E402
-from src.domain.strategy import Strategy  # noqa: E402
+from src.domain.strategy import Strategy, StrategyContext  # noqa: E402
 from src.domain.strategy.implementations.chart_pattern_strategy import (  # noqa: E402
     ChartPatternStrategy,
 )
@@ -74,7 +79,12 @@ from src.infrastructure.market_feature import (  # noqa: E402
 )
 from src.observability.logging import configure_runtime_logging  # noqa: E402
 from src.application.services.chart_feature_extractor import ChartFeatureExtractor  # noqa: E402
-from src.application.usecases.regime import SelectStrategyCommand, SelectStrategyUseCase  # noqa: E402
+from src.application.usecases.regime import (  # noqa: E402
+    DailySelectStrategyCommand,
+    SelectDailyStrategyUseCase,
+    SelectStrategyCommand,
+    SelectStrategyUseCase,
+)
 from src.domain.ports.regime_selection_state_repository_port import ConcurrentSelectionStateError  # noqa: E402
 from src.domain.regime.model import ClusterAssignment, RegimeModelArtifact  # noqa: E402
 from src.domain.regime.selection import SelectionArtifactSnapshot  # noqa: E402
@@ -83,6 +93,14 @@ from src.domain.regime.mapping import (  # noqa: E402
     StrategyMappingArtifact,
     candidate_definition_hash as mapping_candidate_definition_hash,
     candidate_universe_hash as mapping_candidate_universe_hash,
+)
+from src.domain.regime.daily_mapping import (  # noqa: E402
+    DailyStrategyMappingArtifact,
+    daily_mapping_artifact_hash,
+)
+from src.domain.regime.selection import (  # noqa: E402
+    AuditedSelectStrategyResult,
+    SelectionAuditRecord,
 )
 from src.infrastructure.regime import SklearnRegimeModel  # noqa: E402
 from src.infrastructure.regime.json_regime_artifact_repository import (  # noqa: E402
@@ -107,6 +125,15 @@ TRAIN_START = datetime(2025, 11, 9, 0, 0, tzinfo=timezone.utc)
 TRAIN_END = datetime(2026, 5, 9, 0, 0, tzinfo=timezone.utc)
 TEST_START = TRAIN_END
 TEST_END = datetime(2026, 7, 9, 0, 0, tzinfo=timezone.utc)
+
+
+class PositionExitPolicy(Enum):
+    ENTRY_OWNER_ONLY = "entry_owner_only"
+    ACTIVE_STRATEGY_OPPOSITE = "active_strategy_opposite"
+
+
+# Explicit daily name retained for callers that prefer a scope-specific type.
+DailyPositionExitPolicy = PositionExitPolicy
 WALK_FORWARD_FOLDS = (
     (
         datetime(2025, 7, 1, 0, 0, tzinfo=timezone.utc),
@@ -212,6 +239,7 @@ class BacktestPosition:
     owner_guard_hash: str | None = None
     owner_leverage: Decimal | None = None
     owner_max_holding_bars: int | None = None
+    owner_max_holding_deadline: datetime | None = None
 
     @property
     def notional(self) -> Decimal:
@@ -238,6 +266,10 @@ class BacktestTrade:
     owner_leverage: Decimal | None = None
     owner_max_holding_bars: int | None = None
     maximum_adverse_excursion_ratio: Decimal | None = None
+    owner_take_profit: Decimal | None = None
+    owner_stop_loss: Decimal | None = None
+    owner_max_holding_deadline: datetime | None = None
+    exit_audit_record: SelectionAuditRecord | None = None
 
 
 class BacktestMarketSnapshot:
@@ -966,6 +998,7 @@ class _ReplaySelectionRepository:
     def __init__(self) -> None:
         self.state = None
         self.commits: dict[tuple[str, datetime, str], object] = {}
+        self.audited_commits: dict[tuple[str, datetime, str], AuditedSelectStrategyResult] = {}
 
     def load(self, symbol: str):
         if self.state is not None and self.state.symbol != symbol:
@@ -993,6 +1026,29 @@ class _ReplaySelectionRepository:
         self.commits[key] = result
         return result
 
+    def find_committed_audited(self, symbol, boundary_at, evaluated_artifact_identity):
+        return self.audited_commits.get(
+            (symbol, boundary_at, evaluated_artifact_identity)
+        )
+
+    def commit_audited(self, expected_state_version, result):
+        if not isinstance(result, AuditedSelectStrategyResult):
+            raise ValueError("result must be an AuditedSelectStrategyResult")
+        base = self.commit(expected_state_version, result.base_result)
+        key = (
+            result.state.symbol,
+            result.state.last_boundary_at,
+            result.evaluated_artifact_identity,
+        )
+        existing = self.audited_commits.get(key)
+        if existing is not None:
+            if existing.audit_record.audit_hash != result.audit_record.audit_hash:
+                raise ValueError("conflicting boundary audit")
+            return existing
+        committed = AuditedSelectStrategyResult(base, result.audit_record)
+        self.audited_commits[key] = committed
+        return committed
+
     def list_events(self, symbol):
         return tuple(
             event
@@ -1006,11 +1062,15 @@ class _ReplaySelectionRepository:
 class _RegimeCandidateBundle:
     candidate: SchedulerBacktestCandidate
     scheduler: TradeScheduler
+    signal_generator: GuardedSignalGenerator
+    feature_provider: MarketFeatureProviderPort
     guard: DefensiveGuard
     audited_candidate_definition_hash: str
     guard_hash: str
     signal_attempts: int = 0
+    exit_signal_attempts: int = 0
     skipped_by_guard: int = 0
+    feature_unavailable_holds: int = 0
 
 
 def _audited_candidate_hash(
@@ -1121,6 +1181,8 @@ def _build_regime_bundle(
     return _RegimeCandidateBundle(
         candidate=candidate,
         scheduler=scheduler,
+        signal_generator=generator,
+        feature_provider=feature_provider,
         guard=DefensiveGuard(candidate.guard, initial_equity=initial_equity),
         audited_candidate_definition_hash=audited_candidate_definition_hash,
         guard_hash=candidate_definition_hash(payload["guard"]),
@@ -1495,6 +1557,591 @@ def run_scheduler_driven_regime_backtest(
         ),
         "signal_discontinuity_definition": "active_signal_generator_identity_changes_v1",
     }
+
+
+def _evaluate_regime_candidate_signal(
+    bundle: _RegimeCandidateBundle,
+    *,
+    market_data: CursorMarketData,
+    signal_log: InMemorySignalLogRepository,
+    symbol: Symbol,
+    signal_id: str,
+    phase: str,
+) -> tuple[GeneratedSignal, tuple[str, ...]]:
+    """Evaluate the entry generator without invoking any execution/risk side effects."""
+    if phase not in {"entry", "exit_only"}:
+        raise ValueError("signal phase must be entry or exit_only")
+    snapshot = market_data.load_snapshot(symbol, TIMEFRAME, bundle.candidate.candle_limit)
+    if len(snapshot.candles) < bundle.candidate.candle_limit:
+        raise LookupError("insufficient_candidate_warmup")
+    features = bundle.feature_provider.load_features(
+        symbol=symbol,
+        timeframe=TIMEFRAME,
+        as_of=snapshot.latest_candle.closed_at,
+    )
+    if not isinstance(features, MarketFeatureSet):
+        raise ValueError("feature provider must return MarketFeatureSet")
+    context = StrategyContext(
+        market=snapshot,
+        indicators=IndicatorSet(
+            symbol=symbol,
+            timeframe=TIMEFRAME,
+            measured_at=snapshot.latest_candle.closed_at,
+            values=(),
+        ),
+        metadata={MARKET_FEATURES_METADATA_KEY: features},
+    )
+    generated = bundle.signal_generator.generate(context)
+    if not isinstance(generated, GeneratedSignal) or not isinstance(
+        generated.signal, Signal
+    ):
+        raise ValueError("candidate generator returned malformed GeneratedSignal")
+    if not isinstance(generated.signal.direction, SignalDirection):
+        raise ValueError("generated signal direction is invalid")
+    confidence = generated.signal.confidence
+    if not isinstance(confidence, Decimal) or not confidence.is_finite():
+        raise ValueError("generated signal confidence must be a finite Decimal")
+    signal_log.append_signal(
+        SignalLogEntry(
+            signal_id=signal_id,
+            generator_id=f"{GENERATOR_ID}:{phase}:{bundle.candidate.candidate_id}",
+            generated_signal=generated,
+        )
+    )
+    unavailable = tuple(features.unavailable_sources)
+    return generated, unavailable
+
+
+def _daily_trade_payload(trade: BacktestTrade) -> dict[str, object]:
+    payload = _trade_payload(trade)
+    payload.update(
+        {
+            "owner_take_profit": (
+                None if trade.owner_take_profit is None else str(trade.owner_take_profit)
+            ),
+            "owner_stop_loss": (
+                None if trade.owner_stop_loss is None else str(trade.owner_stop_loss)
+            ),
+            "owner_max_holding_deadline": (
+                None
+                if trade.owner_max_holding_deadline is None
+                else trade.owner_max_holding_deadline.isoformat()
+            ),
+            "exit_audit": (
+                None
+                if trade.exit_audit_record is None
+                else json.loads(trade.exit_audit_record.canonical_json)
+            ),
+            "exit_audit_hash": (
+                None
+                if trade.exit_audit_record is None
+                else trade.exit_audit_record.audit_hash
+            ),
+        }
+    )
+    return payload
+
+
+def _canonical_result_hash(payload: Mapping[str, object]) -> str:
+    encoded = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def run_scheduler_driven_daily_regime_backtest(
+    market: MarketSnapshot,
+    *,
+    start_at: datetime,
+    end_at: datetime,
+    candidates: tuple[SchedulerBacktestCandidate, ...] | list[SchedulerBacktestCandidate],
+    model_artifact: object,
+    mapping_artifact: DailyStrategyMappingArtifact,
+    position_exit_policy: PositionExitPolicy,
+    candidate_manifest: object | None = None,
+    market_feature_provider: MarketFeatureProviderPort | None = None,
+    selection_repository=None,
+    symbol: Symbol = SYMBOL,
+    initial_equity: Decimal = INITIAL_EQUITY,
+    include_deferred: bool = False,
+    force_close_at_end: bool = True,
+) -> dict[str, object]:
+    """Research-only continuous replay of the audited Task 5 daily selector."""
+    if not isinstance(position_exit_policy, PositionExitPolicy):
+        raise ValueError(
+            "position_exit_policy must be a PositionExitPolicy enum value"
+        )
+    for value, name in ((start_at, "start_at"), (end_at, "end_at")):
+        if not isinstance(value, datetime) or value.tzinfo is not timezone.utc:
+            raise ValueError(f"{name} must use canonical UTC")
+    if end_at <= start_at:
+        raise ValueError("end_at must be after start_at")
+    if any(
+        getattr(start_at, field) != 0
+        for field in ("hour", "minute", "second", "microsecond")
+    ):
+        raise ValueError("start_at must be exact UTC midnight")
+    if market.symbol != symbol or market.timeframe != TIMEFRAME:
+        raise ValueError("market must match the 1m execution symbol")
+    if (
+        not isinstance(initial_equity, Decimal)
+        or not initial_equity.is_finite()
+        or initial_equity <= 0
+    ):
+        raise ValueError("initial_equity must be a finite positive Decimal")
+    if type(force_close_at_end) is not bool:
+        raise ValueError("force_close_at_end must be a strict boolean")
+    if not isinstance(mapping_artifact, DailyStrategyMappingArtifact):
+        raise ValueError("mapping_artifact must be a DailyStrategyMappingArtifact")
+
+    resolved = validate_unique_candidate_ids(candidates)
+    if not resolved:
+        raise ValueError("at least one candidate is required")
+    ensure_candidate_ids_allowed(
+        tuple(item.candidate_id for item in resolved), include_deferred=include_deferred
+    )
+    by_id = {item.candidate_id: item for item in resolved}
+    if set(by_id) != set(mapping_artifact.candidate_ids):
+        raise ValueError("supplied candidates must exactly match the daily mapping manifest")
+    audited_hashes = {
+        candidate_id: _audited_candidate_hash(
+            candidate, symbol=symbol, initial_equity=initial_equity
+        )
+        for candidate_id, candidate in sorted(by_id.items())
+    }
+    if audited_hashes != dict(mapping_artifact.candidate_hashes):
+        raise ValueError("candidate definition hash does not match daily mapping manifest")
+    generated_manifest = globals()["candidate_manifest"](resolved)
+    if candidate_manifest is not None:
+        try:
+            supplied_manifest = dict(candidate_manifest)
+        except (TypeError, ValueError) as error:
+            raise ValueError("candidate_manifest is malformed") from error
+        expected_manifest = (
+            generated_manifest
+            if set(supplied_manifest) == set(generated_manifest)
+            else audited_hashes
+        )
+        if supplied_manifest != expected_manifest:
+            raise ValueError("candidate_manifest does not exactly match supplied candidates")
+
+    required_context = max(4320, required_warmup_candles(resolved, market_feature_provider))
+    context_start = start_at - timedelta(minutes=required_context)
+    candles = _candles_between(market.candles, context_start, end_at)
+    selected = BacktestMarketSnapshot(candles)
+    if selected.candles[0].opened_at != context_start:
+        raise ValueError("market does not contain complete daily selection context")
+    if selected.candles[-1].closed_at != end_at:
+        raise ValueError("market does not cover replay end_at")
+    minute = timedelta(minutes=1)
+    if any(
+        candle.closed_at - candle.opened_at != minute
+        or (index and candle.opened_at != selected.candles[index - 1].closed_at)
+        for index, candle in enumerate(selected.candles)
+    ):
+        raise ValueError("market context must be contiguous one-minute candles")
+
+    market_data = CursorMarketData(selected)
+    feature_provider = market_feature_provider or EmptyMarketFeatureProvider()
+    signal_log = InMemorySignalLogRepository()
+    execution = BacktestOrderExecution(market_data)
+    bundles = {
+        item.candidate_id: _build_regime_bundle(
+            item,
+            market_data=market_data,
+            signal_log=signal_log,
+            order_execution=execution,
+            feature_provider=feature_provider,
+            initial_equity=initial_equity,
+            audited_candidate_definition_hash=audited_hashes[item.candidate_id],
+        )
+        for item in resolved
+    }
+    repository = (
+        _ReplaySelectionRepository()
+        if selection_repository is None
+        else selection_repository
+    )
+    selector = RegimeSelectionScheduler(
+        SelectDailyStrategyUseCase(), repository, now=lambda: start_at
+    )
+    closed_times = tuple(candle.closed_at for candle in selected.candles)
+    start_index = bisect_left(closed_times, start_at)
+
+    equity = peak = initial_equity
+    max_drawdown = Decimal("0")
+    turnover = Decimal("0")
+    position: BacktestPosition | None = None
+    trades: list[BacktestTrade] = []
+    equity_curve: list[dict[str, str]] = []
+    selection_events: list[dict[str, object]] = []
+    selection_audits: list[dict[str, object]] = []
+    current_selection: AuditedSelectStrategyResult | None = None
+    transitions = {key: 0 for key in ("component", "strategy", "cash")}
+    flat_entry_candles = cash_entry_candles = guard_skips = 0
+    active_exit_count = feature_unavailable_holds = 0
+    active_exit_net = Decimal("0")
+    exit_only_hold_reasons: dict[str, int] = {}
+
+    def record_exit_hold(reason: str) -> None:
+        exit_only_hold_reasons[reason] = exit_only_hold_reasons.get(reason, 0) + 1
+
+    for index in range(start_index, len(selected.candles)):
+        market_data.cursor = index
+        candle = selected.candles[index]
+        boundary = candle.closed_at
+        if (
+            start_at <= boundary < end_at
+            and boundary.hour == boundary.minute == boundary.second == boundary.microsecond == 0
+        ):
+            history = tuple(selected.candles[index - 4319 : index + 1])
+            if len(history) != 4320:
+                raise ValueError("complete three-day one-minute history is required")
+            scheduled = selector.run_selection(
+                "daily-regime-research-replay",
+                symbol.pair,
+                lambda previous, history=history, boundary=boundary: DailySelectStrategyCommand(
+                    previous_state=previous,
+                    symbol=symbol.pair,
+                    boundary_at=boundary,
+                    model_artifact=model_artifact,
+                    mapping_artifact=mapping_artifact,
+                    candles=history,
+                ),
+            )
+            if scheduled.error is not None:
+                raise scheduled.error
+            if not isinstance(scheduled.result, AuditedSelectStrategyResult):
+                raise ValueError("daily scheduler did not commit an audited result")
+            current_selection = scheduled.result
+            audit = current_selection.audit_record
+            selection_audits.append(
+                {
+                    "boundary_at": boundary.isoformat(),
+                    "audit": json.loads(audit.canonical_json),
+                    "audit_hash": audit.audit_hash,
+                }
+            )
+            for event in current_selection.events:
+                selection_events.append(
+                    {
+                        "boundary_at": boundary.isoformat(),
+                        "type": event.value,
+                        "selection_input_hash": current_selection.selection_input_hash,
+                        "audit_hash": audit.audit_hash,
+                        "component_fingerprint": current_selection.state.current_cluster_fingerprint,
+                        "active_candidate_id": current_selection.state.active_strategy_profile_id,
+                    }
+                )
+                key = {
+                    "cluster_transition": "component",
+                    "strategy_transition": "strategy",
+                    "cash_transition": "cash",
+                }.get(event.value)
+                if key is not None:
+                    transitions[key] += 1
+
+        state = repository.load(symbol.pair)
+        began_with_position = position is not None
+        if position is not None:
+            closed = maybe_close_position(
+                position,
+                selected,
+                index,
+                max_holding_bars=position.owner_max_holding_bars,
+            )
+            if (
+                closed is None
+                and position_exit_policy is PositionExitPolicy.ACTIVE_STRATEGY_OPPOSITE
+                and state is not None
+                and state.active_strategy_profile_id is not None
+            ):
+                active_id = state.active_strategy_profile_id
+                bundle = bundles[active_id]
+                bundle.exit_signal_attempts += 1
+                signal_id = f"daily-exit-{active_id}-{index:08d}"
+                try:
+                    generated, unavailable = _evaluate_regime_candidate_signal(
+                        bundle,
+                        market_data=market_data,
+                        signal_log=signal_log,
+                        symbol=symbol,
+                        signal_id=signal_id,
+                        phase="exit_only",
+                    )
+                except LookupError as error:
+                    if str(error) != "insufficient_candidate_warmup":
+                        raise
+                    bundle.feature_unavailable_holds += 1
+                    feature_unavailable_holds += 1
+                    record_exit_hold("insufficient_candidate_warmup")
+                else:
+                    if unavailable and generated.signal.direction is SignalDirection.WAIT:
+                        bundle.feature_unavailable_holds += 1
+                        feature_unavailable_holds += 1
+                        record_exit_hold("feature_unavailable")
+                    opposite = (
+                        position.direction is SignalDirection.LONG
+                        and generated.signal.direction is SignalDirection.SHORT
+                    ) or (
+                        position.direction is SignalDirection.SHORT
+                        and generated.signal.direction is SignalDirection.LONG
+                    )
+                    if opposite:
+                        closed = close_trade(
+                            position,
+                            _exit_fill_price(candle.close_price, position.direction),
+                            "active_strategy_opposite_signal",
+                            index,
+                            exit_at=boundary,
+                            market=selected,
+                        )
+                        selection_audit = (
+                            None if current_selection is None else current_selection.audit_record
+                        )
+                        source = {} if selection_audit is None else dict(selection_audit.payload)
+                        exit_record = SelectionAuditRecord(
+                            audit_type="daily_active_strategy_exit",
+                            schema_version="daily-active-strategy-exit-v1",
+                            payload={
+                                "selection_boundary": (
+                                    None
+                                    if current_selection is None
+                                    else current_selection.state.last_boundary_at.isoformat()
+                                ),
+                                "component_fingerprint": state.current_cluster_fingerprint,
+                                "model_artifact_hash": source.get("model_artifact_hash"),
+                                "mapping_artifact_hash": source.get("mapping_artifact_hash"),
+                                "profile_hash": source.get("profile_hash"),
+                                "selection_input_hash": (
+                                    None
+                                    if current_selection is None
+                                    else current_selection.selection_input_hash
+                                ),
+                                "selection_audit_hash": (
+                                    None if selection_audit is None else selection_audit.audit_hash
+                                ),
+                                "previous_candidate_id": source.get("previous_candidate_id"),
+                                "active_candidate_id": active_id,
+                                "active_candidate_definition_hash": bundle.audited_candidate_definition_hash,
+                                "signal_id": signal_id,
+                                "signal_direction": generated.signal.direction.value,
+                                "signal_confidence": str(generated.signal.confidence),
+                                "position_direction": position.direction.value,
+                                "owner_candidate_id": position.owner_strategy_profile_id,
+                                "owner_candidate_definition_hash": position.owner_candidate_definition_hash,
+                                "owner_guard_hash": position.owner_guard_hash,
+                                "exit_fill": str(closed.exit_price),
+                                "reference_close": str(candle.close_price),
+                                "entry_fee": str(position.entry_fee),
+                                "exit_fee": str(closed.fee_paid - position.entry_fee),
+                                "slippage_cost": str(
+                                    abs(candle.close_price - closed.exit_price)
+                                    * position.quantity
+                                ),
+                                "fee_paid": str(closed.fee_paid),
+                                "gross_pnl": str(closed.gross_pnl),
+                                "net_pnl": str(closed.net_pnl),
+                                "reason": closed.exit_reason,
+                            },
+                        )
+                        closed.exit_audit_record = exit_record
+                        active_exit_count += 1
+                        active_exit_net += closed.net_pnl
+                    elif generated.signal.direction is SignalDirection.WAIT:
+                        if not unavailable:
+                            record_exit_hold("wait_signal")
+                    else:
+                        record_exit_hold("same_direction_signal")
+            if closed is not None:
+                trades.append(closed)
+                equity += closed.net_pnl
+                turnover += closed.exit_price * closed.quantity
+                bundles[closed.owner_strategy_profile_id].guard.record_trade(
+                    index=index, closed_trade=closed, equity=equity
+                )
+                position = None
+
+        if not began_with_position and position is None and boundary < end_at:
+            flat_entry_candles += 1
+            if state is None or state.active_strategy_profile_id is None or not state.new_entries_enabled:
+                cash_entry_candles += 1
+            else:
+                active_id = state.active_strategy_profile_id
+                bundle = bundles[active_id]
+                if not bundle.guard.allows_entry(index=index, equity=equity):
+                    bundle.skipped_by_guard += 1
+                    guard_skips += 1
+                else:
+                    bundle.signal_attempts += 1
+                    execution_result = bundle.scheduler.run_trade_execution(
+                        schedule_name="scheduler-driven-daily-regime-backtest",
+                        command_factory=lambda bundle=bundle, active_id=active_id, index=index, equity=equity: execute_command(
+                            f"daily-entry-{active_id}-{index:08d}",
+                            selected,
+                            index,
+                            equity,
+                            bundle.candidate.candle_limit,
+                            symbol,
+                        ),
+                    )
+                    if execution_result.error is not None:
+                        raise execution_result.error
+                    result = execution_result.result
+                    if result is not None and result.order_result is not None:
+                        entry = result.order_result
+                        levels = result.take_profit_stop_loss
+                        if levels is not None and entry.average_price is not None and entry.executed_quantity is not None:
+                            position = BacktestPosition(
+                                direction=result.generated_signal.signal.direction,
+                                entry_price=entry.average_price,
+                                quantity=entry.executed_quantity,
+                                take_profit=levels.take_profit,
+                                stop_loss=levels.stop_loss,
+                                opened_index=index,
+                                entry_fee=entry.average_price * entry.executed_quantity * FEE_RATE,
+                                margin=(entry.average_price * entry.executed_quantity) / bundle.candidate.leverage,
+                                opened_at=boundary,
+                                owner_strategy_profile_id=active_id,
+                                owner_candidate_definition_hash=bundle.audited_candidate_definition_hash,
+                                owner_guard_hash=bundle.guard_hash,
+                                owner_leverage=bundle.candidate.leverage,
+                                owner_max_holding_bars=bundle.candidate.max_holding_bars,
+                                owner_max_holding_deadline=(
+                                    None
+                                    if bundle.candidate.max_holding_bars is None
+                                    else boundary
+                                    + timedelta(minutes=bundle.candidate.max_holding_bars)
+                                ),
+                            )
+                            turnover += position.notional
+                            bundle.guard.record_entry(index=index)
+
+        if start_at <= boundary < end_at:
+            marked = equity
+            if position is not None:
+                marked += close_trade(
+                    position,
+                    _exit_fill_price(candle.close_price, position.direction),
+                    "mark_to_market",
+                    index,
+                    exit_at=boundary,
+                    market=selected,
+                ).net_pnl
+            peak, max_drawdown = _update_drawdown(
+                equity=marked, peak=peak, max_drawdown=max_drawdown
+            )
+            equity_curve.append({"timestamp": boundary.isoformat(), "equity": str(marked)})
+
+    if position is not None and force_close_at_end:
+        last = selected.candles[-1]
+        closed = close_trade(
+            position,
+            _exit_fill_price(last.close_price, position.direction),
+            "end_of_data",
+            len(selected.candles) - 1,
+            exit_at=last.closed_at,
+            market=selected,
+        )
+        trades.append(closed)
+        equity += closed.net_pnl
+        turnover += closed.exit_price * closed.quantity
+        bundles[closed.owner_strategy_profile_id].guard.record_trade(
+            index=len(selected.candles) - 1, closed_trade=closed, equity=equity
+        )
+
+    peak, max_drawdown = _update_drawdown(
+        equity=equity, peak=peak, max_drawdown=max_drawdown
+    )
+    if force_close_at_end:
+        equity_curve.append({"timestamp": end_at.isoformat(), "equity": str(equity)})
+    gross = sum((trade.gross_pnl for trade in trades), Decimal("0"))
+    net = sum((trade.net_pnl for trade in trades), Decimal("0"))
+    fees = sum((trade.fee_paid for trade in trades), Decimal("0"))
+    payload = {
+        "engine": "scheduler_driven_daily_regime_selection",
+        "position_exit_policy": position_exit_policy.value,
+        "symbol": symbol.pair,
+        "start_at": start_at.isoformat(),
+        "end_at": end_at.isoformat(),
+        "initial_equity": str(initial_equity),
+        "final_equity": str(equity),
+        "trade_count": len(trades),
+        "gross_pnl": str(gross),
+        "net_pnl": str(net),
+        "fee_paid": str(fees),
+        "return_ratio": str(net / initial_equity),
+        "portfolio_max_drawdown_ratio": str(max_drawdown),
+        "maximum_adverse_excursion_ratio": str(max(
+            (trade.maximum_adverse_excursion_ratio for trade in trades),
+            default=Decimal("0"),
+        )),
+        "trades": [_daily_trade_payload(trade) for trade in trades],
+        "equity_curve": equity_curve,
+        "selection_events": selection_events,
+        "selection_audits": selection_audits,
+        "transition_counts": transitions,
+        "component_transition_count": transitions["component"],
+        "strategy_transition_count": transitions["strategy"],
+        "cash_transition_count": transitions["cash"],
+        "eligible_entry_candles": flat_entry_candles,
+        "cash_eligible_entry_candles": cash_entry_candles,
+        "eligible_entry_minutes": flat_entry_candles,
+        "cash_eligible_entry_minutes": cash_entry_candles,
+        "cash_share_by_eligible_entry_candles": str(
+            Decimal(cash_entry_candles) / Decimal(flat_entry_candles)
+            if flat_entry_candles
+            else Decimal("0")
+        ),
+        "cash_share_by_eligible_entry_time": str(
+            Decimal(cash_entry_candles) / Decimal(flat_entry_candles)
+            if flat_entry_candles
+            else Decimal("0")
+        ),
+        "entry_signal_attempts": {
+            key: bundles[key].signal_attempts for key in sorted(bundles)
+        },
+        "exit_only_signal_attempts": {
+            key: bundles[key].exit_signal_attempts for key in sorted(bundles)
+        },
+        "entry_signal_attempt_count": sum(
+            bundle.signal_attempts for bundle in bundles.values()
+        ),
+        "exit_only_signal_attempt_count": sum(
+            bundle.exit_signal_attempts for bundle in bundles.values()
+        ),
+        "signal_log_count": signal_log.count,
+        "exit_only_hold_reasons": dict(sorted(exit_only_hold_reasons.items())),
+        "guard_skips": guard_skips,
+        "skipped_by_guard": {
+            key: bundles[key].skipped_by_guard for key in sorted(bundles)
+        },
+        "feature_unavailable_holds": feature_unavailable_holds,
+        "feature_unavailable_holds_by_candidate": {
+            key: bundles[key].feature_unavailable_holds for key in sorted(bundles)
+        },
+        "active_opposite_exit_count": active_exit_count,
+        "active_opposite_exit_net_pnl": str(active_exit_net),
+        "actual_turnover_notional": str(turnover),
+        "candidate_definition_hashes": audited_hashes,
+        "candidate_definition_hash": mapping_candidate_definition_hash(audited_hashes),
+        "candidate_universe_hash": mapping_candidate_universe_hash(audited_hashes),
+        "model_artifact_hash": getattr(model_artifact, "artifact_hash", None),
+        "mapping_artifact_hash": daily_mapping_artifact_hash(mapping_artifact),
+        "feature_cache_hash": getattr(feature_provider, "feature_cache_hash", None),
+        "feature_config_hash": feature_provider_config_hash(market_feature_provider),
+        "feature_source_coverage": getattr(feature_provider, "feature_source_coverage", {}),
+        "feature_unavailable_counts": getattr(feature_provider, "feature_unavailable_counts", {}),
+        "feature_provenance": getattr(feature_provider, "feature_provenance", {}),
+        "required_warmup_candles": required_context,
+        "open_position_at_end": position is not None and not force_close_at_end,
+    }
+    payload["result_hash"] = _canonical_result_hash(payload)
+    return payload
 
 
 def _update_drawdown(
@@ -3254,6 +3901,9 @@ def close_trade(
         owner_guard_hash=position.owner_guard_hash,
         owner_leverage=position.owner_leverage,
         owner_max_holding_bars=position.owner_max_holding_bars,
+        owner_take_profit=position.take_profit,
+        owner_stop_loss=position.stop_loss,
+        owner_max_holding_deadline=position.owner_max_holding_deadline,
         maximum_adverse_excursion_ratio=(
             _maximum_adverse_excursion_ratio(position, market, index)
             if market is not None else None
