@@ -2356,7 +2356,9 @@ def _run_scheduler_driven_daily_regime_backtest(
         aggregates.net_pnl,
         aggregates.fee_paid,
     )
-    turnover = aggregates.turnover_notional
+    turnover = aggregates.turnover_notional + (
+        Decimal("0") if position is None else position.notional
+    )
     open_holding_bars = (
         0
         if position is None

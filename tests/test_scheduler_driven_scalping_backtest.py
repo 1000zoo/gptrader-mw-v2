@@ -773,6 +773,67 @@ def test_daily_entry_owner_policy_never_evaluates_discretionary_exit(monkeypatch
     assert LongThenShort.calls == 1
 
 
+def test_daily_unforced_open_position_retains_entry_turnover_once(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+    from src.domain.regime.model import ClusterAssignment
+    from tests.application.usecases.regime.test_select_daily_strategy_usecase import (
+        COMPONENTS,
+        _FrozenModel,
+        _candles,
+    )
+
+    class AlwaysLong:
+        def evaluate(self, context):
+            return StrategyResult("long", Signal(SignalDirection.LONG, Decimal("1")))
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysLong(),))
+    start = datetime(2026, 4, 6, tzinfo=timezone.utc)
+    candidates = tuple(
+        replace(_regime_candidate(candidate_id), take_profit_ratio=Decimal("0.8"))
+        for candidate_id in ("candidate-a", "candidate-b")
+    )
+    hashes, mapping = _daily_test_artifacts(candidates)
+    market = MarketSnapshot(_candles(count=4322, start=start - timedelta(days=3)))
+    common = dict(
+        market=market,
+        start_at=start,
+        end_at=start + timedelta(minutes=2),
+        candidates=candidates,
+        model_artifact=_FrozenModel(
+            ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0)
+        ),
+        mapping_artifact=mapping,
+        candidate_manifest=tuple(sorted(hashes.items())),
+        position_exit_policy=PositionExitPolicy.ENTRY_OWNER_ONLY,
+    )
+    unforced = run_scheduler_driven_daily_regime_backtest(
+        force_close_at_end=False, **common
+    )
+    forced = run_scheduler_driven_daily_regime_backtest(
+        force_close_at_end=True, **common
+    )
+    reference_close = market.candles[4319].close_price
+    entry_fill = reference_close * (Decimal("1") + module.SLIPPAGE_RATE)
+    quantity = Decimal("10000") * Decimal("0.1") * Decimal("2") / reference_close
+
+    assert unforced["trade_count"] == 0
+    assert unforced["open_position_at_end"] is True
+    assert unforced["exposure_candle_count"] == 2
+    assert unforced["exposure_ratio"] == "1"
+    assert Decimal(unforced["actual_turnover_notional"]) == entry_fill * quantity
+    assert forced["open_position_at_end"] is False
+    from src.domain.regime import decimal_arithmetic_context
+    with decimal_arithmetic_context():
+        assert Decimal(forced["actual_turnover_notional"]) == sum(
+            (
+                (Decimal(item["entry_price"]) + Decimal(item["exit_price"]))
+                * Decimal(item["quantity"])
+                for item in forced["trades"]
+            ),
+            Decimal("0"),
+        )
+
+
 def test_daily_scheduler_commit_failure_aborts_before_entry(monkeypatch) -> None:
     import scripts.scheduler_driven_scalping_backtest as module
     from src.domain.regime.model import ClusterAssignment
