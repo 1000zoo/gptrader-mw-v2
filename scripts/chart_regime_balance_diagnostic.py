@@ -129,16 +129,29 @@ def _destination_identity(path: Path) -> str:
     return os.path.normcase(str(Path(path).resolve(strict=False)))
 
 
-def _validate_distinct_destinations(json_path: Path, markdown_path: Path) -> None:
-    destinations = (Path(json_path), Path(markdown_path))
+def _validate_distinct_destinations(*paths: Path) -> None:
+    destinations = tuple(Path(path) for path in paths)
+    if len(destinations) < 2:
+        raise ValueError("at least two report destinations are required")
     is_reserved = getattr(os.path, "isreserved", None)
     if callable(is_reserved) and any(is_reserved(os.fspath(path)) for path in destinations):
         raise ValueError("report destination uses a platform-reserved path name")
-    if _destination_identity(json_path) == _destination_identity(markdown_path):
-        raise ValueError("JSON and Markdown report destinations must be distinct")
+    identities = tuple(_destination_identity(path) for path in destinations)
+    if len(set(identities)) != len(identities):
+        raise ValueError("report destinations must be distinct")
     for path in destinations:
-        if path.is_symlink() or (path.exists() and not path.is_file()):
+        is_junction = getattr(path, "is_junction", None)
+        if (
+            path.is_symlink()
+            or (callable(is_junction) and is_junction())
+            or (path.exists() and not path.is_file())
+        ):
             raise ValueError("existing report destination must be a regular file that is replaceable")
+    existing = tuple(path for path in destinations if path.exists())
+    for index, first in enumerate(existing):
+        for second in existing[index + 1 :]:
+            if os.path.samefile(first, second):
+                raise ValueError("report destinations must be distinct (hardlink alias)")
 
 
 def build_primary_configs() -> tuple[CandidateConfig, ...]:
@@ -562,21 +575,27 @@ def write_bytes_pair_atomic(
 ) -> None:
     """Publish a byte pair transactionally, retaining recoverable backups on rollback failure."""
 
-    if not isinstance(first_content, bytes) or not isinstance(second_content, bytes):
-        raise TypeError("paired report content must be bytes")
-    _validate_distinct_destinations(first_path, second_path)
-    json_content, markdown_content = first_content, second_content
-    json_path, markdown_path = first_path, second_path
-    json_temp: Path | None = None
-    markdown_temp: Path | None = None
-    finals = (Path(json_path), Path(markdown_path))
+    write_bytes_atomic(
+        ((Path(first_path), first_content), (Path(second_path), second_content))
+    )
+
+
+def write_bytes_atomic(items: Sequence[tuple[Path, bytes]]) -> None:
+    """Publish two or more byte artifacts in one recoverable transaction."""
+
+    supplied = tuple((Path(path), content) for path, content in items)
+    if len(supplied) < 2 or any(not isinstance(content, bytes) for _, content in supplied):
+        raise TypeError("transactional report content must contain at least two byte artifacts")
+    finals = tuple(path for path, _ in supplied)
+    _validate_distinct_destinations(*finals)
+    temporaries: dict[Path, Path] = {}
     backups: dict[Path, Path] = {}
     originally_absent: set[Path] = set()
     published: set[Path] = set()
     publication_succeeded = False
     try:
-        json_temp = _write_temp(finals[0], json_content)
-        markdown_temp = _write_temp(finals[1], markdown_content)
+        for final, content in supplied:
+            temporaries[final] = _write_temp(final, content)
         for final in finals:
             if final.exists():
                 backup = _unused_sibling(final, ".bak")
@@ -584,8 +603,11 @@ def write_bytes_pair_atomic(
                 backups[final] = backup
             else:
                 originally_absent.add(final)
-        json_temp.replace(finals[0]); json_temp = None; published.add(finals[0])
-        markdown_temp.replace(finals[1]); markdown_temp = None; published.add(finals[1])
+        for final in finals:
+            temporary = temporaries[final]
+            temporary.replace(final)
+            temporaries.pop(final)
+            published.add(final)
         publication_succeeded = True
     except BaseException as publication_error:
         rollback_errors = []
@@ -605,8 +627,8 @@ def write_bytes_pair_atomic(
                 publication_error.add_note(f"rollback error: {error}")
         raise
     finally:
-        if json_temp is not None: _best_effort_unlink(json_temp)
-        if markdown_temp is not None: _best_effort_unlink(markdown_temp)
+        for temporary in temporaries.values():
+            _best_effort_unlink(temporary)
         if publication_succeeded:
             for backup in backups.values():
                 _best_effort_unlink(backup)

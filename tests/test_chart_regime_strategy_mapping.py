@@ -89,6 +89,221 @@ def test_no_walk_forward_fold_dates_keeps_default_selection_available() -> None:
     )
 
 
+def test_three_day_profile_has_frozen_default_outputs_and_requires_explicit_profile() -> None:
+    args = parse_walk_forward_args([
+        "--profile", "three-day-daily-k4-v1", "--symbol", "BTCUSDT",
+        "--evidence-rows-path", "evidence.jsonl", "--resume",
+    ])
+
+    root = Path("docs/backtests/chart-regime-strategy-mapping-btcusdt-3d-k4-daily")
+    assert args.profile == "three-day-daily-k4-v1"
+    assert args.evidence_rows_path == Path("evidence.jsonl")
+    assert args.resume is True
+    assert args.output_json == root.with_suffix(".json")
+    assert args.output_markdown == root.with_suffix(".md")
+    assert args.output_model == root.with_name(root.name + "-model.json")
+    assert args.output_mapping == root.with_name(root.name + "-mapping.json")
+
+    with pytest.raises(SystemExit):
+        parse_walk_forward_args([
+            "--symbol", "BTCUSDT", "--evidence-rows-path", "evidence.jsonl",
+            "--output-json", "report.json", "--output-markdown", "report.md",
+        ])
+
+
+def test_three_day_profile_rejects_weekly_tuning_arguments() -> None:
+    with pytest.raises(SystemExit):
+        parse_walk_forward_args([
+            "--profile", "three-day-daily-k4-v1", "--symbol", "BTCUSDT",
+            "--candidate-group", "all",
+        ])
+
+
+def test_pre_test_freeze_is_immutable_and_excludes_test_results() -> None:
+    from scripts.chart_regime_strategy_mapping import create_pre_test_freeze
+
+    model = {"artifact_hash": "a" * 64, "gates": {"passed": True}}
+    freeze = create_pre_test_freeze(
+        model=model,
+        candidate_manifest={"candidate_count": 459, "manifest_hash": "b" * 64},
+        evidence={"mapping": {"ledger_hash": "c" * 64}, "validation": {"ledger_hash": "d" * 64}},
+        mapping={"artifact_hash": "e" * 64, "risk_policy": "strict"},
+        global_fixed_baseline={"decision": "cash", "candidate_id": None},
+        profile={"profile_id": "three-day-daily-k4-v1"},
+        chronology={"test": {"start_at": "2026-04-04T00:00:00Z"}},
+    )
+    original_hash = freeze.pre_test_freeze_hash
+
+    model["gates"]["passed"] = False
+    assert freeze.pre_test_freeze_hash == original_hash
+    assert "test_results" not in freeze.canonical_payload
+    with pytest.raises(TypeError):
+        freeze.canonical_payload["profile"] = {}
+
+
+def test_test_loader_requires_validated_freeze_and_records_first_read() -> None:
+    from scripts.chart_regime_strategy_mapping import (
+        ThreeDayExperimentStage,
+        ThreeDayExperimentState,
+        create_pre_test_freeze,
+        load_test_after_freeze,
+    )
+
+    state = ThreeDayExperimentState()
+    calls = []
+    with pytest.raises(RuntimeError, match="freeze"):
+        load_test_after_freeze(state=state, freeze=None, loader=lambda: calls.append(True))
+    assert calls == []
+
+    freeze = create_pre_test_freeze(
+        model={"artifact_hash": "a" * 64}, candidate_manifest={"candidate_count": 459},
+        evidence={}, mapping={"artifact_hash": "b" * 64},
+        global_fixed_baseline={"decision": "cash"},
+        profile={"profile_id": "three-day-daily-k4-v1"}, chronology={},
+    )
+    state = ThreeDayExperimentState(stage=ThreeDayExperimentStage.PRE_TEST_FROZEN)
+    sentinel = object()
+    assert load_test_after_freeze(state=state, freeze=freeze, loader=lambda: sentinel) is sentinel
+    assert state.stage is ThreeDayExperimentStage.TEST_LOADED
+    assert state.events[-1][0] == "first_test_read"
+
+
+def test_four_file_publication_is_atomic_and_rejects_aliases_before_mutation(tmp_path) -> None:
+    from scripts.chart_regime_strategy_mapping import write_three_day_publication_atomic
+
+    paths = tuple(tmp_path / name for name in ("report.json", "report.md", "model.json", "mapping.json"))
+    write_three_day_publication_atomic(
+        report_json=b"report\n", report_markdown=b"markdown\n",
+        model_json=b"model\n", mapping_json=b"mapping\n",
+        output_json=paths[0], output_markdown=paths[1],
+        output_model=paths[2], output_mapping=paths[3],
+    )
+    assert tuple(path.read_bytes() for path in paths) == (
+        b"report\n", b"markdown\n", b"model\n", b"mapping\n"
+    )
+    assert not tuple(tmp_path.glob(".*.tmp"))
+    assert not tuple(tmp_path.glob(".*.bak"))
+
+    original = paths[0].read_bytes()
+    with pytest.raises(ValueError, match="distinct"):
+        write_three_day_publication_atomic(
+            report_json=b"changed", report_markdown=b"markdown",
+            model_json=b"model", mapping_json=b"mapping",
+            output_json=paths[0], output_markdown=paths[0],
+            output_model=paths[2], output_mapping=paths[3],
+        )
+    assert paths[0].read_bytes() == original
+
+
+def test_three_day_orchestrator_enforces_exact_pretest_order_and_strict_test_policy() -> None:
+    from scripts.chart_regime_strategy_mapping import (
+        ThreeDayExperimentDependencies,
+        run_three_day_daily_k4_experiment,
+    )
+    from src.domain.regime import STRICT_RISK_POLICY
+
+    calls = []
+    model = {"artifact_hash": "a" * 64}
+    manifest = {"candidate_count": 459, "manifest_hash": "b" * 64}
+
+    def called(name, result):
+        def invoke(*args, **kwargs):
+            calls.append((name, args, kwargs))
+            return result
+        return invoke
+
+    deps = ThreeDayExperimentDependencies(
+        verify_sources=called("verify_sources", {"source_hash": "c" * 64}),
+        fit_and_freeze_model=called("fit_model", model),
+        freeze_candidates=called("freeze_candidates", manifest),
+        load_mapping_evidence=called("mapping_evidence", {"ledger_hash": "d" * 64}),
+        build_strict_mapping=called("strict_mapping", {"artifact_hash": "e" * 64}),
+        load_validation_evidence=called("validation_evidence", {"ledger_hash": "f" * 64}),
+        report_validation_sensitivity=called("sensitivity", {"winner": "looser"}),
+        rebuild_final_strict_mapping=called("final_mapping", {"artifact_hash": "1" * 64}),
+        select_global_fixed_baseline=called("global_baseline", {"decision": "cash"}),
+        load_test=called("load_test", {"test": "untouched"}),
+        run_test_comparisons=called("comparisons", {"cash": {"status": "ok"}}),
+        publish=called("publish", None),
+    )
+
+    result = run_three_day_daily_k4_experiment(dependencies=deps)
+
+    assert [name for name, _, _ in calls] == [
+        "verify_sources", "fit_model", "freeze_candidates", "mapping_evidence",
+        "strict_mapping", "validation_evidence", "sensitivity", "final_mapping",
+        "global_baseline", "load_test", "comparisons", "publish",
+    ]
+    load_test_call = calls[9]
+    assert load_test_call[1][0].pre_test_freeze_hash == result["pre_test_freeze_hash"]
+    assert calls[10][2]["risk_policy"] == STRICT_RISK_POLICY
+    assert result["validation_sensitivity"]["winner"] == "looser"
+    assert result["strict_mapping"]["artifact_hash"] == "1" * 64
+
+
+def test_three_day_publication_render_is_byte_identical_and_noncyclic() -> None:
+    from scripts.chart_regime_strategy_mapping import render_three_day_publication
+
+    report = {
+        "schema_version": "three-day-daily-k4-report-v1",
+        "pre_test_freeze_hash": "a" * 64,
+        "strict_mapping": {"entries": []},
+        "validation_sensitivity": {}, "test_comparisons": {}, "limitations": [],
+    }
+    first = render_three_day_publication(
+        report=report, model_json=b'{"artifact_hash":"' + b"b" * 64 + b'"}\n',
+        mapping_json=b'{"artifact_hash":"' + b"c" * 64 + b'"}\n',
+    )
+    second = render_three_day_publication(
+        report=report, model_json=b'{"artifact_hash":"' + b"b" * 64 + b'"}\n',
+        mapping_json=b'{"artifact_hash":"' + b"c" * 64 + b'"}\n',
+    )
+
+    assert first == second
+    payload = json.loads(first.report_json)
+    assert payload["publication"]["report_payload_hash"] == _canonical_hash(report)
+    assert payload["publication"]["model_byte_hash"] == hashlib.sha256(first.model_json).hexdigest()
+    assert payload["publication"]["mapping_byte_hash"] == hashlib.sha256(first.mapping_json).hexdigest()
+    assert payload["publication"]["markdown_byte_hash"] == hashlib.sha256(first.report_markdown).hexdigest()
+    assert "json_byte_hash" not in payload["publication"]
+
+
+def test_six_test_comparisons_use_shared_inputs_and_explicit_adopted_failure() -> None:
+    from scripts.chart_regime_strategy_mapping import run_six_three_day_test_comparisons
+    from scripts.scheduler_driven_scalping_backtest import PositionExitPolicy
+
+    calls = []
+    shared = object()
+    def runner(kind):
+        def invoke(**kwargs):
+            calls.append((kind, kwargs))
+            return {"status": "completed", "kind": kind}
+        return invoke
+
+    results = run_six_three_day_test_comparisons(
+        test_inputs=shared, model=object(), mapping=object(), candidate_manifest=object(),
+        global_fixed_candidate=None, candidates=(object(),),
+        resolve_current_adopted=lambda: (_ for _ in ()).throw(ValueError("missing adopted")),
+        cash_runner=runner("cash"), static_runner=runner("static"),
+        dynamic_runner=runner("dynamic"), manual_router_runner=runner("manual"),
+        cost_config={"fee": "same"}, initial_equity=Decimal("10000"),
+    )
+
+    assert tuple(results) == (
+        "cash", "current_adopted_fixed", "pre_test_global_best_fixed",
+        "k4_dynamic_entry_owner_exit", "k4_dynamic_active_strategy_opposite_exit",
+        "existing_manual_regime_router",
+    )
+    assert results["current_adopted_fixed"]["status"] == "failed_baseline"
+    assert results["pre_test_global_best_fixed"]["status"] == "completed"
+    assert [item[1].get("position_exit_policy") for item in calls if item[0] == "dynamic"] == [
+        PositionExitPolicy.ENTRY_OWNER_ONLY,
+        PositionExitPolicy.ACTIVE_STRATEGY_OPPOSITE,
+    ]
+    assert all(item[1]["test_inputs"] is shared for item in calls)
+    assert all(item[1]["cost_config"] == {"fee": "same"} for item in calls)
+
+
 def test_all_eight_walk_forward_fold_dates_are_accepted() -> None:
     args = parse_walk_forward_args([
         "--symbol", "BTCUSDT",
