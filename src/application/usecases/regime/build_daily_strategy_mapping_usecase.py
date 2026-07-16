@@ -42,6 +42,7 @@ _REJECTION_ORDER = (
     "insufficient_closed_trades",
     "non_positive_net_performance_after_costs",
     "non_positive_corrected_lower_bound",
+    "statistically_not_better_than_cash",
     "insufficient_complete_seven_day_blocks",
     "worst_seven_day_return_below_limit",
     "expected_shortfall_below_limit",
@@ -474,6 +475,7 @@ def rejection_reasons(
         "insufficient_closed_trades": closed_trade_count < MIN_CLOSED_TRADES,
         "non_positive_net_performance_after_costs": net_compounded_return <= 0,
         "non_positive_corrected_lower_bound": corrected_lower_bound <= 0,
+        "statistically_not_better_than_cash": corrected_lower_bound <= 0,
         "insufficient_complete_seven_day_blocks": not has_complete_seven_day_block,
         "worst_seven_day_return_below_limit": worst_seven_day_return
         < STRICT_RISK_POLICY.minimum_worst_seven_day_return_ratio,
@@ -645,11 +647,21 @@ def _validate_evidence_grid(
                 )
             )
             or row.closed_trade_count != 0
-            or row.trade_pnls not in (None, ())
+            or row.trade_pnls is not None
         ):
             raise ValueError("unavailable evidence cannot contain performance")
-        if row.availability_status == "available" and row.trade_pnls is None:
-            raise ValueError("trade PnLs are required for concentration audit")
+        if row.availability_status == "available":
+            if not isinstance(row.trade_pnls, tuple):
+                raise ValueError("trade PnLs are required for concentration audit")
+            if (
+                len(row.trade_pnls) != row.closed_trade_count
+                or any(
+                    not isinstance(value, Decimal) or not value.is_finite()
+                    for value in row.trade_pnls
+                )
+                or sum(row.trade_pnls, Decimal(0)) != row.net_pnl
+            ):
+                raise ValueError("trade PnLs are inconsistent with available evidence")
         if row.candidate_hash != candidate_hashes[row.candidate_id]:
             raise ValueError("candidate hash drift")
         if row.model_artifact_hash != model_artifact_hash:

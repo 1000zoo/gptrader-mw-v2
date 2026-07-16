@@ -58,7 +58,7 @@ def evidence(
     initial = Decimal("100")
     net_pnl = initial * daily_return if available else ZERO
     if trades is None:
-        trades = (net_pnl,) if available else ()
+        trades = (net_pnl,) if available else None
     return DailyStrategyEvidence(
         component_fingerprint=component,
         candidate_id=candidate,
@@ -74,7 +74,7 @@ def evidence(
         gross_return_ratio=daily_return if available else ZERO,
         net_return_ratio=daily_return if available else ZERO,
         fees=ZERO,
-        closed_trade_count=len(trades),
+        closed_trade_count=len(trades) if trades is not None else 0,
         exposure_ratio=Decimal("0.5") if available else ZERO,
         turnover_ratio=Decimal("0.1") if available else ZERO,
         maximum_drawdown_ratio=ZERO,
@@ -289,6 +289,28 @@ def test_each_strict_eligibility_gate_is_auditable(change, reason) -> None:
     assert rejection_reasons(**valid_gate_values()) == ()
 
 
+def test_non_positive_lcb_records_distinct_cash_dominance_reason(monkeypatch) -> None:
+    values = valid_gate_values()
+    values["corrected_lower_bound"] = ZERO
+    assert "non_positive_corrected_lower_bound" in rejection_reasons(**values)
+    assert "statistically_not_better_than_cash" in rejection_reasons(**values)
+
+    monkeypatch.setattr(
+        module,
+        "_aligned_component_corrected_lower_bounds",
+        lambda returns_by_candidate, *args, **kwargs: {
+            candidate: ZERO for candidate in returns_by_candidate
+        },
+    )
+    result = BuildDailyStrategyMappingUseCase().execute(valid_command())
+
+    assert all(entry.decision == "cash" for entry in result.artifact.entries)
+    assert all(
+        "statistically_not_better_than_cash" in entry.rejection_reasons
+        for entry in result.artifact.entries
+    )
+
+
 @pytest.mark.parametrize(
     ("left_changes", "right_changes"),
     [
@@ -423,11 +445,9 @@ def test_non_target_component_days_preserve_calendar_windows_as_neutral_days() -
 def test_unavailable_evidence_with_performance_is_rejected() -> None:
     command = valid_command()
     first = command.evidence_rows[0]
-    contradictory = replace(
-        first,
-        availability_status="unavailable",
-        availability_reason="feature_unavailable",
-    )
+    contradictory = first
+    object.__setattr__(contradictory, "availability_status", "unavailable")
+    object.__setattr__(contradictory, "availability_reason", "feature_unavailable")
 
     with pytest.raises(ValueError, match="unavailable evidence cannot contain performance"):
         BuildDailyStrategyMappingUseCase().execute(
@@ -437,7 +457,8 @@ def test_unavailable_evidence_with_performance_is_rejected() -> None:
 
 def test_available_trades_require_trade_pnls_for_concentration_audit() -> None:
     command = valid_command()
-    missing_ledger = replace(command.evidence_rows[0], trade_pnls=None)
+    missing_ledger = command.evidence_rows[0]
+    object.__setattr__(missing_ledger, "trade_pnls", None)
 
     with pytest.raises(ValueError, match="trade PnLs are required"):
         BuildDailyStrategyMappingUseCase().execute(
@@ -448,16 +469,15 @@ def test_available_trades_require_trade_pnls_for_concentration_audit() -> None:
 def test_available_zero_trade_day_requires_explicit_empty_trade_ledger() -> None:
     command = valid_command()
     first = command.evidence_rows[0]
-    missing_ledger = replace(
-        first,
-        final_equity=Decimal("100"),
-        gross_pnl=ZERO,
-        net_pnl=ZERO,
-        gross_return_ratio=ZERO,
-        net_return_ratio=ZERO,
-        closed_trade_count=0,
-        trade_pnls=None,
+    missing_ledger = evidence(
+        day=first.outcome_start_at,
+        component=first.component_fingerprint,
+        candidate=first.candidate_id,
+        candidate_hash=first.candidate_hash,
+        daily_return=ZERO,
+        trades=(),
     )
+    object.__setattr__(missing_ledger, "trade_pnls", None)
 
     with pytest.raises(ValueError, match="trade PnLs are required"):
         BuildDailyStrategyMappingUseCase().execute(

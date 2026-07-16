@@ -168,8 +168,36 @@ class DailyStrategyEvidence:
         if self.availability_status == "available":
             if self.availability_reason is not None:
                 raise ValueError("available evidence cannot contain an availability reason")
+            if not isinstance(self.trade_pnls, tuple):
+                raise ValueError("available evidence requires trade PnLs as an exact tuple")
         elif self.availability_status == "unavailable":
             _text(self.availability_reason, "availability reason")
+            if self.trade_pnls is not None:
+                raise ValueError("unavailable evidence cannot contain a trade ledger")
+            if self.closed_trade_count != 0 or any(
+                value != 0
+                for value in (
+                    self.gross_pnl,
+                    self.net_pnl,
+                    self.gross_return_ratio,
+                    self.net_return_ratio,
+                    self.fees,
+                    self.exposure_ratio,
+                    self.turnover_ratio,
+                    self.maximum_drawdown_ratio,
+                    self.maximum_adverse_excursion_ratio,
+                    self.profit_factor,
+                    self.downside_deviation_ratio,
+                    self.expected_shortfall_10_ratio,
+                    self.median_daily_return_ratio,
+                    self.tenth_percentile_daily_return_ratio,
+                    self.worst_seven_day_return_ratio,
+                    self.return_without_best_episode_ratio,
+                    self.top_episode_profit_share,
+                    self.top_five_trade_profit_share,
+                )
+            ):
+                raise ValueError("unavailable evidence cannot contain performance")
         else:
             raise ValueError("availability status must be available or unavailable")
 
@@ -181,15 +209,14 @@ class DailyStrategyEvidence:
             "engine_config_hash",
         ):
             _hash(getattr(self, field), field)
-        if self.trade_pnls is not None:
-            trade_pnls = tuple(self.trade_pnls)
+        if self.availability_status == "available":
+            trade_pnls = self.trade_pnls
             for value in trade_pnls:
                 _finite_decimal(value, "trade PnL")
             if len(trade_pnls) != self.closed_trade_count:
                 raise ValueError("trade PnLs must match the closed trade count")
             if sum(trade_pnls, Decimal(0)) != self.net_pnl:
                 raise ValueError("trade PnLs must reconcile to net PnL")
-            object.__setattr__(self, "trade_pnls", trade_pnls)
 
     def canonical_payload(self) -> dict[str, object]:
         decimal_fields = (

@@ -76,6 +76,36 @@ def evidence(**changes) -> DailyStrategyEvidence:
     return DailyStrategyEvidence(**fields)
 
 
+def unavailable_evidence(**changes) -> DailyStrategyEvidence:
+    fields = {
+        "final_equity": Decimal("1000"),
+        "gross_pnl": Decimal(0),
+        "net_pnl": Decimal(0),
+        "gross_return_ratio": Decimal(0),
+        "net_return_ratio": Decimal(0),
+        "fees": Decimal(0),
+        "closed_trade_count": 0,
+        "exposure_ratio": Decimal(0),
+        "turnover_ratio": Decimal(0),
+        "maximum_drawdown_ratio": Decimal(0),
+        "maximum_adverse_excursion_ratio": Decimal(0),
+        "profit_factor": Decimal(0),
+        "downside_deviation_ratio": Decimal(0),
+        "expected_shortfall_10_ratio": Decimal(0),
+        "median_daily_return_ratio": Decimal(0),
+        "tenth_percentile_daily_return_ratio": Decimal(0),
+        "worst_seven_day_return_ratio": Decimal(0),
+        "return_without_best_episode_ratio": Decimal(0),
+        "top_episode_profit_share": Decimal(0),
+        "top_five_trade_profit_share": Decimal(0),
+        "availability_status": "unavailable",
+        "availability_reason": "feature_unavailable",
+        "trade_pnls": None,
+    }
+    fields.update(changes)
+    return evidence(**fields)
+
+
 def assessment(component: str = "component-a", candidate: str = "candidate-a", **changes):
     fields = {
         "component_fingerprint": component,
@@ -177,6 +207,35 @@ def test_daily_evidence_binds_three_day_anchor_to_exact_one_day_outcome():
     assert item.trade_pnls == (Decimal("2"), Decimal("3"))
     with pytest.raises(FrozenInstanceError):
         item.candidate_id = "changed"
+
+
+def test_available_evidence_requires_an_exact_tuple_trade_ledger():
+    with pytest.raises(ValueError, match="available evidence requires trade PnLs"):
+        evidence(trade_pnls=None)
+    with pytest.raises(ValueError, match="tuple"):
+        evidence(trade_pnls=[Decimal("2"), Decimal("3")])
+
+    zero_trade = evidence(
+        final_equity=Decimal("1000"),
+        gross_pnl=Decimal(0),
+        net_pnl=Decimal(0),
+        gross_return_ratio=Decimal(0),
+        net_return_ratio=Decimal(0),
+        fees=Decimal(0),
+        closed_trade_count=0,
+        trade_pnls=(),
+    )
+    assert zero_trade.trade_pnls == ()
+
+
+def test_unavailable_evidence_requires_zero_performance_and_no_trade_ledger():
+    item = unavailable_evidence()
+    assert item.trade_pnls is None
+
+    with pytest.raises(ValueError, match="unavailable evidence cannot contain performance"):
+        unavailable_evidence(exposure_ratio=Decimal("0.1"))
+    with pytest.raises(ValueError, match="unavailable evidence cannot contain a trade ledger"):
+        unavailable_evidence(trade_pnls=())
 
 
 def test_daily_mapping_contracts_are_exported_from_regime_api():
