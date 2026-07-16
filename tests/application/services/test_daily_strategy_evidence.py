@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
+import hashlib
 import os
 import time
 import threading
@@ -107,6 +108,11 @@ def test_manifest_requires_exactly_all_eight_nonempty_public_groups(groups):
         build_three_day_daily_candidate_manifest(candidate_groups=groups, expected_count=1)
 
 
+def test_manifest_rejects_explicit_empty_group_map_instead_of_using_defaults():
+    with pytest.raises(ValueError, match="eight|group"):
+        build_three_day_daily_candidate_manifest(candidate_groups={}, expected_count=459)
+
+
 def test_generic_daily_ledger_is_idempotent_and_rejects_conflicts(tmp_path: Path):
     ledger = AppendOnlyEvidenceLedger(tmp_path / "nested" / "evidence.jsonl", DAILY_EVIDENCE_KEY_FIELDS)
     assert ledger.append(_row()) is True
@@ -139,6 +145,65 @@ def test_generic_daily_ledger_quarantines_valid_json_without_terminal_newline(tm
     assert rows == []
     assert path.read_bytes() == b""
     assert Path(rows.recovery_metadata["truncated_final_line"]["quarantine_path"]).read_bytes() == raw
+
+
+def test_quarantine_is_durable_before_source_truncate(monkeypatch, tmp_path: Path):
+    import src.application.services.daily_strategy_evidence as module
+
+    path = tmp_path / "evidence.jsonl"
+    raw = b'{"partial":true}'
+    path.write_bytes(raw)
+    events = []
+    quarantine_descriptors = set()
+    real_open = module.os.open
+    real_fsync = module.os.fsync
+
+    def observed_open(path_value, flags, *args):
+        descriptor = real_open(path_value, flags, *args)
+        if ".truncated-" in str(path_value):
+            quarantine_descriptors.add(descriptor)
+        return descriptor
+
+    def observed_fsync(descriptor):
+        if descriptor in quarantine_descriptors:
+            events.append("quarantine_fsync")
+        return real_fsync(descriptor)
+
+    real_truncate = module._truncate_source_to_offset
+
+    def observed_truncate(*args, **kwargs):
+        events.append("truncate")
+        return real_truncate(*args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", observed_open)
+    monkeypatch.setattr(module.os, "fsync", observed_fsync)
+    monkeypatch.setattr(module, "_truncate_source_to_offset", observed_truncate)
+    AppendOnlyEvidenceLedger(path, DAILY_EVIDENCE_KEY_FIELDS).load()
+    assert events.index("quarantine_fsync") < events.index("truncate")
+
+
+def test_quarantine_write_error_leaves_source_intact(monkeypatch, tmp_path: Path):
+    import src.application.services.daily_strategy_evidence as module
+
+    path = tmp_path / "evidence.jsonl"
+    raw = b'{"partial":true}'
+    path.write_bytes(raw)
+    monkeypatch.setattr(module, "_durably_write_quarantine", lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk")))
+    with pytest.raises(OSError, match="disk"):
+        AppendOnlyEvidenceLedger(path, DAILY_EVIDENCE_KEY_FIELDS).load()
+    assert path.read_bytes() == raw
+
+
+def test_conflicting_existing_quarantine_leaves_source_intact(tmp_path: Path):
+    path = tmp_path / "evidence.jsonl"
+    raw = b'{"partial":true}'
+    path.write_bytes(raw)
+    digest = hashlib.sha256(raw).hexdigest()
+    quarantine = path.with_name(f"{path.name}.truncated-{digest[:12]}.jsonl")
+    quarantine.write_bytes(b"conflict")
+    with pytest.raises(ValueError, match="conflicting.*quarantine"):
+        AppendOnlyEvidenceLedger(path, DAILY_EVIDENCE_KEY_FIELDS).load()
+    assert path.read_bytes() == raw
 
 
 def test_public_ledger_load_waits_for_exclusive_writer_lock(tmp_path: Path):
@@ -457,6 +522,62 @@ def test_daily_execution_represents_profitable_day_without_losses_without_pf_sen
     assert row.profit_factor_status == "positive_without_losses"
 
 
+def test_replay_exception_does_not_create_or_append_evidence_file(tmp_path):
+    candidate = replace(build_scheduler_candidates()[0], candle_limit=1)
+    manifest = build_three_day_daily_candidate_manifest(candidate_groups=_all_groups(candidate), expected_count=1)
+    start = _utc("2025-07-10")
+    market = _market(start - timedelta(minutes=1), 1441)
+    path = tmp_path / "evidence.jsonl"
+    with pytest.raises(RuntimeError, match="engine failed"):
+        run_daily_strategy_evidence(
+            manifest=manifest, phase="Validation", outcome_start_at=start,
+            component_fingerprint="component-a", market=market,
+            market_feature_provider=None, run_identity=_identity(manifest, market),
+            ledger=AppendOnlyEvidenceLedger(path, DAILY_EVIDENCE_KEY_FIELDS),
+            replay_callable=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("engine failed")),
+        )
+    assert not path.exists()
+
+
+def test_multi_candidate_execution_matches_fresh_isolated_candidate_runs(tmp_path):
+    candidates = tuple(replace(item, candle_limit=1) for item in build_scheduler_candidates()[:2])
+    groups = {group: candidates for group in _all_groups(candidates[0])}
+    manifest = build_three_day_daily_candidate_manifest(candidate_groups=groups, expected_count=2)
+    start = _utc("2025-07-10")
+    market = _market(start - timedelta(minutes=1), 1441)
+    calls = []
+
+    def replay(_market_snapshot, **kwargs):
+        candidate = kwargs["candidate"]
+        calls.append((candidate.candidate_id, kwargs["initial_equity"], tuple(sorted(kwargs))))
+        entry = next(item for item in manifest.entries if item.candidate_id == candidate.candidate_id)
+        payload = _zero_replay(candidate, manifest, start)
+        payload["candidate_definition_hash"] = entry.definition_hash
+        return payload
+
+    combined = run_daily_strategy_evidence(
+        manifest=manifest, phase="Validation", outcome_start_at=start,
+        component_fingerprint="component-a", market=market,
+        market_feature_provider=None, run_identity=_identity(manifest, market),
+        ledger=AppendOnlyEvidenceLedger(tmp_path / "combined.jsonl", DAILY_EVIDENCE_KEY_FIELDS),
+        replay_callable=replay,
+    )
+    isolated = tuple(
+        run_daily_strategy_evidence(
+            manifest=manifest, phase="Validation", outcome_start_at=start,
+            component_fingerprint="component-a", market=market,
+            market_feature_provider=None, run_identity=_identity(manifest, market),
+            ledger=AppendOnlyEvidenceLedger(tmp_path / f"isolated-{candidate.candidate_id}.jsonl", DAILY_EVIDENCE_KEY_FIELDS),
+            candidate_ids=(candidate.candidate_id,), replay_callable=replay,
+        )[0]
+        for candidate in candidates
+    )
+    assert combined == isolated
+    assert [item.candidate_id for item in combined] == list(manifest.candidate_ids)
+    assert all(initial == Decimal("1000") for _, initial, _ in calls)
+    assert len({keys for _, _, keys in calls}) == 1
+
+
 def test_daily_execution_records_expected_point_in_time_feature_unavailability(tmp_path: Path):
     candidate = replace(next(
         item for item in microstructure_alpha_candidates()
@@ -496,6 +617,45 @@ def test_daily_execution_records_expected_point_in_time_feature_unavailability(t
             run_identity=replace(identity, model_artifact_hash="9" * 64), ledger=ledger,
             replay_callable=replay,
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("engine_version", "other", "engine"),
+        ("cost_model", {"venue": "other"}, "cost"),
+        ("feature_cache_hash", "a" * 64, "cache"),
+        ("feature_config_hash", "b" * 64, "config"),
+        ("feature_cache_schema_version", "other", "schema"),
+        ("feature_provenance_hash", "c" * 64, "provenance"),
+        ("feature_source_coverage_hash", "d" * 64, "coverage"),
+        ("feature_unavailable_counts_hash", "e" * 64, "unavailable"),
+    ),
+)
+def test_unavailable_evidence_rejects_static_identity_provenance_drift(tmp_path, field, value, message):
+    candidate = replace(next(
+        item for item in microstructure_alpha_candidates()
+        if item.candidate_id == "micro-flow-breakout-balanced-tight"
+    ), candle_limit=1)
+    manifest = build_three_day_daily_candidate_manifest(candidate_groups=_all_groups(candidate), expected_count=1)
+    start = _utc("2025-07-10")
+    market = _market(start - timedelta(minutes=1), 1441)
+    identity = replace(_identity(manifest, market), **{field: value})
+    replayed = False
+
+    def replay(*_args, **_kwargs):
+        nonlocal replayed
+        replayed = True
+
+    with pytest.raises(ValueError, match=message):
+        run_daily_strategy_evidence(
+            manifest=manifest, phase="Validation", outcome_start_at=start,
+            component_fingerprint="component-a", market=market,
+            market_feature_provider=None, run_identity=identity,
+            ledger=AppendOnlyEvidenceLedger(tmp_path / f"{field}.jsonl", DAILY_EVIDENCE_KEY_FIELDS),
+            replay_callable=replay,
+        )
+    assert replayed is False
 
 
 @pytest.mark.parametrize("future_publication", (False, True))

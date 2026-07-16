@@ -14,6 +14,7 @@ from scripts.scheduler_driven_scalping_backtest import (
     BacktestMarketSnapshot,
     _maximum_adverse_excursion_ratio,
     _trade_payload,
+    close_trade,
     SchedulerBacktestCandidate,
     StrategyCandidateSpec,
     alpha_entry_candidates,
@@ -80,6 +81,17 @@ def test_trade_detail_serialization_rejects_missing_mae_audit() -> None:
         gross_pnl=Decimal("1"), net_pnl=Decimal("0.9"), fee_paid=Decimal("0.1"),
         exit_reason="test", holding_bars=1, maximum_adverse_excursion_ratio=None,
     )
+    with pytest.raises(ValueError, match="adverse excursion"):
+        _trade_payload(trade)
+
+
+def test_close_trade_without_market_keeps_mae_missing_and_cannot_serialize() -> None:
+    position = BacktestPosition(
+        SignalDirection.LONG, Decimal("100"), Decimal("1"), Decimal("110"),
+        Decimal("90"), 0, Decimal("0.04"), Decimal("50"),
+    )
+    trade = close_trade(position, Decimal("101"), "unit", 1)
+    assert trade.maximum_adverse_excursion_ratio is None
     with pytest.raises(ValueError, match="adverse excursion"):
         _trade_payload(trade)
 from scripts.chart_regime_strategy_mapping import _validation_replay_metrics

@@ -230,9 +230,10 @@ def build_three_day_daily_candidate_manifest(
         str(family["candidate_group"]): str(family["status"])
         for family in registry["families"]
     }
-    supplied = candidate_groups or {
-        name: factory() for name, factory in _CANDIDATE_FACTORIES.items()
-    }
+    supplied = (
+        {name: factory() for name, factory in _CANDIDATE_FACTORIES.items()}
+        if candidate_groups is None else candidate_groups
+    )
     if set(supplied) != _EXPECTED_CANDIDATE_GROUPS:
         raise ValueError("candidate manifest requires exactly all eight public groups")
     if any(not tuple(candidates) for candidates in supplied.values()):
@@ -404,22 +405,13 @@ def run_daily_strategy_evidence(
     if outcome_start_at.tzinfo is not timezone.utc or outcome_start_at.time() != datetime.min.time():
         raise ValueError("daily outcome start must be canonical midnight UTC")
     outcome_end_at = outcome_start_at + timedelta(days=1)
-    if phase != run_identity.phase or not (
-        run_identity.phase_start_at <= outcome_start_at < outcome_end_at <= run_identity.phase_end_at
-    ):
-        raise ValueError("daily outcome is outside the run identity phase")
-    if manifest.candidate_universe_hash != run_identity.candidate_universe_hash:
-        raise ValueError("candidate universe hash does not match run identity")
-    if manifest.ordered_definition_hashes != run_identity.ordered_candidate_definition_hashes:
-        raise ValueError("candidate definition hashes do not match run identity")
-    if market_snapshot_hash(market) != run_identity.market_data_hash:
-        raise ValueError("market data hash does not match run identity")
     replay = replay_callable or run_scheduler_driven_backtest
     selected_symbol = symbol or market.symbol
-    if selected_symbol != market.symbol or selected_symbol.pair != run_identity.symbol:
-        raise ValueError("market symbol does not match run identity")
-    if market.timeframe != TIMEFRAME or run_identity.timeframe != "1m":
-        raise ValueError("daily evidence requires the canonical 1m timeframe")
+    _validate_static_run_context(
+        manifest=manifest, phase=phase, outcome_start_at=outcome_start_at,
+        outcome_end_at=outcome_end_at, market=market, provider=market_feature_provider,
+        identity=run_identity, selected_symbol=selected_symbol,
+    )
     if ledger.key_fields != DAILY_EVIDENCE_KEY_FIELDS:
         raise ValueError("daily evidence ledger uses an incompatible unique key")
 
@@ -567,63 +559,99 @@ def _validate_replay_provenance(replay, *, identity, provider, outcome_start_at,
         raise ValueError(f"canonical replay omitted provenance fields: {', '.join(missing)}")
     if replay["engine"] != "scheduler_driven" or replay["engine_version"] != BACKTEST_ENGINE_VERSION:
         raise ValueError("canonical replay engine identity mismatch")
-    if identity.engine_version != BACKTEST_ENGINE_VERSION:
-        raise ValueError("run identity engine version is not canonical")
     expected_cost = _canonical_cost_model()
-    if replay["cost_model"] != expected_cost or _thaw(identity.cost_model) != expected_cost:
+    if replay["cost_model"] != expected_cost:
         raise ValueError("canonical replay cost model mismatch")
     if replay["start_at"] != outcome_start_at.isoformat() or replay["end_at"] != outcome_end_at.isoformat():
         raise ValueError("canonical replay interval mismatch")
     if replay["future_feature_access_count"] != 0:
         raise ValueError("canonical replay reported future feature access")
 
-    if provider is not None:
-        required_provider_fields = (
-            "feature_cache_hash", "feature_cache_schema_version", "feature_source_coverage",
-            "feature_unavailable_counts", "feature_provenance",
-        )
-        missing_provider = tuple(field for field in required_provider_fields if not hasattr(provider, field))
-        if missing_provider:
-            raise ValueError(f"feature provider omitted provenance fields: {', '.join(missing_provider)}")
-    expected_cache = getattr(provider, "feature_cache_hash", None) if provider is not None else None
-    expected_coverage = getattr(provider, "feature_source_coverage", {}) if provider is not None else {}
-    expected_unavailable = getattr(provider, "feature_unavailable_counts", {}) if provider is not None else {}
-    expected_provenance = getattr(provider, "feature_provenance", {}) if provider is not None else {}
-    expected_schema = getattr(provider, "feature_cache_schema_version", None) if provider is not None else "none"
-    expected_config = feature_provider_config_hash(provider)
+    provider_values = _actual_provider_identity(provider)
     actual = {
-        "feature_cache_hash": expected_cache,
-        "feature_config_hash": expected_config,
-        "feature_cache_schema_version": expected_schema,
-        "feature_source_coverage": expected_coverage,
-        "feature_unavailable_counts": expected_unavailable,
-        "feature_provenance": expected_provenance,
+        "feature_cache_hash": provider_values["cache_hash"],
+        "feature_config_hash": provider_values["config_hash"],
+        "feature_cache_schema_version": provider_values["schema_version"],
+        "feature_source_coverage": provider_values["source_coverage"],
+        "feature_unavailable_counts": provider_values["unavailable_counts"],
+        "feature_provenance": provider_values["provenance"],
     }
     for field, value in actual.items():
         if replay[field] != value:
             label = field.removeprefix("feature_").replace("_", " ")
             raise ValueError(f"canonical replay {label} mismatch")
-    if provider is not None and expected_schema is None:
-        raise ValueError("feature cache schema is required")
-    if provider is not None and (
-        _SHA256.fullmatch(str(expected_cache)) is None
-        or not isinstance(expected_coverage, Mapping)
-        or not isinstance(expected_unavailable, Mapping)
-        or not isinstance(expected_provenance, Mapping)
+
+
+def _validate_static_run_context(*, manifest, phase, outcome_start_at, outcome_end_at,
+                                 market, provider, identity, selected_symbol):
+    if identity.engine_version != BACKTEST_ENGINE_VERSION:
+        raise ValueError("run identity engine version is not canonical")
+    if _thaw(identity.cost_model) != _canonical_cost_model():
+        raise ValueError("run identity cost model is not canonical")
+    if phase != identity.phase or not (
+        identity.phase_start_at <= outcome_start_at < outcome_end_at <= identity.phase_end_at
+    ):
+        raise ValueError("daily outcome is outside the run identity phase interval")
+    if manifest.candidate_universe_hash != identity.candidate_universe_hash:
+        raise ValueError("candidate universe hash does not match run identity")
+    if manifest.ordered_definition_hashes != identity.ordered_candidate_definition_hashes:
+        raise ValueError("candidate definition hashes do not match run identity")
+    if market_snapshot_hash(market) != identity.market_data_hash:
+        raise ValueError("market data hash does not match run identity")
+    if selected_symbol != market.symbol or selected_symbol.pair != identity.symbol:
+        raise ValueError("market symbol does not match run identity")
+    if market.timeframe != TIMEFRAME or identity.timeframe != "1m":
+        raise ValueError("daily evidence requires the canonical 1m timeframe")
+    if not isinstance(identity.initial_equity, Decimal) or identity.initial_equity <= 0:
+        raise ValueError("initial equity is invalid")
+    actual = _actual_provider_identity(provider)
+    comparisons = (
+        (identity.feature_cache_hash, actual["cache_hash"], "cache hash"),
+        (identity.feature_config_hash, actual["config_hash"], "config hash"),
+        (identity.feature_cache_schema_version, actual["schema_version"], "schema"),
+        (identity.feature_provenance_hash, candidate_definition_hash(actual["provenance"]), "provenance"),
+        (identity.feature_source_coverage_hash, candidate_definition_hash(actual["source_coverage"]), "coverage"),
+        (identity.feature_unavailable_counts_hash, candidate_definition_hash(actual["unavailable_counts"]), "unavailable counts"),
+    )
+    for claimed, observed, label in comparisons:
+        if claimed != observed:
+            raise ValueError(f"run identity feature {label} mismatch")
+
+
+def _actual_provider_identity(provider):
+    if provider is None:
+        return {
+            "cache_hash": None, "config_hash": None, "schema_version": "none",
+            "source_coverage": {}, "unavailable_counts": {}, "provenance": {},
+        }
+    required = (
+        "feature_cache_hash", "feature_cache_schema_version", "feature_source_coverage",
+        "feature_unavailable_counts", "feature_provenance",
+    )
+    missing = tuple(field for field in required if not hasattr(provider, field))
+    if missing:
+        raise ValueError(f"feature provider omitted provenance fields: {', '.join(missing)}")
+    values = {
+        "cache_hash": provider.feature_cache_hash,
+        "config_hash": feature_provider_config_hash(provider),
+        "schema_version": provider.feature_cache_schema_version,
+        "source_coverage": provider.feature_source_coverage,
+        "unavailable_counts": provider.feature_unavailable_counts,
+        "provenance": provider.feature_provenance,
+    }
+    if (
+        _SHA256.fullmatch(str(values["cache_hash"])) is None
+        or not isinstance(values["schema_version"], str) or not values["schema_version"]
+        or type(values["source_coverage"]) is not dict
+        or type(values["unavailable_counts"]) is not dict
+        or type(values["provenance"]) is not dict
+        or any(not isinstance(key, str) or not isinstance(count, int) or isinstance(count, bool) or count < 0
+               for key, count in values["source_coverage"].items())
+        or any(not isinstance(key, str) or not isinstance(count, int) or isinstance(count, bool) or count < 0
+               for key, count in values["unavailable_counts"].items())
     ):
         raise ValueError("feature provider provenance values are invalid")
-    if identity.feature_cache_hash != expected_cache:
-        raise ValueError("run identity feature cache hash mismatch")
-    if identity.feature_config_hash != expected_config:
-        raise ValueError("run identity feature config hash mismatch")
-    if identity.feature_cache_schema_version != expected_schema:
-        raise ValueError("run identity feature cache schema mismatch")
-    if identity.feature_provenance_hash != candidate_definition_hash(expected_provenance):
-        raise ValueError("run identity feature provenance mismatch")
-    if identity.feature_source_coverage_hash != candidate_definition_hash(expected_coverage):
-        raise ValueError("run identity feature source coverage mismatch")
-    if identity.feature_unavailable_counts_hash != candidate_definition_hash(expected_unavailable):
-        raise ValueError("run identity feature unavailable counts mismatch")
+    return values
 
 
 def _base_evidence_fields(entry, identity, component_fingerprint, outcome_start_at):
@@ -891,22 +919,9 @@ class AppendOnlyEvidenceLedger:
                 if not raw.strip():
                     continue
                 if not raw.endswith(b"\n"):
-                    digest = hashlib.sha256(raw).hexdigest()
-                    quarantine = self.path.with_name(
-                        f"{self.path.name}.truncated-{digest[:12]}.jsonl"
+                    recovery["truncated_final_line"] = _recover_truncated_frame(
+                        self.path, raw=raw, offset=offset, line_number=line_number
                     )
-                    if not quarantine.exists():
-                        quarantine.write_bytes(raw)
-                    with self.path.open("r+b") as output:
-                        output.truncate(offset)
-                        output.flush()
-                        os.fsync(output.fileno())
-                    recovery["truncated_final_line"] = {
-                        "line_number": line_number,
-                        "quarantine_path": str(quarantine),
-                        "sha256": digest,
-                        "truncated_to_byte": offset,
-                    }
                     break
                 try:
                     row = json.loads(raw.decode("utf-8"))
@@ -952,6 +967,74 @@ class AppendOnlyEvidenceLedger:
             finally:
                 os.close(descriptor)
         return True
+
+
+def _recover_truncated_frame(path: Path, *, raw: bytes, offset: int, line_number: int):
+    digest = hashlib.sha256(raw).hexdigest()
+    quarantine = path.with_name(f"{path.name}.truncated-{digest[:12]}.jsonl")
+    _durably_write_quarantine(quarantine, raw)
+    _truncate_source_to_offset(path, offset)
+    return {
+        "line_number": line_number,
+        "quarantine_path": str(quarantine),
+        "sha256": digest,
+        "truncated_to_byte": offset,
+    }
+
+
+def _durably_write_quarantine(path: Path, raw: bytes) -> None:
+    descriptor = None
+    created = False
+    try:
+        descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        created = True
+    except FileExistsError:
+        existing = path.read_bytes()
+        if existing != raw:
+            raise ValueError(f"conflicting truncated-frame quarantine: {path}")
+        descriptor = os.open(path, os.O_RDWR)
+    try:
+        if created:
+            position = 0
+            while position < len(raw):
+                written = os.write(descriptor, raw[position:])
+                if written <= 0:
+                    raise OSError("incomplete quarantine frame write")
+                position += written
+        os.fsync(descriptor)
+    except BaseException:
+        if created:
+            try:
+                os.close(descriptor)
+            finally:
+                descriptor = None
+                path.unlink(missing_ok=True)
+        raise
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    _fsync_parent_directory(path.parent)
+
+
+def _truncate_source_to_offset(path: Path, offset: int) -> None:
+    with path.open("r+b") as output:
+        output.truncate(offset)
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    descriptor = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+        os.fsync(descriptor)
+    except OSError:
+        return
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def evidence_lock_path(path: Path) -> Path:

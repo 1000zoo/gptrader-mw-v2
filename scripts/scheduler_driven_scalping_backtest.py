@@ -3256,7 +3256,7 @@ def close_trade(
         owner_max_holding_bars=position.owner_max_holding_bars,
         maximum_adverse_excursion_ratio=(
             _maximum_adverse_excursion_ratio(position, market, index)
-            if market is not None else Decimal("0")
+            if market is not None else None
         ),
     )
 
