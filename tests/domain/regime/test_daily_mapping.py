@@ -469,10 +469,13 @@ def test_artifact_hash_is_canonical_and_binds_the_payload():
     assert permuted.candidate_assessments == first.candidate_assessments
     assert daily_mapping_artifact_hash(first) == daily_mapping_artifact_hash(permuted)
     assert len(daily_mapping_artifact_hash(first)) == 64
+    assert daily_mapping_artifact_hash(first) == "85ea3693026dee3978b540191111cc1a95834fe155387a33af47af491499e719"
     assert daily_mapping_artifact_hash(first) != daily_mapping_artifact_hash(
         replace(first, model_artifact_hash=sha("different-model"))
     )
-    assert first.canonical_payload()["research_profile"] == {
+    research_profile = first.canonical_payload()["research_profile"]
+    assert {"strict_risk_policy", "sensitivity_policies"} <= set(research_profile)
+    assert research_profile == {
         "profile_id": PROFILE_ID,
         "random_seed": 20260714,
         "model_type": "gmm",
@@ -490,6 +493,29 @@ def test_artifact_hash_is_canonical_and_binds_the_payload():
         "decimal_arithmetic": {
             "precision": 50,
             "rounding": "ROUND_HALF_EVEN",
+        },
+        "strict_risk_policy": {
+            "minimum_worst_seven_day_return_ratio": "-0.03",
+            "minimum_expected_shortfall_10_ratio": "-0.01",
+            "maximum_drawdown_ratio": "0.10",
+            "maximum_top_episode_profit_share": "0.40",
+            "maximum_top_five_trade_profit_share": "0.60",
+        },
+        "sensitivity_policies": {
+            "looser": {
+                "minimum_worst_seven_day_return_ratio": "-0.04",
+                "minimum_expected_shortfall_10_ratio": "-0.015",
+                "maximum_drawdown_ratio": "0.125",
+                "maximum_top_episode_profit_share": "0.45",
+                "maximum_top_five_trade_profit_share": "0.65",
+            },
+            "tighter": {
+                "minimum_worst_seven_day_return_ratio": "-0.02",
+                "minimum_expected_shortfall_10_ratio": "-0.0075",
+                "maximum_drawdown_ratio": "0.075",
+                "maximum_top_episode_profit_share": "0.35",
+                "maximum_top_five_trade_profit_share": "0.55",
+            },
         },
         "fold": {
             "cluster_fit": {"start_at": "2021-01-01T00:00:00Z", "end_at": "2025-06-30T00:00:00Z"},

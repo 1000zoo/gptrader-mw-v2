@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 import json
 
 import pytest
@@ -219,6 +220,38 @@ def test_artifact_component_ids_use_original_feature_space_profiles() -> None:
     assert artifact.canonical_fingerprint_order == tuple(sorted(expected))
     assert expected != scaled.fingerprints
     assert ThreeDayK4ModelArtifact.from_json(artifact.to_json()).assign(_vector()).fingerprint in expected
+
+
+@pytest.mark.parametrize("mode", ("precision_collapse", "overflow"))
+def test_artifact_rejects_ambiguous_or_nonfinite_original_space_component_profiles(mode: str) -> None:
+    fit = _fit()
+    if mode == "precision_collapse":
+        records = sorted(
+            (
+                component_fingerprint(
+                    model_type="gmm", feature_schema_version=fit.schema_version,
+                    feature_names=fit.feature_names, mean=mean,
+                    covariance=fit.covariances[index], weight=0.25,
+                ),
+                mean,
+                fit.covariances[index],
+            )
+            for index, mean in enumerate(fit.means)
+        )
+        changed = replace(
+            fit,
+            medians=(1e308,) * 4,
+            fingerprints=tuple(row[0] for row in records),
+            means=tuple(row[1] for row in records),
+            covariances=tuple(row[2] for row in records),
+            weights=(0.25,) * 4,
+        )
+    else:
+        changed = replace(fit, scales=(1e308,) * 4)
+    base = _artifact()
+    kwargs = {key: value for key, value in base.__dict__.items() if key not in {"fit", "artifact_hash"}}
+    with pytest.raises(ValueError, match="original-space|ambiguous|nonfinite|unique"):
+        ThreeDayK4ModelArtifact.from_fit(changed, **kwargs)
 
 
 @pytest.mark.parametrize("field", ("profile_id", "feature_schema_version", "training_start_at", "feature_history_hash"))

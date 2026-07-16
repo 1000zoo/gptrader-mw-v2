@@ -108,23 +108,49 @@ def _pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
+def _original_space_profiles(
+    fit: ClusterDiagnosticFit,
+) -> tuple[tuple[tuple[float, ...], tuple[float, ...], float], ...]:
+    profiles = []
+    try:
+        for component, (mean, covariance) in enumerate(zip(fit.means, fit.covariances)):
+            original_mean = tuple(
+                mean[index] * fit.scales[index] + fit.medians[index]
+                for index in range(len(fit.feature_names))
+            )
+            original_variance = tuple(
+                covariance[index] * (fit.scales[index] * fit.scales[index])
+                for index in range(len(fit.feature_names))
+            )
+            if any(not math.isfinite(value) for value in (*original_mean, *original_variance)):
+                raise ValueError("original-space component profile contains nonfinite values")
+            if any(value <= 0 for value in original_variance):
+                raise ValueError("original-space component variance underflow is ambiguous")
+            for index, value in enumerate(original_mean):
+                reconstructed = (value - fit.medians[index]) / fit.scales[index]
+                if not math.isclose(reconstructed, mean[index], rel_tol=1e-12, abs_tol=1e-15):
+                    raise ValueError("original-space component mean precision collapse is ambiguous")
+            for index, value in enumerate(original_variance):
+                reconstructed = value / (fit.scales[index] * fit.scales[index])
+                if not math.isclose(reconstructed, covariance[index], rel_tol=1e-12, abs_tol=1e-15):
+                    raise ValueError("original-space component variance precision collapse is ambiguous")
+            profiles.append((original_mean, original_variance, fit.weights[component]))
+    except OverflowError as exc:
+        raise ValueError("original-space component profile overflow is nonfinite") from exc
+    return tuple(profiles)
+
+
 def _original_space_fingerprints(fit: ClusterDiagnosticFit) -> tuple[str, ...]:
     return tuple(
         component_fingerprint(
             model_type="gmm",
             feature_schema_version=fit.schema_version,
             feature_names=fit.feature_names,
-            mean=tuple(
-                mean[index] * fit.scales[index] + fit.medians[index]
-                for index in range(len(fit.feature_names))
-            ),
-            covariance=tuple(
-                covariance[index] * fit.scales[index] ** 2
-                for index in range(len(fit.feature_names))
-            ),
-            weight=fit.weights[component],
+            mean=mean,
+            covariance=variance,
+            weight=weight,
         )
-        for component, (mean, covariance) in enumerate(zip(fit.means, fit.covariances))
+        for mean, variance, weight in _original_space_profiles(fit)
     )
 
 
@@ -254,6 +280,16 @@ class ThreeDayK4ModelArtifact:
             raise ValueError("retained feature family cap is violated")
         if any(not _HEX24.fullmatch(value) for value in self.fit.fingerprints):
             raise ValueError("component fingerprints must be lowercase 24-hex")
+        artifact_fingerprints = _original_space_fingerprints(self.fit)
+        if (
+            len(artifact_fingerprints) != 4
+            or len(set(artifact_fingerprints)) != 4
+            or any(not _HEX24.fullmatch(value) for value in artifact_fingerprints)
+        ):
+            raise ValueError("original-space artifact component fingerprints must be exactly four unique lowercase 24-hex identities")
+        index_mapping = dict(enumerate(artifact_fingerprints))
+        if set(index_mapping) != set(range(4)) or len(set(index_mapping.values())) != 4:
+            raise ValueError("fit-index to artifact fingerprint mapping must be bijective")
         expected_interval = profile.fold.cluster_fit
         if self.training_start_at != expected_interval.start_at or self.training_end_at != expected_interval.end_at:
             raise ValueError("training interval is incompatible")
