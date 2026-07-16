@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
+import re
 from typing import Mapping
 
 
@@ -14,6 +15,25 @@ class RuntimeMode(Enum):
 def _value(env: Mapping[str, str], name: str, default: str) -> str:
     value = env.get(name, default)
     return value.strip() if isinstance(value, str) else default
+
+
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+def _strict_bool_env(env: Mapping[str, str], name: str, default: bool) -> bool:
+    if name not in env:
+        return default
+    value = env[name]
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise ValueError(f"{name} must be exactly true or false")
+
+
+def _optional_value(env: Mapping[str, str], name: str) -> str | None:
+    value = _value(env, name, "")
+    return value or None
 
 
 @dataclass(frozen=True)
@@ -40,8 +60,16 @@ class RuntimeSettings:
     max_leverage: Decimal = Decimal("5")
     fixed_equity_ratio: Decimal = Decimal("0.01")
     fixed_leverage: Decimal = Decimal("1")
+    regime_selection_enabled: bool = False
+    regime_model_artifact_path: str | None = None
+    regime_mapping_artifact_path: str | None = None
+    regime_candidate_definition_hash: str | None = None
+    regime_candidate_universe_hash: str | None = None
+    regime_data_provenance_hash: str | None = None
 
     def __post_init__(self) -> None:
+        if type(self.regime_selection_enabled) is not bool:
+            raise ValueError("regime_selection_enabled must be a strict boolean")
         if self.mode is RuntimeMode.LIVE_ARMED and not self.live_armed:
             raise ValueError("live-armed mode requires GPTRADER_LIVE_ARMED=true")
         if not self.symbol.strip():
@@ -84,6 +112,40 @@ class RuntimeSettings:
             raise ValueError("fixed_leverage must be positive")
         if self.fixed_leverage > Decimal("15"):
             raise ValueError("fixed_leverage cannot exceed 15")
+        for field in ("regime_model_artifact_path", "regime_mapping_artifact_path"):
+            value = getattr(self, field)
+            if value is not None:
+                if not isinstance(value, str):
+                    raise ValueError(f"{field} must be text or None")
+                normalized = value.strip()
+                object.__setattr__(self, field, normalized or None)
+        for field in (
+            "regime_candidate_definition_hash",
+            "regime_candidate_universe_hash",
+            "regime_data_provenance_hash",
+        ):
+            value = getattr(self, field)
+            if value is not None and (
+                not isinstance(value, str) or _SHA256.fullmatch(value) is None
+            ):
+                raise ValueError(f"{field} must be a canonical lowercase SHA256 hash")
+        if self.regime_selection_enabled:
+            if (
+                self.regime_model_artifact_path is None
+                or self.regime_mapping_artifact_path is None
+            ):
+                raise ValueError(
+                    "regime artifact paths are required when regime selection is enabled"
+                )
+            compatibility = (
+                self.regime_candidate_definition_hash,
+                self.regime_candidate_universe_hash,
+                self.regime_data_provenance_hash,
+            )
+            if any(value is None for value in compatibility):
+                raise ValueError(
+                    "regime compatibility hashes are required when regime selection is enabled"
+                )
         object.__setattr__(
             self,
             "backtest_strategy_ids",
@@ -151,6 +213,24 @@ class RuntimeSettings:
                 _value(env, "GPTRADER_FIXED_EQUITY_RATIO", "0.01")
             ),
             fixed_leverage=Decimal(_value(env, "GPTRADER_FIXED_LEVERAGE", "1")),
+            regime_selection_enabled=_strict_bool_env(
+                env, "GPTRADER_REGIME_SELECTION_ENABLED", False
+            ),
+            regime_model_artifact_path=_optional_value(
+                env, "GPTRADER_REGIME_MODEL_ARTIFACT_PATH"
+            ),
+            regime_mapping_artifact_path=_optional_value(
+                env, "GPTRADER_REGIME_MAPPING_ARTIFACT_PATH"
+            ),
+            regime_candidate_definition_hash=_optional_value(
+                env, "GPTRADER_REGIME_CANDIDATE_DEFINITION_HASH"
+            ),
+            regime_candidate_universe_hash=_optional_value(
+                env, "GPTRADER_REGIME_CANDIDATE_UNIVERSE_HASH"
+            ),
+            regime_data_provenance_hash=_optional_value(
+                env, "GPTRADER_REGIME_DATA_PROVENANCE_HASH"
+            ),
         )
 
 

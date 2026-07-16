@@ -101,3 +101,43 @@ def test_live_armed_mode_requires_live_binance_credentials() -> None:
                 "GPTRADER_LIVE_ARMED": "true",
             }
         )
+
+
+def test_regime_selection_is_disabled_by_default_and_does_not_require_artifacts() -> None:
+    settings = RuntimeSettings.from_env({})
+    assert settings.regime_selection_enabled is False
+    assert settings.regime_model_artifact_path is None
+
+
+def test_enabled_regime_selection_loads_artifact_compatibility_settings() -> None:
+    hashes = {name: character * 64 for name, character in (
+        ("GPTRADER_REGIME_CANDIDATE_DEFINITION_HASH", "a"),
+        ("GPTRADER_REGIME_CANDIDATE_UNIVERSE_HASH", "b"),
+        ("GPTRADER_REGIME_DATA_PROVENANCE_HASH", "c"),
+    )}
+    settings = RuntimeSettings.from_env({
+        "GPTRADER_REGIME_SELECTION_ENABLED": "true",
+        "GPTRADER_REGIME_MODEL_ARTIFACT_PATH": " artifacts/model.json ",
+        "GPTRADER_REGIME_MAPPING_ARTIFACT_PATH": " artifacts/mapping.json ",
+        **hashes,
+    })
+    assert settings.regime_model_artifact_path == "artifacts/model.json"
+    assert "regime_gmm_p_min" not in RuntimeSettings.__dataclass_fields__
+    assert "regime_kmeans_max_distance" not in RuntimeSettings.__dataclass_fields__
+
+
+@pytest.mark.parametrize("value", ["yes", "1", "", "TRUE "])
+def test_regime_selection_enabled_is_a_strict_environment_boolean(value) -> None:
+    with pytest.raises(ValueError, match="GPTRADER_REGIME_SELECTION_ENABLED"):
+        RuntimeSettings.from_env({"GPTRADER_REGIME_SELECTION_ENABLED": value})
+
+
+def test_enabled_regime_selection_requires_artifact_paths_and_hashes() -> None:
+    with pytest.raises(ValueError, match="regime artifact paths"):
+        RuntimeSettings(regime_selection_enabled=True)
+    with pytest.raises(ValueError, match="compatibility hashes"):
+        RuntimeSettings(
+            regime_selection_enabled=True,
+            regime_model_artifact_path="model.json",
+            regime_mapping_artifact_path="mapping.json",
+        )

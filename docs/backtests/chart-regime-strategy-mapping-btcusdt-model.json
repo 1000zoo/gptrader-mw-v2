@@ -1,0 +1,13 @@
+{
+  "artifact_hash": "51a4a13ebb1256f16250a137f43d57aaf1d7e4ce865bec8219fd60b081a0bb4e",
+  "artifact_type": "model",
+  "frozen_artifact_hashes": {
+    "mapping": "686dc5a447c0c2d4efafdce0b4e7d13be5401304018cafe7839ace549bdb8d9c",
+    "model": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+  },
+  "kind": "cash_only",
+  "reason": "no validation-frozen eligible model/mapping pair",
+  "schema_version": 1,
+  "symbol": "BTCUSDT",
+  "timeframe": "1m"
+}

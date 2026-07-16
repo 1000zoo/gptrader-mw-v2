@@ -1,6 +1,7 @@
 import hashlib
 import json
 import sys
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -25,6 +26,7 @@ from scripts.scheduler_driven_scalping_backtest import (
     run_walk_forward_search,
     summarize_walk_forward_results,
     run_scheduler_driven_backtest,
+    run_scheduler_driven_regime_backtest,
     write_candidate_manifest,
 )
 from src.domain.market import Candle, MarketSnapshot, Symbol, Timeframe
@@ -41,6 +43,467 @@ from src.domain.strategy.implementations.microstructure_alpha_strategy import (
     OpenInterestImpulseStrategy,
     PositioningCrowdingReversalStrategy,
 )
+from scripts.chart_regime_strategy_mapping import _validation_replay_metrics
+from src.domain.strategy import StrategyResult
+from src.domain.signal import Signal
+from src.domain.regime.model import ClusterAssignment
+from src.domain.regime.selection import (
+    SelectionArtifactSnapshot,
+    SelectionConfidenceThresholds,
+)
+from src.infrastructure.market_feature import EmptyMarketFeatureProvider
+
+
+class _ScriptedAssignments:
+    def __init__(self, assignments):
+        self.assignments = assignments
+        self.calls = []
+
+    def assignment_at(self, boundary_at, candles):
+        self.calls.append(boundary_at)
+        return ClusterAssignment(
+            fingerprint=self.assignments[boundary_at],
+            dominant_probability=1.0,
+            second_probability=0.0,
+            distance=0.0,
+        )
+
+
+def _selection_snapshot(mapping):
+    return SelectionArtifactSnapshot(
+        model_artifact_hash="a" * 64,
+        mapping_artifact_hash="b" * 64,
+        cluster_strategy_mapping=mapping,
+        model_type="kmeans",
+        confidence_thresholds=SelectionConfidenceThresholds(
+            model_type="kmeans",
+            kmeans_max_standardized_distances={key: 1.0 for key in mapping},
+        ),
+    )
+
+
+def _regime_market(
+    start, hours=9, *, profit_at=None, context_minutes=1, close_at=None, vary=False
+):
+    candles = []
+    for index in range(-context_minutes, hours * 60):
+        opened = start + timedelta(minutes=index)
+        profit = profit_at is not None and opened == profit_at
+        base = Decimal("100") + (Decimal(index % 60) / Decimal("100") if vary else Decimal("0"))
+        final_close = close_at if close_at is not None and index == hours * 60 - 1 else base
+        candles.append(Candle(
+            symbol=Symbol("BTC", "USDT"), timeframe=Timeframe(1, "m"),
+            opened_at=opened, closed_at=opened + timedelta(minutes=1),
+            open_price=base,
+            high_price=Decimal("102") if profit else max(base, final_close) + (Decimal("0.01") if vary else Decimal("0")),
+            low_price=min(base, final_close) - (Decimal("0.01") if vary else Decimal("0")),
+            close_price=final_close, volume=Decimal("1") + Decimal(index % 17) / Decimal("10") if vary else Decimal("1"),
+        ))
+    return MarketSnapshot(tuple(candles))
+
+
+def _regime_candidate(candidate_id="strategy-x"):
+    return SchedulerBacktestCandidate(
+        candidate_id=candidate_id,
+        strategies=(StrategyCandidateSpec("unused", {}),),
+        take_profit_ratio=Decimal("0.01"), stop_loss_ratio=Decimal("0.5"),
+        equity_ratio=Decimal("0.1"), leverage=Decimal("2"), candle_limit=1,
+    )
+
+
+def _actual_artifact_pair(candidates):
+    import scripts.scheduler_driven_scalping_backtest as module
+    from tests.infrastructure.regime.test_json_regime_artifact_repository import (
+        _canonical_hash,
+        _mapping,
+        _model,
+    )
+
+    model = replace(_model(), distance_thresholds=(100.0, 100.0, 100.0))
+    mapping = _mapping(model)
+    hashes = {
+        candidate.candidate_id: module._audited_candidate_hash(
+            candidate, symbol=Symbol("BTC", "USDT"), initial_equity=Decimal("10000")
+        )
+        for candidate in candidates
+    }
+    first_cluster = model.fingerprints[0]
+    winner = mapping.candidate_assessments[first_cluster]["alpha"]
+    winner_entry = mapping.entries[first_cluster]
+    assessments = {}
+    entries = {}
+    for cluster, rows in mapping.candidate_assessments.items():
+        assessments[cluster] = {
+            "alpha": replace(
+                winner, cluster_fingerprint=cluster, candidate_hash=hashes["alpha"]
+            ),
+            "beta": replace(rows["beta"], candidate_hash=hashes["beta"]),
+        }
+        entries[cluster] = replace(winner_entry, cluster_fingerprint=cluster)
+    mapping = replace(
+        mapping,
+        candidate_hashes=hashes,
+        candidate_universe_hash=_canonical_hash(
+            {"candidate_ids": tuple(sorted(hashes))}
+        ),
+        candidate_definition_hash=_canonical_hash(
+            {"candidate_hashes": dict(sorted(hashes.items()))}
+        ),
+        candidate_assessments=assessments,
+        entries=entries,
+    )
+    return model, mapping
+
+
+def test_regime_replay_confirms_cluster_before_switching_strategy(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    class AlwaysWait:
+        def evaluate(self, context):
+            return StrategyResult("wait", Signal.wait())
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysWait(),))
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    provider = _ScriptedAssignments({
+        start: "cluster-a",
+        start + timedelta(hours=4): "cluster-b",
+        start + timedelta(hours=8): "cluster-b",
+    })
+    result = run_scheduler_driven_regime_backtest(
+        _regime_market(start), start_at=start, end_at=start + timedelta(hours=9),
+        candidates=(_regime_candidate("strategy-x"), _regime_candidate("strategy-y")),
+        model=provider,
+        mapping=_selection_snapshot({"cluster-a": "strategy-x", "cluster-b": "strategy-y"}),
+    )
+
+    assert [row["type"] for row in result["selection_events"]] == [
+        "classification", "classification", "cluster_transition", "strategy_transition"
+    ]
+    assert result["selection_events"][1]["active_strategy_profile_id"] == "strategy-x"
+    assert result["selection_events"][-1]["active_strategy_profile_id"] == "strategy-y"
+    assert provider.calls == [start, start + timedelta(hours=4), start + timedelta(hours=8)]
+    assert result["signal_discontinuity_count"] == 1
+    assert result["signal_discontinuity_definition"] == "active_signal_generator_identity_changes_v1"
+
+
+def test_regime_replay_cash_blocks_entries_but_owner_position_still_exits(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    class AlwaysLong:
+        def evaluate(self, context):
+            return StrategyResult("long", Signal(SignalDirection.LONG, Decimal("1")))
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysLong(),))
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    result = run_scheduler_driven_regime_backtest(
+        _regime_market(start, profit_at=start + timedelta(hours=8)),
+        start_at=start, end_at=start + timedelta(hours=9),
+        candidates=(_regime_candidate(),),
+        assignment_provider=_ScriptedAssignments({
+            start: "cluster-a", start + timedelta(hours=4): "cluster-b",
+            start + timedelta(hours=8): "cluster-b",
+        }),
+        artifact_snapshot=_selection_snapshot({"cluster-a": "strategy-x", "cluster-b": None}),
+    )
+
+    assert result["entries_while_cash"] == 0
+    assert result["trade_count"] == 1
+    assert result["trades"][0]["entry_at"] == start.isoformat()
+    assert result["trades"][0]["exit_reason"] == "take_profit"
+    assert result["trades"][0]["owner_strategy_profile_id"] == "strategy-x"
+    assert result["transition_counts"]["cash"] == 1
+    assert result["signal_discontinuity_count"] == 1
+
+
+def test_regime_replay_same_strategy_cluster_transition_reuses_bundle(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    class AlwaysWait:
+        def evaluate(self, context):
+            return StrategyResult("wait", Signal.wait())
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysWait(),))
+    original = module._build_regime_bundle
+    builds = []
+    monkeypatch.setattr(
+        module, "_build_regime_bundle",
+        lambda candidate, **kwargs: builds.append(candidate.candidate_id) or original(candidate, **kwargs),
+    )
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    result = run_scheduler_driven_regime_backtest(
+        _regime_market(start), start_at=start, end_at=start + timedelta(hours=9),
+        candidates=(_regime_candidate(),),
+        assignment_provider=_ScriptedAssignments({
+            start: "cluster-a", start + timedelta(hours=4): "cluster-b",
+            start + timedelta(hours=8): "cluster-b",
+        }),
+        artifact_snapshot=_selection_snapshot({"cluster-a": "strategy-x", "cluster-b": "strategy-x"}),
+    )
+
+    assert builds == ["strategy-x"]
+    assert result["transition_counts"]["cluster"] == 1
+    assert result["transition_counts"]["strategy"] == 0
+    assert result["signal_discontinuity_count"] == 0
+
+
+def test_regime_replay_requires_start_on_four_hour_boundary() -> None:
+    start = datetime(2026, 1, 5, 1, tzinfo=timezone.utc)
+    with pytest.raises(ValueError, match="four-hour"):
+        run_scheduler_driven_regime_backtest(
+            _regime_market(start), start_at=start, end_at=start + timedelta(hours=1),
+            candidates=(_regime_candidate(),),
+            model=_ScriptedAssignments({}),
+            mapping=_selection_snapshot({"cluster-a": "strategy-x"}),
+        )
+
+
+@pytest.mark.parametrize("terminal_kind", ("take_profit", "losing_force_close"))
+def test_regime_replay_terminal_equity_and_drawdown_include_end_candle(
+    monkeypatch, terminal_kind
+) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    class AlwaysLong:
+        def evaluate(self, context):
+            return StrategyResult("long", Signal(SignalDirection.LONG, Decimal("1")))
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysLong(),))
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    end = start + timedelta(hours=1)
+    market = _regime_market(
+        start,
+        hours=1,
+        profit_at=end - timedelta(minutes=1) if terminal_kind == "take_profit" else None,
+        close_at=Decimal("90") if terminal_kind == "losing_force_close" else None,
+    )
+    result = run_scheduler_driven_regime_backtest(
+        market, start_at=start, end_at=end, candidates=(_regime_candidate(),),
+        model=_ScriptedAssignments({start: "cluster-a"}),
+        mapping=_selection_snapshot({"cluster-a": "strategy-x"}),
+    )
+
+    assert _validation_replay_metrics(result) == (
+        Decimal(result["return_ratio"]),
+        Decimal(result["portfolio_max_drawdown_ratio"]),
+        Decimal(result["actual_turnover_notional"]),
+    )
+
+    assert result["trades"][0]["exit_reason"] == (
+        "take_profit" if terminal_kind == "take_profit" else "end_of_data"
+    )
+    assert result["equity_curve"][-1] == {
+        "timestamp": end.isoformat(), "equity": result["final_equity"]
+    }
+    assert sum(row["timestamp"] == end.isoformat() for row in result["equity_curve"]) == 1
+    if terminal_kind == "losing_force_close":
+        assert Decimal(result["portfolio_max_drawdown_ratio"]) > 0
+
+
+def test_regime_replay_uses_provider_warmup_and_reports_provenance(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    class AlwaysWait:
+        def evaluate(self, context):
+            return StrategyResult("wait", Signal.wait())
+
+    class Provider(EmptyMarketFeatureProvider):
+        required_warmup_candles = 5
+        feature_cache_hash = "cache-hash"
+        feature_config_hash = "config-hash"
+        feature_source_coverage = {"source": 10}
+        feature_unavailable_counts = {"source": 0}
+        feature_provenance = {"provider": "fixture"}
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysWait(),))
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    result = run_scheduler_driven_regime_backtest(
+        _regime_market(start, hours=1, context_minutes=5),
+        start_at=start, end_at=start + timedelta(hours=1),
+        candidates=(_regime_candidate(),),
+        model=_ScriptedAssignments({start: "cluster-a"}),
+        mapping=_selection_snapshot({"cluster-a": "strategy-x"}),
+        market_feature_provider=Provider(),
+    )
+
+    assert result["required_warmup_candles"] == 5
+    assert result["feature_cache_hash"] == "cache-hash"
+    assert result["feature_source_coverage"] == {"source": 10}
+    assert result["feature_unavailable_counts"] == {"source": 0}
+    assert result["feature_provenance"] == {"provider": "fixture"}
+    assert len(result["feature_config_hash"]) == 64
+    assert result["assignment_source"] == "scripted"
+
+
+def test_regime_replay_actual_artifacts_extract_exact_prior_week_and_assign(
+    monkeypatch,
+) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    class AlwaysLong:
+        def evaluate(self, context):
+            return StrategyResult(
+                "long", Signal(SignalDirection.LONG, Decimal("1"))
+            )
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysLong(),))
+    candidates = (_regime_candidate("alpha"), _regime_candidate("beta"))
+    model, mapping = _actual_artifact_pair(candidates)
+    start = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    extracted = []
+    assigned = []
+    original_extract = module.ChartFeatureExtractor.extract
+    original_assign = module.SklearnRegimeModel.assign
+
+    def spy_extract(self, candles, anchor_at):
+        candles = tuple(candles)
+        extracted.append((len(candles), candles[0].opened_at, candles[-1].closed_at, anchor_at))
+        return original_extract(self, candles, anchor_at)
+
+    def spy_assign(self, artifact, vectors):
+        assigned.append((artifact, vectors))
+        return original_assign(self, artifact, vectors)
+
+    monkeypatch.setattr(module.ChartFeatureExtractor, "extract", spy_extract)
+    monkeypatch.setattr(module.SklearnRegimeModel, "assign", spy_assign)
+    result = run_scheduler_driven_regime_backtest(
+        _regime_market(start, hours=5, context_minutes=7 * 24 * 60, vary=True),
+        start_at=start, end_at=start + timedelta(hours=5), candidates=candidates,
+        model=model, mapping=mapping,
+    )
+
+    assert extracted == [
+        (10080, start - timedelta(days=7), start, start),
+        (
+            10080,
+            start - timedelta(days=7) + timedelta(hours=4),
+            start + timedelta(hours=4),
+            start + timedelta(hours=4),
+        ),
+    ]
+    assert len(assigned) == 2
+    assert result["assignment_source"] == "artifact"
+    assert result["selection_events"][0]["boundary_at"] == start.isoformat()
+    assert result["candidate_definition_hashes"] == dict(mapping.candidate_hashes)
+    assert result["trade_count"] == 1
+    trade = result["trades"][0]
+    assert trade["owner_candidate_definition_hash"] == result[
+        "candidate_definition_hashes"
+    ][trade["owner_strategy_profile_id"]]
+    assert result["candidate_universe_hash"] == mapping.candidate_universe_hash
+    assert result["candidate_definition_hash"] == mapping.candidate_definition_hash
+
+
+def test_regime_replay_rejects_future_fitted_model() -> None:
+    candidates = (_regime_candidate("alpha"), _regime_candidate("beta"))
+    model, _ = _actual_artifact_pair(candidates)
+    start = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    model = replace(model, training_end_at=start + timedelta(days=1))
+    from tests.infrastructure.regime.test_json_regime_artifact_repository import _mapping
+    mapping = _mapping(model)
+
+    with pytest.raises(ValueError, match="training_end_at"):
+        run_scheduler_driven_regime_backtest(
+            _regime_market(start, hours=1), start_at=start,
+            end_at=start + timedelta(hours=1), candidates=candidates,
+            model=model, mapping=mapping,
+        )
+
+
+def test_regime_replay_rejects_mapping_episode_overlapping_start() -> None:
+    from tests.infrastructure.regime.test_json_regime_artifact_repository import _mapping, _model
+
+    start = datetime(2026, 1, 12, tzinfo=timezone.utc)
+    model = _model()
+    mapping = _mapping(model)
+    candidates = (_regime_candidate("alpha"), _regime_candidate("beta"))
+
+    with pytest.raises(ValueError, match="evidence episode"):
+        run_scheduler_driven_regime_backtest(
+            _regime_market(start, hours=1), start_at=start,
+            end_at=start + timedelta(hours=1), candidates=candidates,
+            model=model, mapping=mapping,
+        )
+
+
+def test_regime_replay_accepts_exact_model_mapping_purge_boundary() -> None:
+    candidates = (_regime_candidate("alpha"), _regime_candidate("beta"))
+    model, mapping = _actual_artifact_pair(candidates)
+    assert min(
+        start
+        for rows in mapping.candidate_assessments.values()
+        for assessment in rows.values()
+        for start in assessment.effective_episode_starts
+    ) == model.training_end_at + timedelta(days=7)
+
+
+def test_regime_replay_rejects_mapping_one_minute_short_of_purge() -> None:
+    from tests.infrastructure.regime.test_json_regime_artifact_repository import _mapping, _model
+
+    start = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    model = replace(
+        _model(), training_end_at=datetime(2025, 12, 29, 0, 1, tzinfo=timezone.utc)
+    )
+    mapping = _mapping(model)
+    candidates = (_regime_candidate("alpha"), _regime_candidate("beta"))
+
+    with pytest.raises(ValueError, match="purge interval"):
+        run_scheduler_driven_regime_backtest(
+            _regime_market(start, hours=1), start_at=start,
+            end_at=start + timedelta(hours=1), candidates=candidates,
+            model=model, mapping=mapping,
+        )
+
+
+def test_regime_replay_rejects_model_symbol_before_replay_work() -> None:
+    from tests.infrastructure.regime.test_json_regime_artifact_repository import _mapping, _model
+
+    start = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    model = replace(_model(), symbol="ETHUSDT")
+    mapping = _mapping(model)
+    with pytest.raises(ValueError, match="model symbol"):
+        run_scheduler_driven_regime_backtest(
+            _regime_market(start, hours=1), start_at=start,
+            end_at=start + timedelta(hours=1),
+            candidates=(_regime_candidate("alpha"), _regime_candidate("beta")),
+            model=model, mapping=mapping,
+        )
+
+
+def test_regime_replay_rejects_candidate_hash_mismatch() -> None:
+    candidates = (_regime_candidate("alpha"), _regime_candidate("beta"))
+    model, mapping = _actual_artifact_pair(candidates)
+    changed = replace(candidates[0], take_profit_ratio=Decimal("0.02"))
+    start = datetime(2026, 7, 6, tzinfo=timezone.utc)
+
+    with pytest.raises(ValueError, match="candidate definition hash"):
+        run_scheduler_driven_regime_backtest(
+            _regime_market(start, hours=1), start_at=start,
+            end_at=start + timedelta(hours=1), candidates=(changed, candidates[1]),
+            model=model, mapping=mapping,
+        )
+
+
+def test_regime_replay_candidate_audit_hash_fields_match_across_modes(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    class AlwaysWait:
+        def evaluate(self, context):
+            return StrategyResult("wait", Signal.wait())
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysWait(),))
+    candidates = (_regime_candidate("alpha"), _regime_candidate("beta"))
+    _, mapping = _actual_artifact_pair(candidates)
+    start = datetime(2026, 7, 6, tzinfo=timezone.utc)
+    scripted = run_scheduler_driven_regime_backtest(
+        _regime_market(start, hours=1), start_at=start,
+        end_at=start + timedelta(hours=1), candidates=candidates,
+        model=_ScriptedAssignments({start: "cluster"}),
+        mapping=_selection_snapshot({"cluster": "alpha"}),
+    )
+
+    assert scripted["candidate_definition_hashes"] == dict(mapping.candidate_hashes)
+    assert scripted["candidate_universe_hash"] == mapping.candidate_universe_hash
+    assert scripted["candidate_definition_hash"] == mapping.candidate_definition_hash
 
 
 def test_deferred_strategy_registry_is_complete_and_evidence_exists() -> None:
@@ -283,8 +746,246 @@ def test_scheduler_driven_backtest_uses_scheduler_path_without_external_io() -> 
 
     assert result["engine"] == "scheduler_driven"
     assert result["scheduler_path"] == "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute"
-    assert result["signal_count"] == 39
+    # The candle closing exactly at end_at is terminal management context, not an entry decision.
+    assert result["signal_count"] == 38
     assert result["trade_count"] == 0
+
+
+def test_scheduler_backtest_default_output_matches_explicit_legacy_options() -> None:
+    market = _flat_market()
+    kwargs = {
+        "start_at": market.candles[0].opened_at,
+        "end_at": market.candles[-1].closed_at,
+        "include_deferred": True,
+    }
+
+    implicit = run_scheduler_driven_backtest(market, **kwargs)
+    explicit = run_scheduler_driven_backtest(
+        market,
+        **kwargs,
+        initial_equity=Decimal("10000"),
+        include_trade_details=False,
+        force_close_at_end=True,
+    )
+
+    assert implicit == explicit
+    assert "trades" not in implicit
+
+
+def test_scheduler_backtest_default_payload_has_frozen_json_schema() -> None:
+    market = _flat_market()
+    result = run_scheduler_driven_backtest(
+        market,
+        start_at=market.opened_at,
+        end_at=market.closed_at,
+        include_deferred=True,
+    )
+
+    assert tuple(result) == (
+        "engine",
+        "candidate_id",
+        "symbol",
+        "scheduler_path",
+        "cost_model",
+        "start_at",
+        "end_at",
+        "trade_count",
+        "trades_per_day",
+        "daily_return_ratio",
+        "net_win_rate",
+        "return_ratio",
+        "gross_pnl",
+        "net_pnl",
+        "fee_paid",
+        "max_drawdown_ratio",
+        "average_net_trade_roe",
+        "average_net_trade_expectancy_ratio",
+        "signal_count",
+        "skipped_by_guard",
+        "candidate",
+        "candidate_definition_hash",
+        "feature_cache_hash",
+        "feature_source_coverage",
+        "feature_unavailable_counts",
+        "feature_provenance",
+        "future_feature_access_count",
+    )
+    assert {key: type(value) for key, value in result.items()} == {
+        "engine": str, "candidate_id": str, "symbol": str, "scheduler_path": str,
+        "cost_model": dict, "start_at": str, "end_at": str, "trade_count": int,
+        "trades_per_day": str, "daily_return_ratio": str, "net_win_rate": str,
+        "return_ratio": str, "gross_pnl": str, "net_pnl": str, "fee_paid": str,
+        "max_drawdown_ratio": str, "average_net_trade_roe": str,
+        "average_net_trade_expectancy_ratio": str, "signal_count": int,
+        "skipped_by_guard": int, "candidate": dict, "candidate_definition_hash": str,
+        "feature_cache_hash": type(None), "feature_source_coverage": dict,
+        "feature_unavailable_counts": dict, "feature_provenance": dict,
+        "future_feature_access_count": int,
+    }
+    assert isinstance(json.dumps(result, sort_keys=True), str)
+    assert not ({"trades", "initial_equity", "final_equity", "feature_config_hash"} & result.keys())
+
+
+def test_scheduler_context_warmup_can_make_first_episode_decision_eligible(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    evaluated = []
+
+    class AlwaysLong:
+        def evaluate(self, context):
+            evaluated.append(context.market.latest_candle.closed_at)
+            return StrategyResult("always-long", Signal(SignalDirection.LONG, Decimal("1")))
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysLong(),))
+    candles = tuple(
+        Candle(
+            symbol=Symbol("BTC", "USDT"),
+            timeframe=Timeframe(1, "m"),
+            opened_at=start + timedelta(minutes=index),
+            closed_at=start + timedelta(minutes=index + 1),
+            open_price=Decimal("100"), high_price=Decimal("100"),
+            low_price=Decimal("100"), close_price=Decimal("100"), volume=Decimal("1"),
+        )
+        for index in range(-3, 2)
+    )
+    candidate = SchedulerBacktestCandidate(
+        candidate_id="context-candidate",
+        strategies=(StrategyCandidateSpec("unused", {}),),
+        take_profit_ratio=Decimal("0.5"), stop_loss_ratio=Decimal("0.5"),
+        equity_ratio=Decimal("0.1"), leverage=Decimal("2"), candle_limit=3,
+    )
+    result = run_scheduler_driven_backtest(
+        MarketSnapshot(candles),
+        context_start_at=start - timedelta(minutes=3),
+        start_at=start,
+        end_at=start + timedelta(minutes=2),
+        candidate=candidate,
+        include_trade_details=True,
+    )
+
+    assert evaluated[0] == start
+    assert result["trades"][0]["entry_at"] == start.isoformat()
+    assert all(when >= start for when in evaluated)
+
+
+def test_scheduler_does_not_open_a_new_position_on_terminal_candle(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    end = start + timedelta(minutes=2)
+    evaluated = []
+
+    class TerminalLong:
+        def evaluate(self, context):
+            closed_at = context.market.latest_candle.closed_at
+            evaluated.append(closed_at)
+            signal = Signal(SignalDirection.LONG, Decimal("1")) if closed_at == end else Signal.wait()
+            return StrategyResult("terminal-long", signal)
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (TerminalLong(),))
+    candles = tuple(
+        Candle(
+            symbol=Symbol("BTC", "USDT"), timeframe=Timeframe(1, "m"),
+            opened_at=start + timedelta(minutes=index),
+            closed_at=start + timedelta(minutes=index + 1),
+            open_price=Decimal("100"), high_price=Decimal("100"),
+            low_price=Decimal("100"), close_price=Decimal("100"), volume=Decimal("1"),
+        )
+        for index in range(2)
+    )
+    candidate = SchedulerBacktestCandidate(
+        candidate_id="terminal-candidate",
+        strategies=(StrategyCandidateSpec("unused", {}),),
+        take_profit_ratio=Decimal("0.1"), stop_loss_ratio=Decimal("0.1"),
+        equity_ratio=Decimal("0.1"), leverage=Decimal("2"), candle_limit=1,
+    )
+
+    result = run_scheduler_driven_backtest(
+        MarketSnapshot(candles), start_at=start, end_at=end,
+        candidate=candidate, include_trade_details=True,
+    )
+
+    assert evaluated == [start + timedelta(minutes=1)]
+    assert result["trade_count"] == 0
+    assert result["trades"] == []
+
+
+def test_scheduler_backtest_can_emit_forced_close_trade_details(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    class AlwaysLong:
+        def evaluate(self, context):
+            return StrategyResult(
+                name="always-long",
+                signal=Signal(SignalDirection.LONG, Decimal("1")),
+            )
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysLong(),))
+    market = _flat_market()
+    candidate = SchedulerBacktestCandidate(
+        candidate_id="weekly-test-candidate",
+        strategies=(StrategyCandidateSpec("unused", {}),),
+        take_profit_ratio=Decimal("0.5"),
+        stop_loss_ratio=Decimal("0.5"),
+        equity_ratio=Decimal("0.1"),
+        leverage=Decimal("2"),
+        candle_limit=1,
+    )
+
+    forced = run_scheduler_driven_backtest(
+        market,
+        start_at=market.opened_at,
+        end_at=market.closed_at,
+        candidate=candidate,
+        initial_equity=Decimal("1234"),
+        include_trade_details=True,
+        force_close_at_end=True,
+    )
+    left_open = run_scheduler_driven_backtest(
+        market,
+        start_at=market.opened_at,
+        end_at=market.closed_at,
+        candidate=candidate,
+        initial_equity=Decimal("1234"),
+        include_trade_details=True,
+        force_close_at_end=False,
+    )
+
+    assert forced["scheduler_path"] == "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute"
+    assert forced["trade_count"] == 1
+    assert forced["trades"][-1]["exit_reason"] == "end_of_data"
+    assert Decimal(forced["trades"][-1]["fee_paid"]) > 0
+    assert forced["trades"][-1]["entry_at"] is not None
+    assert forced["trades"][-1]["exit_at"] is not None
+    assert left_open["trade_count"] == 0
+    assert left_open["trades"] == []
+    assert left_open["net_pnl"] == "0"
+    assert left_open["position_open_at_end"] is True
+    assert forced["position_open_at_end"] is False
+    assert Decimal(forced["max_drawdown_ratio"]) > 0
+    assert Decimal(forced["max_drawdown_ratio"]) == (
+        -Decimal(forced["net_pnl"]) / Decimal(forced["initial_equity"])
+    )
+    assert Decimal(forced["final_equity"]) == (
+        Decimal(forced["initial_equity"]) + Decimal(forced["net_pnl"])
+    )
+    assert forced["feature_cache_hash"] is None
+    assert forced["feature_config_hash"] is None
+
+
+@pytest.mark.parametrize("initial_equity", (Decimal("0"), Decimal("-1"), Decimal("NaN"), True))
+def test_scheduler_backtest_rejects_invalid_initial_equity(initial_equity) -> None:
+    market = _flat_market()
+
+    with pytest.raises((TypeError, ValueError), match="initial_equity"):
+        run_scheduler_driven_backtest(
+            market,
+            start_at=market.opened_at,
+            end_at=market.closed_at,
+            initial_equity=initial_equity,
+            include_deferred=True,
+        )
 
 
 def test_scheduler_driven_backtest_accepts_non_btc_symbol() -> None:
@@ -815,6 +1516,7 @@ def test_backtest_injects_same_feature_provider_and_exports_provenance(monkeypat
         end_at=market.candles[-1].closed_at,
         market_feature_provider=provider,
         include_deferred=True,
+        include_trade_details=True,
     )
 
     assert captured == [provider, provider]
@@ -822,6 +1524,9 @@ def test_backtest_injects_same_feature_provider_and_exports_provenance(monkeypat
     assert result["feature_source_coverage"] == {"aggTrades": 10}
     assert result["feature_unavailable_counts"] == {"fundingRate": 3}
     assert result["feature_provenance"] == {"venue": "binance"}
+    assert len(result["feature_config_hash"]) == 64
+    assert result["initial_equity"] == "10000"
+    assert result["final_equity"] == "10000"
     assert result["candidate_definition_hash"] == candidate_definition_hash(result["candidate"])
 
 
