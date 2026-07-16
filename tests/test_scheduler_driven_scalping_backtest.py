@@ -10,6 +10,8 @@ import pytest
 
 from scripts.scheduler_driven_scalping_backtest import (
     BacktestPosition,
+    BacktestMarketSnapshot,
+    _maximum_adverse_excursion_ratio,
     SchedulerBacktestCandidate,
     StrategyCandidateSpec,
     alpha_entry_candidates,
@@ -43,6 +45,30 @@ from src.domain.strategy.implementations.microstructure_alpha_strategy import (
     OpenInterestImpulseStrategy,
     PositioningCrowdingReversalStrategy,
 )
+
+
+@pytest.mark.parametrize(
+    ("direction", "lows", "highs", "expected"),
+    (
+        (SignalDirection.LONG, (Decimal("100"), Decimal("95")), (Decimal("103"), Decimal("102")), Decimal("0.05")),
+        (SignalDirection.SHORT, (Decimal("98"), Decimal("99")), (Decimal("100"), Decimal("106")), Decimal("0.06")),
+        (SignalDirection.LONG, (Decimal("100"), Decimal("100")), (Decimal("102"), Decimal("103")), Decimal("0")),
+    ),
+)
+def test_maximum_adverse_excursion_is_directional_and_includes_exit_candle(direction, lows, highs, expected):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    symbol = Symbol("BTC", "USDT")
+    timeframe = Timeframe(1, "m")
+    market = BacktestMarketSnapshot(tuple(
+        Candle(symbol, timeframe, start + timedelta(minutes=index),
+               start + timedelta(minutes=index + 1), Decimal("100"), highs[index],
+               lows[index], Decimal("100"), Decimal("1"))
+        for index in range(2)
+    ))
+    position = BacktestPosition(direction, Decimal("100"), Decimal("1"), Decimal("120"),
+                                Decimal("80"), 0, Decimal("0"), Decimal("100"))
+
+    assert _maximum_adverse_excursion_ratio(position, market, 1) == expected
 from scripts.chart_regime_strategy_mapping import _validation_replay_metrics
 from src.domain.strategy import StrategyResult
 from src.domain.signal import Signal
@@ -798,6 +824,7 @@ def test_scheduler_backtest_default_payload_has_frozen_json_schema() -> None:
         "net_pnl",
         "fee_paid",
         "max_drawdown_ratio",
+        "maximum_adverse_excursion_ratio",
         "average_net_trade_roe",
         "average_net_trade_expectancy_ratio",
         "signal_count",
@@ -814,8 +841,9 @@ def test_scheduler_backtest_default_payload_has_frozen_json_schema() -> None:
         "engine": str, "candidate_id": str, "symbol": str, "scheduler_path": str,
         "cost_model": dict, "start_at": str, "end_at": str, "trade_count": int,
         "trades_per_day": str, "daily_return_ratio": str, "net_win_rate": str,
-        "return_ratio": str, "gross_pnl": str, "net_pnl": str, "fee_paid": str,
-        "max_drawdown_ratio": str, "average_net_trade_roe": str,
+            "return_ratio": str, "gross_pnl": str, "net_pnl": str, "fee_paid": str,
+            "max_drawdown_ratio": str, "maximum_adverse_excursion_ratio": str,
+            "average_net_trade_roe": str,
         "average_net_trade_expectancy_ratio": str, "signal_count": int,
         "skipped_by_guard": int, "candidate": dict, "candidate_definition_hash": str,
         "feature_cache_hash": type(None), "feature_source_coverage": dict,
@@ -958,6 +986,8 @@ def test_scheduler_backtest_can_emit_forced_close_trade_details(monkeypatch) -> 
     assert Decimal(forced["trades"][-1]["fee_paid"]) > 0
     assert forced["trades"][-1]["entry_at"] is not None
     assert forced["trades"][-1]["exit_at"] is not None
+    assert forced["maximum_adverse_excursion_ratio"] == forced["trades"][-1]["maximum_adverse_excursion_ratio"]
+    assert Decimal(forced["gross_pnl"]) - Decimal(forced["fee_paid"]) == Decimal(forced["net_pnl"])
     assert left_open["trade_count"] == 0
     assert left_open["trades"] == []
     assert left_open["net_pnl"] == "0"

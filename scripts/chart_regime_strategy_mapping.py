@@ -72,6 +72,11 @@ from src.infrastructure.regime.json_regime_artifact_repository import (
 )
 from src.infrastructure.regime.sklearn_regime_model import SklearnRegimeModel
 from src.application.services.chart_feature_extractor import ChartFeatureExtractor
+from src.application.services.daily_strategy_evidence import (
+    DailyEvidenceRunIdentity,
+    build_three_day_daily_candidate_manifest,
+    run_daily_strategy_evidence,
+)
 from src.domain.market import Candle, Timeframe
 from src.domain.market_feature import MarketFeatureSet, MarketFeatureValue
 from src.domain.market import MarketSnapshot, Symbol

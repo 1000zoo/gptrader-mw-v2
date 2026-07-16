@@ -179,7 +179,7 @@ git add src/application/usecases/regime/build_daily_strategy_mapping_usecase.py 
 git commit -m "feat: map daily regime evidence with strict correction"
 ```
 
-## Task 3: Freeze the 282-Candidate Universe and Add Resumable Daily Evidence
+## Task 3: Freeze the 459-Candidate Universe and Add Resumable Daily Evidence
 
 **Files:**
 - Create: `src/application/services/daily_strategy_evidence.py`
@@ -192,7 +192,7 @@ git commit -m "feat: map daily regime evidence with strict correction"
 
 - [ ] **Step 1: Write RED candidate-universe tests**
 
-Assert that explicit research opt-in expands all public current/deferred factories, canonicalizes identical duplicates, rejects conflicting IDs, and freezes exactly 282 unique candidates for the current repository snapshot. Assert the manifest contains candidate payload/hash, required feature set, deferred group/status, and a canonical universe hash. The count assertion is a deliberate drift alarm; an intentional catalog change must update the test and create a new experiment identity.
+Assert that explicit research opt-in expands all eight public current/deferred factories/groups (`all`, `exact`, `alpha`, `multi`, `microstructure`, `counter`, `metrics`, and `discovered`), canonicalizes identical duplicates, rejects conflicting IDs, and freezes exactly 459 unique candidates for the current repository snapshot. This is the canonical union of all factories, not the 282-member `build_scheduler_candidates()` subset alone. Assert the manifest contains candidate payload/hash, required feature set, deferred group/status, and a canonical universe hash. The count assertion is a deliberate drift alarm; an intentional catalog change must update the test and create a new experiment identity.
 
 - [ ] **Step 2: Implement `build_three_day_daily_candidate_manifest()`**
 
@@ -358,7 +358,7 @@ Add `--profile three-day-daily-k4-v1`, `--evidence-rows-path`, four output-path 
 Run stages in this exact order:
 
 ```text
-verify sources -> fit/freeze K4 -> freeze 282 candidates -> Mapping Fit evidence
+verify sources -> fit/freeze K4 -> freeze 459 candidates -> Mapping Fit evidence
 -> strict mapping -> Validation/sensitivity report -> freeze final strict policy/mapping
 -> select/freeze global fixed baseline -> load untouched Test -> run comparisons -> publish
 ```
@@ -463,7 +463,7 @@ git commit -m "test: audit daily K4 mapping pipeline"
 
 - [ ] **Step 1: Verify local data coverage before compute**
 
-Run the profile's dry-run/manifest mode and require complete raw OHLCV coverage from `2020-12-29T00:00Z` through `2026-07-01T00:00Z`, point-in-time enriched-cache coverage for each candidate/day, exact source checksums, 282 frozen candidates, and an estimated episode/run count. Missing optional candidate features create audited exclusions; missing clustering/Test OHLCV fails the experiment.
+Run the profile's dry-run/manifest mode and require complete raw OHLCV coverage from `2020-12-29T00:00Z` through `2026-07-01T00:00Z`, point-in-time enriched-cache coverage for each candidate/day, exact source checksums, 459 frozen candidates, and an estimated episode/run count. Missing optional candidate features create audited exclusions; missing clustering/Test OHLCV fails the experiment.
 
 - [ ] **Step 2: Run the complete resumable experiment**
 
@@ -515,7 +515,7 @@ git commit -m "docs: publish BTCUSDT daily K4 mapping evidence"
 - [ ] Every production change was preceded by a failing focused test.
 - [ ] The old seven-day model/mapping schemas, selector cadence, confirmation state machine, and runtime default remain unchanged.
 - [ ] K4 uses Cluster Fit only; strategy outcomes never affect components.
-- [ ] All 282 candidate identities are frozen before Validation/Test.
+- [ ] All 459 candidate identities are frozen before Validation/Test.
 - [ ] Mapping uses non-overlapping daily outcomes and aligned seven-calendar-day max-stat correction.
 - [ ] Every cluster may map to cash; no winner is forced.
 - [ ] Daily transitions do not force-close positions; hard owner risk remains immutable.

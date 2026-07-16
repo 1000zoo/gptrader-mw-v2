@@ -119,6 +119,8 @@ Before Mapping Fit is evaluated, the pipeline:
 
 No candidate may be added, removed, renamed, or retuned after Validation or Test is observed. Deferred registry status is not changed by this experiment.
 
+For this repository snapshot, the canonical union of all eight public factories/groups (`all`, `exact`, `alpha`, `multi`, `microstructure`, `counter`, `metrics`, and `discovered`) contains exactly 459 unique candidate IDs. This 459 count is a deliberate pre-Validation/Test drift alarm; it is not the 282-member `build_scheduler_candidates()` subset alone.
+
 ## Daily Candidate Evidence
 
 Each Mapping Fit and Validation day runs every available candidate through the actual scheduler simulator with an isolated account.

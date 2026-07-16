@@ -44,6 +44,9 @@ from scripts.deferred_strategy_registry import ensure_candidate_group_allowed  #
 from scripts.validate_scalping_external_periods import PeriodSpec, load_period_market  # noqa: E402
 from src.domain.market import MarketSnapshot, Symbol  # noqa: E402
 from src.observability.logging import configure_runtime_logging  # noqa: E402
+from src.application.services.daily_strategy_evidence import (  # noqa: E402
+    AppendOnlyEvidenceLedger,
+)
 
 
 DEFAULT_ROWS_PATH = Path("docs/backtests/scheduler-driven-wfv-incremental.jsonl")
@@ -79,25 +82,21 @@ def write_jsonl_row(path: Path, row: dict[str, object]) -> bool:
     run_identity = row.get("run_identity")
     if not isinstance(run_identity, str) or not run_identity:
         raise ValueError("run_identity is required before writing a resume row")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _rows_file_lock(path):
-        rows = load_jsonl_rows(path)
-        key = _resume_row_key(row)
-        existing = next((existing for existing in rows if _resume_row_key(existing) == key), None)
-        if existing is not None:
-            if existing != row:
-                raise ValueError(f"conflicting duplicate resume key: {key}")
-            return False
-        encoded = (json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
-        descriptor = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY)
-        try:
-            written = os.write(descriptor, encoded)
-            if written != len(encoded):
-                raise OSError("incomplete JSONL row append")
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-    return True
+    ledger = AppendOnlyEvidenceLedger(
+        path,
+        ("run_identity", "symbol", "candidate_id", "fold"),
+        strict_identity=False,
+    )
+    try:
+        return ledger.append(
+            row,
+            rows_loader=lambda: load_jsonl_rows(path),
+            lock_factory=_rows_file_lock,
+        )
+    except ValueError as error:
+        if "conflicting duplicate ledger key" in str(error):
+            raise ValueError(str(error).replace("ledger key", "resume key")) from error
+        raise
 
 
 def load_jsonl_rows(path: Path) -> LoadedJsonlRows:

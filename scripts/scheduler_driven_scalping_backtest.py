@@ -236,6 +236,7 @@ class BacktestTrade:
     owner_guard_hash: str | None = None
     owner_leverage: Decimal | None = None
     owner_max_holding_bars: int | None = None
+    maximum_adverse_excursion_ratio: Decimal = Decimal("0")
 
 
 class BacktestMarketSnapshot:
@@ -857,6 +858,7 @@ def run_scheduler_driven_backtest(
                 "end_of_data",
                 len(selected.candles) - 1,
                 exit_at=selected.candles[-1].closed_at,
+                market=selected,
             )
         )
         equity += trades[-1].net_pnl
@@ -871,6 +873,10 @@ def run_scheduler_driven_backtest(
     gross_pnl = sum((trade.gross_pnl for trade in trades), Decimal("0"))
     net_pnl = sum((trade.net_pnl for trade in trades), Decimal("0"))
     fee_paid = sum((trade.fee_paid for trade in trades), Decimal("0"))
+    maximum_adverse_excursion = max(
+        (trade.maximum_adverse_excursion_ratio for trade in trades),
+        default=Decimal("0"),
+    )
     average_net_roe = (
         sum((trade.net_pnl / trade.margin for trade in trades if trade.margin > Decimal("0")), Decimal("0"))
         / Decimal(len(trades))
@@ -912,6 +918,7 @@ def run_scheduler_driven_backtest(
         "net_pnl": str(net_pnl),
         "fee_paid": str(fee_paid),
         "max_drawdown_ratio": str(max_drawdown),
+        "maximum_adverse_excursion_ratio": str(maximum_adverse_excursion),
         "average_net_trade_roe": str(average_net_roe),
         "average_net_trade_expectancy_ratio": str(average_net_trade_expectancy_ratio),
         "signal_count": signal_log.count,
@@ -1403,7 +1410,7 @@ def run_scheduler_driven_regime_backtest(
                 hypothetical = close_trade(
                     open_position,
                     _exit_fill_price(candle.close_price, open_position.direction),
-                    "mark_to_market", index, exit_at=boundary,
+                    "mark_to_market", index, exit_at=boundary, market=selected,
                 )
                 portfolio_equity += hypothetical.net_pnl
             peak, max_drawdown = _update_drawdown(
@@ -1416,6 +1423,7 @@ def run_scheduler_driven_regime_backtest(
         closed = close_trade(
             open_position, _exit_fill_price(last.close_price, open_position.direction),
             "end_of_data", len(selected.candles) - 1, exit_at=last.closed_at,
+            market=selected,
         )
         trades.append(closed)
         equity += closed.net_pnl
@@ -1442,6 +1450,10 @@ def run_scheduler_driven_regime_backtest(
         "trade_count": len(trades), "gross_pnl": str(gross), "net_pnl": str(net),
         "fee_paid": str(fees), "return_ratio": str(net / initial_equity),
         "portfolio_max_drawdown_ratio": str(max_drawdown),
+        "maximum_adverse_excursion_ratio": str(max(
+            (item.maximum_adverse_excursion_ratio for item in trades),
+            default=Decimal("0"),
+        )),
         "trades": [_trade_payload(item) for item in trades],
         "equity_curve": equity_curve,
         "selection_events": selection_events,
@@ -3178,14 +3190,14 @@ def maybe_close_position(
     candle = market.candles[index]
     if position.direction is SignalDirection.LONG:
         if candle.low_price <= position.stop_loss:
-            return close_trade(position, _exit_fill_price(position.stop_loss, position.direction), "stop_loss", index, exit_at=candle.closed_at)
+            return close_trade(position, _exit_fill_price(position.stop_loss, position.direction), "stop_loss", index, exit_at=candle.closed_at, market=market)
         if candle.high_price >= position.take_profit:
-            return close_trade(position, _exit_fill_price(position.take_profit, position.direction), "take_profit", index, exit_at=candle.closed_at)
+            return close_trade(position, _exit_fill_price(position.take_profit, position.direction), "take_profit", index, exit_at=candle.closed_at, market=market)
     else:
         if candle.high_price >= position.stop_loss:
-            return close_trade(position, _exit_fill_price(position.stop_loss, position.direction), "stop_loss", index, exit_at=candle.closed_at)
+            return close_trade(position, _exit_fill_price(position.stop_loss, position.direction), "stop_loss", index, exit_at=candle.closed_at, market=market)
         if candle.low_price <= position.take_profit:
-            return close_trade(position, _exit_fill_price(position.take_profit, position.direction), "take_profit", index, exit_at=candle.closed_at)
+            return close_trade(position, _exit_fill_price(position.take_profit, position.direction), "take_profit", index, exit_at=candle.closed_at, market=market)
     if (
         max_holding_bars is not None
         and index - position.opened_index >= max_holding_bars
@@ -3196,6 +3208,7 @@ def maybe_close_position(
             "max_holding_time",
             index,
             exit_at=candle.closed_at,
+            market=market,
         )
     return None
 
@@ -3207,6 +3220,7 @@ def close_trade(
     index: int,
     *,
     exit_at: datetime | None = None,
+    market: MarketSnapshot | BacktestMarketSnapshot | None = None,
 ) -> BacktestTrade:
     if position.direction is SignalDirection.LONG:
         gross_pnl = (exit_price - position.entry_price) * position.quantity
@@ -3232,7 +3246,27 @@ def close_trade(
         owner_guard_hash=position.owner_guard_hash,
         owner_leverage=position.owner_leverage,
         owner_max_holding_bars=position.owner_max_holding_bars,
+        maximum_adverse_excursion_ratio=(
+            _maximum_adverse_excursion_ratio(position, market, index)
+            if market is not None else Decimal("0")
+        ),
     )
+
+
+def _maximum_adverse_excursion_ratio(
+    position: BacktestPosition,
+    market: MarketSnapshot | BacktestMarketSnapshot,
+    exit_index: int,
+) -> Decimal:
+    """Conservative MAE through the whole exit candle; intrabar path is unknown."""
+    if not position.opened_index <= exit_index < len(market.candles):
+        raise ValueError("MAE indices must cover an open position through its exit candle")
+    held = market.candles[position.opened_index : exit_index + 1]
+    if position.direction is SignalDirection.LONG:
+        adverse = max(Decimal("0"), position.entry_price - min(c.low_price for c in held))
+    else:
+        adverse = max(Decimal("0"), max(c.high_price for c in held) - position.entry_price)
+    return adverse / position.entry_price
 
 
 def _trade_payload(trade: BacktestTrade) -> dict[str, object]:
@@ -3254,6 +3288,7 @@ def _trade_payload(trade: BacktestTrade) -> dict[str, object]:
         "owner_guard_hash": trade.owner_guard_hash,
         "owner_leverage": str(trade.owner_leverage) if trade.owner_leverage is not None else None,
         "owner_max_holding_bars": trade.owner_max_holding_bars,
+        "maximum_adverse_excursion_ratio": str(trade.maximum_adverse_excursion_ratio),
     }
 
 
