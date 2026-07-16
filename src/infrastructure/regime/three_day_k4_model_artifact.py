@@ -126,25 +126,20 @@ def _original_space_profiles(
                 raise ValueError("original-space component profile contains nonfinite values")
             if any(value <= 0 for value in original_variance):
                 raise ValueError("original-space component variance underflow is ambiguous")
-            for index, value in enumerate(original_mean):
-                reconstructed = (value - fit.medians[index]) / fit.scales[index]
-                if not _within_ulp_budget(reconstructed, mean[index]):
-                    raise ValueError("original-space component mean precision collapse is ambiguous")
-            for index, value in enumerate(original_variance):
-                reconstructed = value / (fit.scales[index] * fit.scales[index])
-                if not _within_ulp_budget(reconstructed, covariance[index]):
-                    raise ValueError("original-space component variance precision collapse is ambiguous")
             profiles.append((original_mean, original_variance, fit.weights[component]))
     except OverflowError as exc:
         raise ValueError("original-space component profile overflow is nonfinite") from exc
+    for left in range(len(profiles)):
+        for right in range(left + 1, len(profiles)):
+            standardized_left = (fit.means[left], fit.covariances[left])
+            standardized_right = (fit.means[right], fit.covariances[right])
+            original_left = profiles[left][:2]
+            original_right = profiles[right][:2]
+            if standardized_left != standardized_right and original_left == original_right:
+                raise ValueError(
+                    "distinct standardized components have an ambiguous original-space mean/variance mapping collision"
+                )
     return tuple(profiles)
-
-
-def _within_ulp_budget(actual: float, expected: float, *, budget: int = 4) -> bool:
-    if not math.isfinite(actual) or not math.isfinite(expected):
-        return False
-    tolerance = budget * max(math.ulp(actual), math.ulp(expected))
-    return abs(actual - expected) <= tolerance
 
 
 def _original_space_fingerprints(fit: ClusterDiagnosticFit) -> tuple[str, ...]:

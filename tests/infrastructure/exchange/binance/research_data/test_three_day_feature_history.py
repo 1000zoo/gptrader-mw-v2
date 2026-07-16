@@ -185,6 +185,56 @@ def test_loader_reuses_downloader_validated_member_without_revalidating_archive(
     assert calls == []
 
 
+def test_loader_rejects_forged_member_receipt_before_row_iteration(tmp_path: Path) -> None:
+    request = _request()
+    downloader = _Downloader(request)
+    original = downloader.download
+    rows_called = []
+
+    def download(*args, **kwargs):
+        result = original(*args, **kwargs)
+        return DownloadResult(
+            result.status, result.path, result.sha256, result.bytes_received,
+            result.expected_sha256, "forged.csv",
+        )
+
+    downloader.download = download
+    with pytest.raises(ValueError, match="member|receipt"):
+        _load(
+            tmp_path, downloader=downloader,
+            rows=(rows_called.append(True) or row for row in _rows()),
+        )
+    assert rows_called == []
+
+
+@pytest.mark.parametrize("member", ("extra.txt", "BTCUSDT-1m-2024-07.txt"))
+def test_loader_rejects_multiple_or_non_csv_central_directory_before_rows(tmp_path: Path, member: str) -> None:
+    request = _request()
+
+    class BadDirectoryDownloader(_Downloader):
+        def download(self, url, destination, **kwargs):
+            if member == "BTCUSDT-1m-2024-07.txt":
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(destination, "w") as archive:
+                    archive.writestr(member, "bad")
+                return DownloadResult(
+                    "downloaded", destination, "a" * 64,
+                    destination.stat().st_size, "a" * 64,
+                )
+            result = super().download(url, destination, **kwargs)
+            with zipfile.ZipFile(destination, "a") as archive:
+                archive.writestr(member, "bad")
+            return result
+
+    rows_called = []
+    with pytest.raises(ValueError, match="member|CSV|archive"):
+        _load(
+            tmp_path, downloader=BadDirectoryDownloader(request),
+            rows=(rows_called.append(True) or row for row in _rows()),
+        )
+    assert rows_called == []
+
+
 @pytest.mark.parametrize("expected", [0, -1, True, 2.0, "2"])
 def test_loader_rejects_invalid_expected_anchor_count(tmp_path: Path, expected: object) -> None:
     with pytest.raises(ValueError, match="expected_anchor_count"):

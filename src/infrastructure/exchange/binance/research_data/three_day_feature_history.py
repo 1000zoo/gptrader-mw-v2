@@ -24,6 +24,7 @@ from src.infrastructure.exchange.binance.research_data.historical_feature_loader
     iter_zip_csv_rows,
     parse_kline_feature_row,
     validate_archive,
+    validate_archive_member_directory,
 )
 
 
@@ -199,15 +200,11 @@ def load_three_day_feature_history(
             or result.bytes_received <= 0
         ):
             raise ValueError("archive bytes must be a positive integer")
-        member_identity = result.member_identity
-        if member_identity is None:
-            # Backward-compatible custom downloaders may not carry validation
-            # metadata. Validate once here; the standard downloader already did.
-            member_identity = validate_archive(
-                result.path,
-                source="klines",
-                expected_archive_filename=request.filename,
-            )
+        member_identity = validate_archive_member_directory(
+            result.path, expected_archive_filename=request.filename
+        )
+        if result.member_identity is not None and result.member_identity != member_identity:
+            raise ValueError("download receipt member identity does not match ZIP central directory")
         provenance.append(
             MappingProxyType(
                 {

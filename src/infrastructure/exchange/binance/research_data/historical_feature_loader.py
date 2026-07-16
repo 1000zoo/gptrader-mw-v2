@@ -361,6 +361,21 @@ def iter_zip_csv_rows(path: Path) -> Iterator[list[str]]:
             yield from rows
 
 
+def validate_archive_member_directory(
+    path: Path, *, expected_archive_filename: str
+) -> str:
+    """Validate sole canonical CSV identity without decompressing its contents."""
+    expected_member = expected_archive_filename.removesuffix(".zip") + ".csv"
+    try:
+        with zipfile.ZipFile(path) as archive:
+            members = [item.filename for item in archive.infolist() if not item.is_dir()]
+    except zipfile.BadZipFile as exc:
+        raise ValueError(f"invalid ZIP archive: {path}") from exc
+    if len(members) != 1 or not members[0].lower().endswith(".csv") or members[0] != expected_member:
+        raise ValueError(f"expected sole CSV member {expected_member}, found {members}")
+    return members[0]
+
+
 def validate_archive(
     path: Path,
     *,
