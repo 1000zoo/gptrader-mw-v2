@@ -1,6 +1,6 @@
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import hashlib
 
 import pytest
@@ -212,6 +212,41 @@ def test_daily_evidence_canonical_payload_and_hash_bind_feature_interval():
     assert daily_strategy_evidence_hash(first) != daily_strategy_evidence_hash(shifted)
 
 
+def test_evidence_hash_preserves_adjacent_high_precision_decimals():
+    first = evidence(
+        turnover_ratio=Decimal("1.1234567890123456789012345678901234567890")
+    )
+    adjacent = evidence(
+        turnover_ratio=Decimal("1.1234567890123456789012345678901234567891")
+    )
+
+    assert daily_strategy_evidence_hash(first) != daily_strategy_evidence_hash(adjacent)
+
+
+def test_evidence_hash_is_independent_of_decimal_context_precision():
+    item = evidence(
+        turnover_ratio=Decimal("1.1234567890123456789012345678901234567890")
+    )
+
+    with localcontext() as context:
+        context.prec = 6
+        low_precision_hash = daily_strategy_evidence_hash(item)
+    with localcontext() as context:
+        context.prec = 60
+        high_precision_hash = daily_strategy_evidence_hash(item)
+
+    assert low_precision_hash == high_precision_hash
+
+
+def test_evidence_hash_canonicalizes_trailing_fractional_zeros_and_signed_zero():
+    assert daily_strategy_evidence_hash(
+        evidence(turnover_ratio=Decimal("1.2300"))
+    ) == daily_strategy_evidence_hash(evidence(turnover_ratio=Decimal("1.23")))
+    assert daily_strategy_evidence_hash(
+        evidence(turnover_ratio=Decimal("-0E-100"))
+    ) == daily_strategy_evidence_hash(evidence(turnover_ratio=Decimal("0")))
+
+
 def test_cash_mapping_entry_is_explicit_and_requires_a_rejection_reason():
     entry = DailyStrategyMappingEntry(
         component_fingerprint="component-a",
@@ -331,6 +366,50 @@ def test_artifact_hash_is_canonical_and_binds_the_payload():
             "test": {"start_at": "2026-04-04T00:00:00Z", "end_at": "2026-07-01T00:00:00Z"},
         },
     }
+
+
+def test_artifact_hash_preserves_adjacent_high_precision_decimals():
+    first = artifact()
+    precise = Decimal("0.1234567890123456789012345678901234567890")
+    adjacent = Decimal("0.1234567890123456789012345678901234567891")
+
+    first_assessments = (
+        replace(first.candidate_assessments[0], mean_daily_return_ratio=precise),
+        *first.candidate_assessments[1:],
+    )
+    adjacent_assessments = (
+        replace(first.candidate_assessments[0], mean_daily_return_ratio=adjacent),
+        *first.candidate_assessments[1:],
+    )
+
+    assert daily_mapping_artifact_hash(
+        replace(first, candidate_assessments=first_assessments)
+    ) != daily_mapping_artifact_hash(
+        replace(first, candidate_assessments=adjacent_assessments)
+    )
+
+
+def test_artifact_hash_is_independent_of_decimal_context_precision():
+    first = artifact()
+    assessments = (
+        replace(
+            first.candidate_assessments[0],
+            mean_daily_return_ratio=Decimal(
+                "0.1234567890123456789012345678901234567890"
+            ),
+        ),
+        *first.candidate_assessments[1:],
+    )
+    precise_artifact = replace(first, candidate_assessments=assessments)
+
+    with localcontext() as context:
+        context.prec = 6
+        low_precision_hash = daily_mapping_artifact_hash(precise_artifact)
+    with localcontext() as context:
+        context.prec = 60
+        high_precision_hash = daily_mapping_artifact_hash(precise_artifact)
+
+    assert low_precision_hash == high_precision_hash
 
 
 def test_artifact_rejects_fit_interval_or_frozen_schema_drift():
