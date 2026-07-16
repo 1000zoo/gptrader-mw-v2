@@ -11,6 +11,7 @@ from src.domain.ports.regime_selection_state_repository_port import (
     RegimeSelectionStateRepositoryPort,
 )
 from src.domain.regime.selection import (
+    AuditedSelectStrategyResult,
     RegimeSelectionState,
     SelectionEventType,
     SelectStrategyResult,
@@ -148,11 +149,23 @@ class RegimeSelectionScheduler:
             if not isinstance(boundary_at, datetime) or artifact_snapshot is None:
                 raise ValueError("command factory must return a regime selection command")
             input_hash = _command_input_hash(command)
-            existing = self._repository.find_committed_result(
-                symbol,
-                boundary_at,
-                artifact_snapshot.artifact_identity,
-            )
+            requires_audit = getattr(command, "requires_audited_result", False)
+            if type(requires_audit) is not bool:
+                raise ValueError("requires_audited_result must be a strict boolean")
+            if requires_audit:
+                find_audited = getattr(self._repository, "find_committed_audited", None)
+                commit_audited = getattr(self._repository, "commit_audited", None)
+                if not callable(find_audited) or not callable(commit_audited):
+                    raise ValueError("audited selection requires an audited repository")
+                existing = find_audited(
+                    symbol, boundary_at, artifact_snapshot.artifact_identity
+                )
+            else:
+                existing = self._repository.find_committed_result(
+                    symbol,
+                    boundary_at,
+                    artifact_snapshot.artifact_identity,
+                )
             if existing is not None:
                 if existing.selection_input_hash != input_hash:
                     raise ValueError("conflicting boundary commit")
@@ -162,11 +175,26 @@ class RegimeSelectionScheduler:
                 proposed_base = _base_result(proposed)
                 if proposed_base.selection_input_hash != input_hash:
                     raise ValueError("selection result input hash does not match command")
-                committed = self._repository.commit(
-                    proposed_base.expected_state_version,
-                    proposed_base,
-                )
-                result = proposed if committed == proposed_base else committed
+                if requires_audit:
+                    if not isinstance(proposed, AuditedSelectStrategyResult):
+                        raise ValueError("audited selection must return an audited result")
+                    committed = commit_audited(
+                        proposed_base.expected_state_version, proposed
+                    )
+                else:
+                    committed = self._repository.commit(
+                        proposed_base.expected_state_version,
+                        proposed_base,
+                    )
+                if requires_audit:
+                    result = (
+                        proposed
+                        if committed.base_result == proposed.base_result
+                        and committed.audit_record == proposed.audit_record
+                        else committed
+                    )
+                else:
+                    result = proposed if committed == proposed_base else committed
         except Exception as exc:
             runtime_logger.exception(
                 "regime selection scheduler failed",

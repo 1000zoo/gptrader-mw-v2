@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Protocol
 
 from src.domain.regime.selection import (
+    AuditedSelectStrategyResult,
     RegimeSelectionState,
     SelectionEventType,
     SelectStrategyResult,
@@ -37,7 +38,29 @@ class RegimeSelectionStateRepositoryPort(Protocol):
         ...
 
 
+class AuditedRegimeSelectionStateRepositoryPort(
+    RegimeSelectionStateRepositoryPort, Protocol
+):
+    """Atomically stores the canonical result and its required audit envelope."""
+
+    def commit_audited(
+        self,
+        expected_state_version: int,
+        result: AuditedSelectStrategyResult,
+    ) -> AuditedSelectStrategyResult:
+        ...
+
+    def find_committed_audited(
+        self,
+        symbol: str,
+        boundary_at: datetime,
+        evaluated_artifact_identity: str,
+    ) -> AuditedSelectStrategyResult | None:
+        ...
+
+
 __all__ = [
+    "AuditedRegimeSelectionStateRepositoryPort",
     "ConcurrentSelectionStateError",
     "RegimeSelectionStateRepositoryPort",
 ]

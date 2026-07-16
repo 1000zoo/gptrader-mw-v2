@@ -339,9 +339,152 @@ class SelectStrategyResult:
         object.__setattr__(self, "events", events)
 
 
+def _freeze_audit_value(value: object, field: str = "payload") -> object:
+    if value is None or type(value) in {str, bool, int}:
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError(f"audit {field} contains a nonfinite number")
+        return value
+    if isinstance(value, Mapping):
+        copied = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or not key or key != key.strip():
+                raise ValueError(f"audit {field} keys must be canonical strings")
+            copied[key] = _freeze_audit_value(item, f"{field}.{key}")
+        return MappingProxyType(dict(sorted(copied.items())))
+    if isinstance(value, (tuple, list)):
+        return tuple(
+            _freeze_audit_value(item, f"{field}[{index}]")
+            for index, item in enumerate(value)
+        )
+    raise ValueError(f"audit {field} contains an unsupported value")
+
+
+def _audit_json_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _audit_json_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_audit_json_value(item) for item in value]
+    return value
+
+
+@dataclass(frozen=True)
+class SelectionAuditRecord:
+    """Generic canonical audit payload bound to one selection decision."""
+
+    audit_type: str
+    schema_version: str
+    payload: Mapping[str, object]
+    canonical_json: str = field(init=False)
+    audit_hash: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        audit_type = _canonical_text(self.audit_type, "audit_type")
+        schema_version = _canonical_text(self.schema_version, "schema_version")
+        if not isinstance(self.payload, Mapping):
+            raise ValueError("audit payload must be a mapping")
+        payload = _freeze_audit_value(self.payload)
+        envelope = {
+            "audit_type": audit_type,
+            "payload": _audit_json_value(payload),
+            "schema_version": schema_version,
+        }
+        canonical_json = json.dumps(
+            envelope,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        object.__setattr__(self, "payload", payload)
+        object.__setattr__(self, "canonical_json", canonical_json)
+        object.__setattr__(
+            self,
+            "audit_hash",
+            hashlib.sha256(canonical_json.encode("utf-8")).hexdigest(),
+        )
+
+    @classmethod
+    def from_json(cls, encoded: str) -> "SelectionAuditRecord":
+        if not isinstance(encoded, str):
+            raise ValueError("selection audit JSON must be text")
+
+        def pairs(values: list[tuple[str, object]]) -> dict[str, object]:
+            result = {}
+            for key, value in values:
+                if key in result:
+                    raise ValueError("selection audit JSON contains duplicate keys")
+                result[key] = value
+            return result
+
+        def constant(value: str) -> object:
+            raise ValueError(f"selection audit JSON contains nonstandard constant {value}")
+
+        try:
+            payload = json.loads(
+                encoded, object_pairs_hook=pairs, parse_constant=constant
+            )
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError("selection audit JSON is invalid") from error
+        if not isinstance(payload, dict) or set(payload) != {
+            "audit_type",
+            "payload",
+            "schema_version",
+        }:
+            raise ValueError("selection audit envelope keys are invalid")
+        record = cls(
+            audit_type=payload["audit_type"],
+            schema_version=payload["schema_version"],
+            payload=payload["payload"],
+        )
+        if record.canonical_json != encoded:
+            raise ValueError("selection audit JSON is not canonical")
+        return record
+
+
+@dataclass(frozen=True)
+class AuditedSelectStrategyResult:
+    """A canonical selection result plus a durable generic audit record."""
+
+    base_result: SelectStrategyResult
+    audit_record: SelectionAuditRecord
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.base_result, SelectStrategyResult):
+            raise ValueError("base_result must be a SelectStrategyResult")
+        if not isinstance(self.audit_record, SelectionAuditRecord):
+            raise ValueError("audit_record must be a SelectionAuditRecord")
+        bound_hash = self.audit_record.payload.get("selection_input_hash")
+        if bound_hash != self.base_result.selection_input_hash:
+            raise ValueError("audit selection input hash must match the base result")
+
+    @property
+    def expected_state_version(self) -> int:
+        return self.base_result.expected_state_version
+
+    @property
+    def state(self) -> RegimeSelectionState:
+        return self.base_result.state
+
+    @property
+    def events(self) -> tuple[SelectionEventType, ...]:
+        return self.base_result.events
+
+    @property
+    def evaluated_artifact_identity(self) -> str:
+        return self.base_result.evaluated_artifact_identity
+
+    @property
+    def selection_input_hash(self) -> str:
+        return self.base_result.selection_input_hash
+
+
 __all__ = [
+    "AuditedSelectStrategyResult",
     "RegimeSelectionState",
     "SelectionArtifactSnapshot",
+    "SelectionAuditRecord",
     "SelectionConfidenceThresholds",
     "SelectStrategyResult",
     "SelectionEventType",

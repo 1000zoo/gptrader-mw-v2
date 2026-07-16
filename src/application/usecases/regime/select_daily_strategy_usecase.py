@@ -21,7 +21,9 @@ from src.domain.regime.daily_mapping import (
 )
 from src.domain.regime.model import ClusterAssignment
 from src.domain.regime.selection import (
+    AuditedSelectStrategyResult,
     RegimeSelectionState,
+    SelectionAuditRecord,
     SelectionArtifactSnapshot,
     SelectionConfidenceThresholds,
     SelectionEventType,
@@ -179,6 +181,10 @@ class DailySelectStrategyCommand:
     def selection_input_hash(self) -> str:
         return self._input_hash
 
+    @property
+    def requires_audited_result(self) -> bool:
+        return True
+
 
 @dataclass(frozen=True)
 class DailySelectionAudit:
@@ -214,39 +220,43 @@ class DailySelectionAudit:
         ):
             _sha256(value, name)
 
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "boundary_at": self.boundary_at.isoformat(),
+            "candidate_definition_hash": self.candidate_definition_hash,
+            "candidate_id": self.candidate_id,
+            "component_fingerprint": self.component_fingerprint,
+            "distance": self.distance,
+            "dominant_probability": self.dominant_probability,
+            "mapping_artifact_hash": self.mapping_artifact_hash,
+            "model_artifact_hash": self.model_artifact_hash,
+            "previous_candidate_id": self.previous_candidate_id,
+            "previous_component_fingerprint": self.previous_component_fingerprint,
+            "probability_margin": self.probability_margin,
+            "profile_hash": self.profile_hash,
+            "profile_id": self.profile_id,
+            "reason": self.reason,
+            "selection_input_hash": self.selection_input_hash,
+            "status": self.status,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> "DailySelectionAudit":
+        try:
+            values = dict(payload)
+            boundary = datetime.fromisoformat(values.pop("boundary_at"))
+            return cls(boundary_at=boundary, **values)
+        except (TypeError, ValueError) as error:
+            raise ValueError("daily selection audit payload is invalid") from error
+
 
 @dataclass(frozen=True)
-class DailySelectStrategyResult:
-    base_result: SelectStrategyResult
-    audit: DailySelectionAudit
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.base_result, SelectStrategyResult):
-            raise ValueError("base_result must be a SelectStrategyResult")
-        if not isinstance(self.audit, DailySelectionAudit):
-            raise ValueError("audit must be a DailySelectionAudit")
-        if self.audit.selection_input_hash != self.base_result.selection_input_hash:
-            raise ValueError("audit must bind the persisted selection input hash")
-
+class DailySelectStrategyResult(AuditedSelectStrategyResult):
     @property
-    def expected_state_version(self) -> int:
-        return self.base_result.expected_state_version
-
-    @property
-    def state(self) -> RegimeSelectionState:
-        return self.base_result.state
-
-    @property
-    def events(self) -> tuple[SelectionEventType, ...]:
-        return self.base_result.events
-
-    @property
-    def evaluated_artifact_identity(self) -> str:
-        return self.base_result.evaluated_artifact_identity
-
-    @property
-    def selection_input_hash(self) -> str:
-        return self.base_result.selection_input_hash
+    def audit(self) -> DailySelectionAudit:
+        if self.audit_record.audit_type != "daily_regime_selection":
+            raise ValueError("audited result does not contain a daily regime selection audit")
+        return DailySelectionAudit.from_payload(self.audit_record.payload)
 
 
 class SelectDailyStrategyUseCase:
@@ -278,28 +288,34 @@ class SelectDailyStrategyUseCase:
                 vector = extract_three_day_chart_feature_vector(
                     command.candles, command.boundary_at
                 )
-            except (TypeError, ValueError, ArithmeticError) as error:
-                reason = f"three-day history invalid: {error}"
+            except Exception as error:
+                reason = f"three_day_history_error:{type(error).__name__}"
             else:
                 try:
                     assigned = model.assign(vector)
-                    distance = getattr(assigned, "distance", None)
-                    if distance is None:
-                        raise ValueError("assignment distance is missing")
-                    if (
-                        not isinstance(distance, (int, float))
-                        or isinstance(distance, bool)
-                        or not math.isfinite(distance)
-                    ):
-                        raise ValueError("assignment distance must be finite")
-                    if distance < 0:
-                        raise ValueError("assignment distance must be nonnegative")
-                    if not isinstance(assigned, ClusterAssignment):
-                        raise ValueError("assignment artifact returned an invalid assignment")
-                    assignment = assigned
-                except (TypeError, ValueError, ArithmeticError) as error:
-                    reason = f"model assignment failed: {error}"
+                except Exception as error:
+                    reason = f"model_assignment_error:{type(error).__name__}"
                 else:
+                    try:
+                        distance = getattr(assigned, "distance", None)
+                    except Exception as error:
+                        reason = f"model_assignment_error:{type(error).__name__}"
+                    else:
+                        if distance is None:
+                            reason = "assignment distance is missing"
+                        elif (
+                            not isinstance(distance, (int, float))
+                            or isinstance(distance, bool)
+                            or not math.isfinite(distance)
+                        ):
+                            reason = "assignment distance must be finite"
+                        elif distance < 0:
+                            reason = "assignment distance must be nonnegative"
+                        elif not isinstance(assigned, ClusterAssignment):
+                            reason = "assignment artifact returned an invalid assignment"
+                        else:
+                            assignment = assigned
+                if assignment is not None:
                     probability_threshold = float(
                         command._model_gates["gmm_probability_threshold"]
                     )
@@ -387,7 +403,12 @@ class SelectDailyStrategyUseCase:
             ),
             selection_input_hash=command.selection_input_hash,
         )
-        return DailySelectStrategyResult(base_result, audit)
+        record = SelectionAuditRecord(
+            audit_type="daily_regime_selection",
+            schema_version="daily-regime-selection-audit-v1",
+            payload=audit.canonical_payload(),
+        )
+        return DailySelectStrategyResult(base_result, record)
 
 
 def daily_selection_command_input_hash(command: DailySelectStrategyCommand) -> str:

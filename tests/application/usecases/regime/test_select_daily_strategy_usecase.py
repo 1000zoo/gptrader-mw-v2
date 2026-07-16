@@ -413,3 +413,41 @@ def test_distance_policy_or_failed_model_gate_is_incompatible(change) -> None:
     )
     assert result.audit.status == "fail_closed"
     assert "incompatible" in result.audit.reason
+
+
+def test_runtime_model_error_transitions_prior_candidate_to_cash_without_message_leak() -> None:
+    first = SelectDailyStrategyUseCase().execute(_command())
+
+    class BrokenModel(_FrozenModel):
+        def assign(self, vector):
+            raise RuntimeError("api key and unstable details must not leak")
+
+    result = SelectDailyStrategyUseCase().execute(
+        _command(
+            previous=first.state,
+            boundary=BOUNDARY + timedelta(days=1),
+            candles=_candles(start=BOUNDARY - timedelta(days=2)),
+            model=BrokenModel(ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0)),
+        )
+    )
+
+    assert result.audit.reason == "model_assignment_error:RuntimeError"
+    assert result.state.active_strategy_profile_id is None
+    assert not result.state.new_entries_enabled
+    assert SelectionEventType.CASH_TRANSITION in result.events
+
+
+@pytest.mark.parametrize("error", [KeyboardInterrupt(), SystemExit()])
+def test_model_base_exceptions_propagate(error) -> None:
+    class InterruptedModel(_FrozenModel):
+        def assign(self, vector):
+            raise error
+
+    with pytest.raises(type(error)):
+        SelectDailyStrategyUseCase().execute(
+            _command(
+                model=InterruptedModel(
+                    ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0)
+                )
+            )
+        )

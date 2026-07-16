@@ -7,7 +7,9 @@ import pytest
 
 from src.domain.ports import ConcurrentSelectionStateError
 from src.domain.regime.selection import (
+    AuditedSelectStrategyResult,
     RegimeSelectionState,
+    SelectionAuditRecord,
     SelectionEventType,
     SelectStrategyResult,
 )
@@ -88,6 +90,103 @@ def _result(
             f"{boundary.isoformat()}:{artifact}:{strategy}:{pending_artifact}".encode()
         ).hexdigest(),
     )
+
+
+def _audited(decision: SelectStrategyResult | None = None) -> AuditedSelectStrategyResult:
+    base = decision or _result()
+    return AuditedSelectStrategyResult(
+        base,
+        SelectionAuditRecord(
+            "daily_regime_selection",
+            "v1",
+            {
+                "selection_input_hash": base.selection_input_hash,
+                "reason": "high_confidence_mapping",
+            },
+        ),
+    )
+
+
+def test_audited_commit_reopens_with_exact_audit_and_retries_idempotently(tmp_path):
+    path = tmp_path / "audited.sqlite3"
+    repository = SqliteRegimeSelectionStateRepository(path)
+    decision = _audited()
+
+    first = repository.commit_audited(0, decision)
+    reopened = SqliteRegimeSelectionStateRepository(path)
+    retry = reopened.commit_audited(0, decision)
+    found = reopened.find_committed_audited("BTCUSDT", START, ARTIFACT_1)
+
+    assert first == retry == found == decision
+    assert found.audit_record.canonical_json == decision.audit_record.canonical_json
+    assert found.audit_record.audit_hash == decision.audit_record.audit_hash
+
+
+def test_audited_commit_conflicts_with_existing_unaudited_base(tmp_path):
+    repository = SqliteRegimeSelectionStateRepository(tmp_path / "mixed.sqlite3")
+    repository.commit(0, _result())
+
+    with pytest.raises(ValueError, match="audit|required|conflict"):
+        repository.find_committed_audited("BTCUSDT", START, ARTIFACT_1)
+    with pytest.raises(ValueError, match="audit|required|conflict"):
+        repository.commit_audited(0, _audited())
+
+
+def test_audited_write_failure_rolls_back_base_state_event_and_audit(tmp_path):
+    path = tmp_path / "audit-rollback.sqlite3"
+    repository = SqliteRegimeSelectionStateRepository(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER reject_audited_event
+            BEFORE INSERT ON regime_selection_events
+            WHEN NEW.audit_json IS NOT NULL
+            BEGIN
+                SELECT RAISE(ABORT, 'audit write rejected');
+            END
+            """
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="audit write rejected"):
+        repository.commit_audited(0, _audited())
+
+    assert repository.load("BTCUSDT") is None
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM regime_selection_events").fetchone()[0] == 0
+
+
+def test_existing_event_table_is_migrated_with_nullable_audit_columns(tmp_path):
+    path = tmp_path / "legacy.sqlite3"
+    SqliteRegimeSelectionStateRepository(path)
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TABLE regime_selection_events")
+        connection.execute(
+            """
+            CREATE TABLE regime_selection_events (
+                event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                boundary_at TEXT NOT NULL,
+                artifact_version TEXT NOT NULL,
+                expected_version INTEGER NOT NULL,
+                committed_version INTEGER NOT NULL,
+                result_json TEXT NOT NULL,
+                decision_hash TEXT NOT NULL,
+                events_json TEXT NOT NULL,
+                UNIQUE (symbol, boundary_at, artifact_version)
+            )
+            """
+        )
+
+    repository = SqliteRegimeSelectionStateRepository(path)
+
+    with sqlite3.connect(path) as connection:
+        columns = {
+            row[1]: row[3]
+            for row in connection.execute("PRAGMA table_info(regime_selection_events)")
+        }
+    assert columns["audit_json"] == 0
+    assert columns["audit_hash"] == 0
+    assert repository.commit_audited(0, _audited()) == _audited()
 
 
 def test_same_boundary_retry_returns_original_commit_once(tmp_path):

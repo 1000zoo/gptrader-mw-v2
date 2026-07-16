@@ -7,6 +7,7 @@ from typing import get_type_hints
 import pytest
 
 from src.domain.regime.selection import (
+    AuditedSelectStrategyResult,
     RegimeSelectionState,
     SelectionEventType,
     SelectStrategyResult,
@@ -357,13 +358,38 @@ def test_scheduler_daily_duplicate_is_idempotent_and_conflict_is_rejected(tmp_pa
     )
 
     assert first.succeeded and retry.succeeded
-    retry_base = (
-        retry.result.base_result
-        if isinstance(retry.result, DailySelectStrategyResult)
-        else retry.result
-    )
+    assert isinstance(retry.result, AuditedSelectStrategyResult)
+    retry_base = retry.result.base_result
     assert retry_base == first.result.base_result
+    assert retry.result.audit_record == first.result.audit_record
     assert usecase.execute.call_count == 1
     assert repository.list_events("BTCUSDT") == (SelectionEventType.CLASSIFICATION,)
     assert not conflict.succeeded
     assert "conflicting boundary commit" in str(conflict.error)
+
+
+def test_daily_scheduler_requires_audited_repository_before_base_mutation() -> None:
+    class BaseOnlyRepository:
+        def __init__(self):
+            self.commit_calls = 0
+
+        def load(self, symbol):
+            return None
+
+        def find_committed_result(self, symbol, boundary, artifact):
+            return None
+
+        def commit(self, expected, result):
+            self.commit_calls += 1
+            return result
+
+    repository = BaseOnlyRepository()
+    execution = RegimeSelectionScheduler(
+        SelectDailyStrategyUseCase(), repository, now=lambda: START
+    ).run_selection(
+        "daily-research", "BTCUSDT", lambda previous: daily_command(previous=previous)
+    )
+
+    assert not execution.succeeded
+    assert "audited repository" in str(execution.error)
+    assert repository.commit_calls == 0

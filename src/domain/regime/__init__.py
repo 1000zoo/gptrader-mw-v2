@@ -64,8 +64,10 @@ from src.domain.regime.mapping import (
     candidate_universe_hash,
 )
 from src.domain.regime.selection import (
+    AuditedSelectStrategyResult,
     RegimeSelectionState,
     SelectionArtifactSnapshot,
+    SelectionAuditRecord,
     SelectionConfidenceThresholds,
     SelectStrategyResult,
     SelectionEventType,
@@ -128,6 +130,8 @@ __all__ = [
     "candidate_universe_hash",
     "RegimeSelectionState",
     "SelectionArtifactSnapshot",
+    "SelectionAuditRecord",
+    "AuditedSelectStrategyResult",
     "SelectionConfidenceThresholds",
     "SelectStrategyResult",
     "SelectionEventType",

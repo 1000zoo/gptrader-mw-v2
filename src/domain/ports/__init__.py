@@ -4,6 +4,7 @@ from src.domain.ports.market_feature_provider_port import MarketFeatureProviderP
 from src.domain.ports.order_execution_port import OrderExecutionPort
 from src.domain.ports.regime_model_port import RegimeModelPort
 from src.domain.ports.regime_selection_state_repository_port import (
+    AuditedRegimeSelectionStateRepositoryPort,
     ConcurrentSelectionStateError,
     RegimeSelectionStateRepositoryPort,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "OrderExecutionPort",
     "RegimeModelPort",
     "ConcurrentSelectionStateError",
+    "AuditedRegimeSelectionStateRepositoryPort",
     "RegimeSelectionStateRepositoryPort",
     "SignalLogEntry",
     "SignalLogRepositoryPort",

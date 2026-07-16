@@ -10,8 +10,10 @@ from src.domain.ports.regime_selection_state_repository_port import (
     RegimeSelectionStateRepositoryPort,
 )
 from src.domain.regime.selection import (
+    AuditedSelectStrategyResult,
     RegimeSelectionState,
     SelectionEventType,
+    SelectionAuditRecord,
     SelectStrategyResult,
 )
 
@@ -69,6 +71,31 @@ class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
         expected_state_version: int,
         result: SelectStrategyResult,
     ) -> SelectStrategyResult:
+        return self._commit(expected_state_version, result, audit_record=None)
+
+    def commit_audited(
+        self,
+        expected_state_version: int,
+        result: AuditedSelectStrategyResult,
+    ) -> AuditedSelectStrategyResult:
+        if not isinstance(result, AuditedSelectStrategyResult):
+            raise ValueError("result must be an AuditedSelectStrategyResult")
+        committed = self._commit(
+            expected_state_version,
+            result.base_result,
+            audit_record=result.audit_record,
+        )
+        if isinstance(committed, AuditedSelectStrategyResult):
+            return committed
+        raise RuntimeError("audited commit did not return its audit envelope")
+
+    def _commit(
+        self,
+        expected_state_version: int,
+        result: SelectStrategyResult,
+        *,
+        audit_record: SelectionAuditRecord | None,
+    ) -> SelectStrategyResult | AuditedSelectStrategyResult:
         expected = _expected_version(expected_state_version)
         if not isinstance(result, SelectStrategyResult):
             raise ValueError("result must be a SelectStrategyResult")
@@ -85,6 +112,8 @@ class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
         events_json = _canonical_json([event.value for event in result.events])
         state_json = _encode_state(result.state)
         state_hash = _sha256(state_json)
+        audit_json = None if audit_record is None else audit_record.canonical_json
+        audit_hash = None if audit_record is None else audit_record.audit_hash
 
         connection = self._connect()
         try:
@@ -92,7 +121,8 @@ class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
             prior = connection.execute(
                 """
                 SELECT symbol, boundary_at, artifact_version, expected_version,
-                       committed_version, result_json, decision_hash, events_json
+                       committed_version, result_json, decision_hash, events_json,
+                       audit_json, audit_hash
                 FROM regime_selection_events
                 WHERE symbol = ? AND boundary_at = ? AND artifact_version = ?
                 """,
@@ -100,10 +130,18 @@ class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
             ).fetchone()
             if prior is not None:
                 original = _result_from_event_row(prior)
-                if prior["decision_hash"] == decision_hash:
+                if prior["decision_hash"] != decision_hash:
+                    raise ValueError("conflicting boundary commit")
+                if audit_record is not None:
+                    if prior["audit_json"] is None or prior["audit_hash"] is None:
+                        raise ValueError("conflicting boundary commit: required audit is missing")
+                    audited = _audited_from_event_row(prior)
+                    if audited.audit_record != audit_record:
+                        raise ValueError("conflicting boundary commit: audit differs")
                     connection.commit()
-                    return original
-                raise ValueError("conflicting boundary commit")
+                    return audited
+                connection.commit()
+                return original
 
             current = connection.execute(
                 """
@@ -128,8 +166,9 @@ class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
                 """
                 INSERT INTO regime_selection_events (
                     symbol, boundary_at, artifact_version, expected_version,
-                    committed_version, result_json, decision_hash, events_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    committed_version, result_json, decision_hash, events_json,
+                    audit_json, audit_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     symbol,
@@ -140,6 +179,8 @@ class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
                     result_json,
                     decision_hash,
                     events_json,
+                    audit_json,
+                    audit_hash,
                 ),
             )
 
@@ -181,7 +222,11 @@ class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
             if cursor.rowcount != 1:
                 raise ConcurrentSelectionStateError("selection state compare-and-set failed")
             connection.commit()
-            return result
+            return (
+                result
+                if audit_record is None
+                else AuditedSelectStrategyResult(result, audit_record)
+            )
         except Exception:
             connection.rollback()
             raise
@@ -203,7 +248,8 @@ class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
             row = connection.execute(
                 """
                 SELECT symbol, boundary_at, artifact_version, expected_version,
-                       committed_version, result_json, decision_hash, events_json
+                       committed_version, result_json, decision_hash, events_json,
+                       audit_json, audit_hash
                 FROM regime_selection_events
                 WHERE symbol = ? AND boundary_at = ? AND artifact_version = ?
                 """,
@@ -211,13 +257,42 @@ class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
             ).fetchone()
         return None if row is None else _result_from_event_row(row)
 
+    def find_committed_audited(
+        self,
+        symbol: str,
+        boundary_at: datetime,
+        evaluated_artifact_identity: str,
+    ) -> AuditedSelectStrategyResult | None:
+        symbol = _canonical_symbol(symbol)
+        boundary = _utc_iso(boundary_at)
+        artifact = _sha256_text(
+            evaluated_artifact_identity, "evaluated_artifact_identity"
+        )
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT symbol, boundary_at, artifact_version, expected_version,
+                       committed_version, result_json, decision_hash, events_json,
+                       audit_json, audit_hash
+                FROM regime_selection_events
+                WHERE symbol = ? AND boundary_at = ? AND artifact_version = ?
+                """,
+                (symbol, boundary, artifact),
+            ).fetchone()
+        if row is None:
+            return None
+        if row["audit_json"] is None or row["audit_hash"] is None:
+            raise ValueError("committed selection is missing its required audit")
+        return _audited_from_event_row(row)
+
     def list_events(self, symbol: str) -> tuple[SelectionEventType, ...]:
         symbol = _canonical_symbol(symbol)
         with closing(self._connect()) as connection:
             rows = connection.execute(
                 """
                 SELECT symbol, boundary_at, artifact_version, expected_version,
-                       committed_version, result_json, decision_hash, events_json
+                       committed_version, result_json, decision_hash, events_json,
+                       audit_json, audit_hash
                 FROM regime_selection_events
                 WHERE symbol = ?
                 ORDER BY boundary_at ASC, event_id ASC
@@ -275,10 +350,26 @@ class SqliteRegimeSelectionStateRepository(RegimeSelectionStateRepositoryPort):
                     result_json TEXT NOT NULL,
                     decision_hash TEXT NOT NULL,
                     events_json TEXT NOT NULL,
+                    audit_json TEXT,
+                    audit_hash TEXT,
                     UNIQUE (symbol, boundary_at, artifact_version)
                 )
                 """
             )
+            columns = {
+                row[1]
+                for row in connection.execute(
+                    "PRAGMA table_info(regime_selection_events)"
+                ).fetchall()
+            }
+            if "audit_json" not in columns:
+                connection.execute(
+                    "ALTER TABLE regime_selection_events ADD COLUMN audit_json TEXT"
+                )
+            if "audit_hash" not in columns:
+                connection.execute(
+                    "ALTER TABLE regime_selection_events ADD COLUMN audit_hash TEXT"
+                )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_regime_selection_events_order
@@ -408,6 +499,22 @@ def _result_from_event_row(row: sqlite3.Row) -> SelectStrategyResult:
     ):
         raise ValueError("selection decision coordinate row does not match its payload")
     return result
+
+
+def _audited_from_event_row(row: sqlite3.Row) -> AuditedSelectStrategyResult:
+    base = _result_from_event_row(row)
+    audit_json = row["audit_json"]
+    audit_hash = row["audit_hash"]
+    if (
+        not isinstance(audit_json, str)
+        or not isinstance(audit_hash, str)
+        or audit_hash != _sha256(audit_json)
+    ):
+        raise ValueError("selection audit integrity check failed")
+    record = SelectionAuditRecord.from_json(audit_json)
+    if record.audit_hash != audit_hash:
+        raise ValueError("selection audit hash does not match its payload")
+    return AuditedSelectStrategyResult(base, record)
 
 
 def _strict_loads(payload: str, label: str) -> object:
