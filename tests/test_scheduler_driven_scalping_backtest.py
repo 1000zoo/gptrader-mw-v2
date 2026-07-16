@@ -1,7 +1,10 @@
 import hashlib
 import json
+import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from decimal import getcontext, localcontext
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -299,6 +302,27 @@ def test_daily_regime_active_opposite_exits_without_same_candle_reversal(monkeyp
         if trade["exit_reason"] == "active_strategy_opposite_signal"
     )
     assert opposite["exit_audit_hash"]
+    economic = opposite["exit_audit"]["payload"]
+    assert economic["audit_schema_version"] == "daily-active-strategy-exit-v2"
+    from src.domain.regime import decimal_arithmetic_context
+    with decimal_arithmetic_context():
+        quantity = Decimal(economic["quantity"])
+        entry_fill = Decimal(economic["entry_fill"])
+        exit_fill = Decimal(economic["exit_fill"])
+        entry_fee = Decimal(economic["entry_fee"])
+        exit_fee = Decimal(economic["exit_fee"])
+        gross = (exit_fill - entry_fill) * quantity
+        assert Decimal(economic["entry_slippage_cost"]) == abs(
+            entry_fill - Decimal(economic["entry_reference_close"])
+        ) * quantity
+        assert Decimal(economic["exit_slippage_cost"]) == abs(
+            Decimal(economic["exit_reference_close"]) - exit_fill
+        ) * quantity
+        assert Decimal(economic["total_fee"]) == entry_fee + exit_fee
+        assert Decimal(economic["gross_pnl"]) == gross
+        assert Decimal(economic["net_pnl"]) == gross - entry_fee - exit_fee
+    assert economic["entry_fill"] == opposite["entry_price"]
+    assert economic["exit_fill"] == opposite["exit_price"]
     next_entries = [
         trade for trade in result["trades"] if trade["entry_at"] > opposite["exit_at"]
     ]
@@ -306,6 +330,30 @@ def test_daily_regime_active_opposite_exits_without_same_candle_reversal(monkeyp
         datetime.fromisoformat(opposite["exit_at"]) + timedelta(minutes=1)
     ).isoformat()
     assert result["active_opposite_exit_count"] == 1
+    assert result["win_count"] == sum(
+        Decimal(item["net_pnl"]) > 0 for item in result["trades"]
+    )
+    assert Decimal(result["net_win_rate"]) == Decimal(result["win_count"]) / Decimal(
+        result["trade_count"]
+    )
+    with decimal_arithmetic_context():
+        assert Decimal(result["actual_turnover_notional"]) == sum(
+            (
+                (Decimal(item["entry_price"]) + Decimal(item["exit_price"]))
+                * Decimal(item["quantity"])
+                for item in result["trades"]
+            ),
+            Decimal("0"),
+        )
+        assert Decimal(result["fee_paid"]) == sum(
+            (Decimal(item["fee_paid"]) for item in result["trades"]), Decimal("0")
+        )
+        assert Decimal(result["final_equity"]) == Decimal(result["initial_equity"]) + sum(
+            (Decimal(item["net_pnl"]) for item in result["trades"]), Decimal("0")
+        )
+    assert result["exposure_candle_count"] == sum(
+        item["holding_bars"] for item in result["trades"]
+    )
 
     repeated = run_scheduler_driven_daily_regime_backtest(
         MarketSnapshot(candles),
@@ -366,20 +414,21 @@ def test_daily_regime_switch_exit_audit_binds_previous_candidate_hash(monkeypatc
         module,
         "build_strategies",
         lambda candidate: (
-            Directional(
-                SignalDirection.LONG
-                if candidate.candidate_id == "candidate-a"
-                else SignalDirection.SHORT
+                Directional(
+                    SignalDirection.SHORT
+                    if candidate.candidate_id == "candidate-a"
+                    else SignalDirection.LONG
             ),
         ),
     )
     start = datetime(2026, 4, 6, tzinfo=timezone.utc)
     candidates = tuple(
-        replace(
-            _regime_candidate(candidate_id),
-            take_profit_ratio=Decimal("0.8"),
-            stop_loss_ratio=Decimal("0.9"),
-        )
+            replace(
+                _regime_candidate(candidate_id),
+                take_profit_ratio=Decimal("0.8"),
+                stop_loss_ratio=Decimal("0.9"),
+                max_holding_bars=2000 if candidate_id == "candidate-a" else 1,
+            )
         for candidate_id in ("candidate-a", "candidate-b")
     )
     hashes, mapping = _daily_test_artifacts(candidates)
@@ -398,9 +447,9 @@ def test_daily_regime_switch_exit_audit_binds_previous_candidate_hash(monkeypatc
             return ClusterAssignment(component, 0.9, 0.05, 1.0)
 
     result = run_scheduler_driven_daily_regime_backtest(
-        MarketSnapshot(_candles(count=4320 + 1442, start=start - timedelta(days=3))),
+        MarketSnapshot(_candles(count=4320 + 1441, start=start - timedelta(days=3))),
         start_at=start,
-        end_at=start + timedelta(days=1, minutes=2),
+        end_at=start + timedelta(days=1, minutes=1),
         candidates=candidates,
         model_artifact=SwitchingModel(),
         mapping_artifact=mapping,
@@ -417,9 +466,31 @@ def test_daily_regime_switch_exit_audit_binds_previous_candidate_hash(monkeypatc
     assert audit["previous_candidate_definition_hash"] == hashes["candidate-a"]
     assert audit["active_candidate_id"] == "candidate-b"
     assert audit["active_candidate_definition_hash"] == hashes["candidate-b"]
+    assert trade["owner_strategy_profile_id"] == "candidate-a"
+    assert trade["owner_leverage"] == "2"
+    assert trade["owner_max_holding_bars"] == 2000
+    assert trade["owner_max_holding_deadline"] == (
+        start + timedelta(minutes=2000)
+    ).isoformat()
+    assert Decimal(trade["margin"]) == (
+        Decimal(trade["entry_price"]) * Decimal(trade["quantity"]) / Decimal("2")
+    )
+    assert Decimal(trade["owner_take_profit"]) == Decimal(
+        audit["entry_reference_close"]
+    ) * Decimal("0.2")
+    assert Decimal(trade["owner_stop_loss"]) == Decimal(
+        audit["entry_reference_close"]
+    ) * Decimal("1.9")
+    assert trade["owner_candidate_definition_hash"] == hashes["candidate-a"]
+    assert trade["owner_guard_hash"] == module.candidate_definition_hash(
+        module.candidate_payload(candidates[0])["guard"]
+    )
     assert result["exposure_candle_count"] == sum(
         item["holding_bars"] for item in result["trades"]
     )
+    assert result["guard_state_by_candidate"]["candidate-a"]["consecutive_losses"] == 1
+    assert result["guard_state_by_candidate"]["candidate-b"]["consecutive_losses"] == 0
+    assert result["guard_state_by_candidate"]["candidate-b"]["daily_trade_count"] == 0
 
 
 def test_daily_regime_feature_unavailable_holds_are_canonical_and_hashed(monkeypatch) -> None:
@@ -523,6 +594,377 @@ def test_daily_regime_no_trade_exposure_is_zero(monkeypatch) -> None:
     assert result["exposure_candle_count"] == 0
     assert result["eligible_replay_interval_count"] == 3
     assert result["exposure_ratio"] == "0"
+
+
+def test_daily_candidate_hash_and_replay_ignore_ambient_decimal_context(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+    from src.domain.regime.model import ClusterAssignment
+    from tests.application.usecases.regime.test_select_daily_strategy_usecase import (
+        COMPONENTS,
+        _FrozenModel,
+        _candles,
+    )
+
+    class AlwaysWait:
+        def evaluate(self, context):
+            return StrategyResult("wait", Signal.wait())
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysWait(),))
+    start = datetime(2026, 4, 6, tzinfo=timezone.utc)
+    candidates = (
+        replace(
+            _regime_candidate("candidate-a"),
+            take_profit_ratio=Decimal("0.012345678901234567890123456789"),
+        ),
+        _regime_candidate("candidate-b"),
+    )
+    original_precision = getcontext().prec
+    with localcontext() as context:
+        context.prec = 50
+        hashes, mapping = _daily_test_artifacts(candidates)
+
+    def replay_at_precision(precision):
+        with localcontext() as context:
+            context.prec = precision
+            before = (
+                context.prec,
+                context.rounding,
+                context.Emin,
+                context.Emax,
+                dict(context.flags),
+                dict(context.traps),
+            )
+            result = run_scheduler_driven_daily_regime_backtest(
+                MarketSnapshot(_candles(count=4323, start=start - timedelta(days=3))),
+                start_at=start,
+                end_at=start + timedelta(minutes=3),
+                candidates=candidates,
+                model_artifact=_FrozenModel(
+                    ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0)
+                ),
+                mapping_artifact=mapping,
+                candidate_manifest=tuple(sorted(hashes.items())),
+                position_exit_policy=PositionExitPolicy.ENTRY_OWNER_ONLY,
+            )
+            assert (
+                context.prec,
+                context.rounding,
+                context.Emin,
+                context.Emax,
+                dict(context.flags),
+                dict(context.traps),
+            ) == before
+            return module._audited_candidate_hash(
+                candidates[0],
+                symbol=Symbol("BTC", "USDT"),
+                initial_equity=Decimal("10000"),
+            ), result
+
+    values = [replay_at_precision(precision) for precision in (6, 10, 28, 50)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        threaded = list(pool.map(replay_at_precision, (6, 10, 28, 50)))
+
+    assert all(value == values[0] for value in values + threaded)
+    child_code = (
+        "from dataclasses import replace; from decimal import Decimal,getcontext; "
+        "from tests.test_scheduler_driven_scalping_backtest import _regime_candidate; "
+        "from scripts.scheduler_driven_scalping_backtest import _audited_candidate_hash; "
+        "from src.domain.market import Symbol; import sys; getcontext().prec=int(sys.argv[1]); "
+        "candidate=replace(_regime_candidate('candidate-a'),"
+        "take_profit_ratio=Decimal('0.012345678901234567890123456789')); "
+        "print(_audited_candidate_hash(candidate,symbol=Symbol('BTC','USDT'),"
+        "initial_equity=Decimal('10000')))"
+    )
+    subprocess_hashes = [
+        subprocess.check_output(
+            [sys.executable, "-c", child_code, str(precision)],
+            cwd=Path(__file__).resolve().parents[1],
+            text=True,
+        ).strip()
+        for precision in (6, 10, 28, 50)
+    ]
+    assert subprocess_hashes == [values[0][0]] * 4
+    assert getcontext().prec == original_precision
+
+
+def test_daily_owner_hard_risk_precedes_opposite_signal(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+    from src.domain.regime.model import ClusterAssignment
+    from tests.application.usecases.regime.test_select_daily_strategy_usecase import (
+        COMPONENTS,
+        _FrozenModel,
+        _candles,
+    )
+
+    class LongThenShort:
+        calls = 0
+
+        def evaluate(self, context):
+            type(self).calls += 1
+            direction = SignalDirection.LONG if self.calls == 1 else SignalDirection.SHORT
+            return StrategyResult("long-then-short", Signal(direction, Decimal("1")))
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (LongThenShort(),))
+    start = datetime(2026, 4, 6, tzinfo=timezone.utc)
+    candidates = (
+        replace(_regime_candidate("candidate-a"), take_profit_ratio=Decimal("0.0001")),
+        _regime_candidate("candidate-b"),
+    )
+    hashes, mapping = _daily_test_artifacts(candidates)
+    candles = list(_candles(count=4322, start=start - timedelta(days=3)))
+    candles[-1] = replace(candles[-1], high_price=Decimal("1000"))
+    result = run_scheduler_driven_daily_regime_backtest(
+        MarketSnapshot(tuple(candles)),
+        start_at=start,
+        end_at=start + timedelta(minutes=2),
+        candidates=candidates,
+        model_artifact=_FrozenModel(
+            ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0)
+        ),
+        mapping_artifact=mapping,
+        candidate_manifest=tuple(sorted(hashes.items())),
+        position_exit_policy=PositionExitPolicy.ACTIVE_STRATEGY_OPPOSITE,
+    )
+
+    assert result["trades"][0]["exit_reason"] == "take_profit"
+    assert result["exit_only_signal_attempt_count"] == 0
+    assert LongThenShort.calls == 1
+
+
+def test_daily_entry_owner_policy_never_evaluates_discretionary_exit(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+    from src.domain.regime.model import ClusterAssignment
+    from tests.application.usecases.regime.test_select_daily_strategy_usecase import (
+        COMPONENTS,
+        _FrozenModel,
+        _candles,
+    )
+
+    class LongThenShort:
+        calls = 0
+
+        def evaluate(self, context):
+            type(self).calls += 1
+            direction = SignalDirection.LONG if self.calls == 1 else SignalDirection.SHORT
+            return StrategyResult("long-then-short", Signal(direction, Decimal("1")))
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (LongThenShort(),))
+    start = datetime(2026, 4, 6, tzinfo=timezone.utc)
+    candidates = tuple(
+        replace(_regime_candidate(candidate_id), take_profit_ratio=Decimal("0.8"))
+        for candidate_id in ("candidate-a", "candidate-b")
+    )
+    hashes, mapping = _daily_test_artifacts(candidates)
+    result = run_scheduler_driven_daily_regime_backtest(
+        MarketSnapshot(_candles(count=4322, start=start - timedelta(days=3))),
+        start_at=start,
+        end_at=start + timedelta(minutes=2),
+        candidates=candidates,
+        model_artifact=_FrozenModel(
+            ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0)
+        ),
+        mapping_artifact=mapping,
+        candidate_manifest=tuple(sorted(hashes.items())),
+        position_exit_policy=PositionExitPolicy.ENTRY_OWNER_ONLY,
+    )
+
+    assert result["trades"][0]["exit_reason"] == "end_of_data"
+    assert result["exit_only_signal_attempt_count"] == 0
+    assert LongThenShort.calls == 1
+
+
+def test_daily_scheduler_commit_failure_aborts_before_entry(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+    from src.domain.regime.model import ClusterAssignment
+    from tests.application.usecases.regime.test_select_daily_strategy_usecase import (
+        COMPONENTS,
+        _FrozenModel,
+        _candles,
+    )
+
+    class AlwaysLong:
+        calls = 0
+
+        def evaluate(self, context):
+            type(self).calls += 1
+            return StrategyResult("long", Signal(SignalDirection.LONG, Decimal("1")))
+
+    class FailingRepository(module._ReplaySelectionRepository):
+        def commit_audited(self, expected_state_version, result):
+            raise RuntimeError("atomic audit commit failed")
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysLong(),))
+    start = datetime(2026, 4, 6, tzinfo=timezone.utc)
+    candidates = (
+        _regime_candidate("candidate-a"),
+        _regime_candidate("candidate-b"),
+    )
+    hashes, mapping = _daily_test_artifacts(candidates)
+    with pytest.raises(RuntimeError, match="atomic audit commit failed"):
+        run_scheduler_driven_daily_regime_backtest(
+            MarketSnapshot(_candles(count=4321, start=start - timedelta(days=3))),
+            start_at=start,
+            end_at=start + timedelta(minutes=1),
+            candidates=candidates,
+            model_artifact=_FrozenModel(
+                ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0)
+            ),
+            mapping_artifact=mapping,
+            candidate_manifest=tuple(sorted(hashes.items())),
+            selection_repository=FailingRepository(),
+            position_exit_policy=PositionExitPolicy.ACTIVE_STRATEGY_OPPOSITE,
+        )
+    assert AlwaysLong.calls == 0
+
+
+def test_daily_active_cash_holds_owner_position_without_exit_evaluation(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+    from src.domain.regime.model import ClusterAssignment
+    from tests.application.usecases.regime.test_select_daily_strategy_usecase import (
+        COMPONENTS,
+        _FrozenModel,
+        _candles,
+    )
+
+    class AlwaysShort:
+        def evaluate(self, context):
+            return StrategyResult("short", Signal(SignalDirection.SHORT, Decimal("1")))
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysShort(),))
+    start = datetime(2026, 4, 6, tzinfo=timezone.utc)
+    candidates = tuple(
+        replace(
+            _regime_candidate(candidate_id),
+            take_profit_ratio=Decimal("0.8"),
+            stop_loss_ratio=Decimal("0.9"),
+            max_holding_bars=2000,
+        )
+        for candidate_id in ("candidate-a", "candidate-b")
+    )
+    hashes, mapping = _daily_test_artifacts(candidates)
+    base_model = _FrozenModel(ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0))
+
+    class StrategyThenCashModel:
+        calls = 0
+
+        def __getattr__(self, name):
+            return getattr(base_model, name)
+
+        def assign(self, vector):
+            component = COMPONENTS[0] if self.calls == 0 else COMPONENTS[2]
+            type(self).calls += 1
+            return ClusterAssignment(component, 0.9, 0.05, 1.0)
+
+    result = run_scheduler_driven_daily_regime_backtest(
+        MarketSnapshot(_candles(count=4320 + 1441, start=start - timedelta(days=3))),
+        start_at=start,
+        end_at=start + timedelta(days=1, minutes=1),
+        candidates=candidates,
+        model_artifact=StrategyThenCashModel(),
+        mapping_artifact=mapping,
+        candidate_manifest=tuple(sorted(hashes.items())),
+        position_exit_policy=PositionExitPolicy.ACTIVE_STRATEGY_OPPOSITE,
+    )
+
+    assert result["trades"][0]["exit_reason"] == "end_of_data"
+    assert result["trades"][0]["owner_strategy_profile_id"] == "candidate-a"
+    assert result["cash_transition_count"] == 1
+    assert result["component_transition_count"] == 1
+    assert result["exit_only_signal_attempt_count"] == 1439
+    assert result["exit_only_hold_reasons"] == {"same_direction_signal": 1439}
+
+
+def test_daily_guard_skip_and_cash_share_counters_are_exact(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+    from src.domain.regime.model import ClusterAssignment
+    from tests.application.usecases.regime.test_select_daily_strategy_usecase import (
+        COMPONENTS,
+        _FrozenModel,
+        _candles,
+    )
+
+    class AlwaysLong:
+        def evaluate(self, context):
+            return StrategyResult("long", Signal(SignalDirection.LONG, Decimal("1")))
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysLong(),))
+    start = datetime(2026, 4, 6, tzinfo=timezone.utc)
+    base = _regime_candidate("candidate-a")
+    guarded = replace(
+        base,
+        take_profit_ratio=Decimal("0.0001"),
+        guard=replace(base.guard, min_minutes_between_entries=10),
+    )
+    candidates = (guarded, _regime_candidate("candidate-b"))
+    hashes, mapping = _daily_test_artifacts(candidates)
+    candles = list(_candles(count=4323, start=start - timedelta(days=3)))
+    candles[-2] = replace(candles[-2], high_price=Decimal("1000"))
+    common = dict(
+        market=MarketSnapshot(tuple(candles)),
+        start_at=start,
+        end_at=start + timedelta(minutes=3),
+        candidates=candidates,
+        mapping_artifact=mapping,
+        candidate_manifest=tuple(sorted(hashes.items())),
+        position_exit_policy=PositionExitPolicy.ENTRY_OWNER_ONLY,
+    )
+    selected = run_scheduler_driven_daily_regime_backtest(
+        model_artifact=_FrozenModel(
+            ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0)
+        ),
+        **common,
+    )
+    cash = run_scheduler_driven_daily_regime_backtest(
+        model_artifact=_FrozenModel(
+            ClusterAssignment(COMPONENTS[2], 0.9, 0.05, 1.0)
+        ),
+        **common,
+    )
+
+    assert selected["entry_signal_attempt_count"] == 1
+    assert selected["exit_only_signal_attempt_count"] == 0
+    assert selected["guard_skips"] == 1
+    assert selected["eligible_entry_candles"] == 2
+    assert selected["cash_share_by_eligible_entry_candles"] == "0"
+    assert cash["entry_signal_attempt_count"] == 0
+    assert cash["guard_skips"] == 0
+    assert cash["cash_eligible_entry_candles"] == 3
+    assert cash["cash_share_by_eligible_entry_candles"] == "1"
+
+
+def test_four_hour_regime_replay_hardcoded_legacy_golden(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+
+    class AlwaysWait:
+        def evaluate(self, context):
+            return StrategyResult("wait", Signal.wait())
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysWait(),))
+    start = datetime(2026, 1, 5, tzinfo=timezone.utc)
+    result = run_scheduler_driven_regime_backtest(
+        _regime_market(start, hours=1),
+        start_at=start,
+        end_at=start + timedelta(hours=1),
+        candidates=(_regime_candidate(),),
+        model=_ScriptedAssignments({start: "cluster-a"}),
+        mapping=_selection_snapshot({"cluster-a": "strategy-x"}),
+    )
+    encoded = json.dumps(
+        result,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+
+    assert hashlib.sha256(encoded).hexdigest() == (
+        "6a7a827416e3c0afea214fab1662c6b9252cbe263c47b7f2593ba38744378cb3"
+    )
+    assert (result["trade_count"], result["final_equity"], result["signal_counts"]) == (
+        0,
+        "10000",
+        {"strategy-x": 60},
+    )
 
 
 def _actual_artifact_pair(candidates):

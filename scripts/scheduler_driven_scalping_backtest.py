@@ -98,6 +98,9 @@ from src.domain.regime.daily_mapping import (  # noqa: E402
     DailyStrategyMappingArtifact,
     daily_mapping_artifact_hash,
 )
+from src.domain.regime.three_day_daily_profile import (  # noqa: E402
+    decimal_arithmetic_context,
+)
 from src.domain.regime.selection import (  # noqa: E402
     AuditedSelectStrategyResult,
     SelectionAuditRecord,
@@ -240,6 +243,7 @@ class BacktestPosition:
     owner_leverage: Decimal | None = None
     owner_max_holding_bars: int | None = None
     owner_max_holding_deadline: datetime | None = None
+    entry_reference_price: Decimal | None = None
 
     @property
     def notional(self) -> Decimal:
@@ -1073,6 +1077,141 @@ class _RegimeCandidateBundle:
     feature_unavailable_holds: int = 0
 
 
+@dataclass(frozen=True)
+class _ClosedTradeAccounting:
+    equity: Decimal
+    peak: Decimal
+    max_drawdown: Decimal
+    turnover: Decimal
+
+
+@dataclass(frozen=True)
+class _TradeAggregates:
+    gross_pnl: Decimal
+    net_pnl: Decimal
+    fee_paid: Decimal
+    maximum_adverse_excursion_ratio: Decimal
+    win_count: int
+    turnover_notional: Decimal
+
+
+def _record_replay_closed_trade(
+    closed: BacktestTrade,
+    *,
+    index: int,
+    trades: list[BacktestTrade],
+    bundles: Mapping[str, _RegimeCandidateBundle],
+    equity: Decimal,
+    peak: Decimal,
+    max_drawdown: Decimal,
+    turnover: Decimal,
+) -> _ClosedTradeAccounting:
+    owner_id = closed.owner_strategy_profile_id
+    if owner_id is None or owner_id not in bundles:
+        raise ValueError("closed replay trade has no canonical owner bundle")
+    trades.append(closed)
+    equity += closed.net_pnl
+    turnover += closed.exit_price * closed.quantity
+    bundles[owner_id].guard.record_trade(index=index, closed_trade=closed, equity=equity)
+    peak, max_drawdown = _update_drawdown(
+        equity=equity, peak=peak, max_drawdown=max_drawdown
+    )
+    return _ClosedTradeAccounting(equity, peak, max_drawdown, turnover)
+
+
+def _open_replay_position(
+    result,
+    *,
+    bundle: _RegimeCandidateBundle,
+    index: int,
+    boundary: datetime,
+    entry_reference_price: Decimal,
+) -> BacktestPosition | None:
+    if result is None or result.order_result is None:
+        return None
+    entry = result.order_result
+    levels = result.take_profit_stop_loss
+    if (
+        levels is None
+        or entry.average_price is None
+        or entry.executed_quantity is None
+    ):
+        return None
+    max_holding = bundle.candidate.max_holding_bars
+    return BacktestPosition(
+        direction=result.generated_signal.signal.direction,
+        entry_price=entry.average_price,
+        quantity=entry.executed_quantity,
+        take_profit=levels.take_profit,
+        stop_loss=levels.stop_loss,
+        opened_index=index,
+        entry_fee=entry.average_price * entry.executed_quantity * FEE_RATE,
+        margin=(entry.average_price * entry.executed_quantity) / bundle.candidate.leverage,
+        opened_at=boundary,
+        owner_strategy_profile_id=bundle.candidate.candidate_id,
+        owner_candidate_definition_hash=bundle.audited_candidate_definition_hash,
+        owner_guard_hash=bundle.guard_hash,
+        owner_leverage=bundle.candidate.leverage,
+        owner_max_holding_bars=max_holding,
+        owner_max_holding_deadline=(
+            None if max_holding is None else boundary + timedelta(minutes=max_holding)
+        ),
+        entry_reference_price=entry_reference_price,
+    )
+
+
+def _force_close_replay_position(
+    position: BacktestPosition,
+    *,
+    market: BacktestMarketSnapshot,
+    index: int,
+) -> BacktestTrade:
+    candle = market.candles[index]
+    return close_trade(
+        position,
+        _exit_fill_price(candle.close_price, position.direction),
+        "end_of_data",
+        index,
+        exit_at=candle.closed_at,
+        market=market,
+    )
+
+
+def _aggregate_replay_trades(trades: list[BacktestTrade]) -> _TradeAggregates:
+    if any(
+        value is None or not value.is_finite()
+        for trade in trades
+        for value in (
+            trade.entry_price,
+            trade.exit_price,
+            trade.quantity,
+            trade.margin,
+            trade.gross_pnl,
+            trade.net_pnl,
+            trade.fee_paid,
+            trade.maximum_adverse_excursion_ratio,
+        )
+    ):
+        raise ValueError("replay trade accounting contains a nonfinite value")
+    return _TradeAggregates(
+        gross_pnl=sum((trade.gross_pnl for trade in trades), Decimal("0")),
+        net_pnl=sum((trade.net_pnl for trade in trades), Decimal("0")),
+        fee_paid=sum((trade.fee_paid for trade in trades), Decimal("0")),
+        maximum_adverse_excursion_ratio=max(
+            (trade.maximum_adverse_excursion_ratio for trade in trades),
+            default=Decimal("0"),
+        ),
+        win_count=sum(trade.net_pnl > 0 for trade in trades),
+        turnover_notional=sum(
+            (
+                (trade.entry_price + trade.exit_price) * trade.quantity
+                for trade in trades
+            ),
+            Decimal("0"),
+        ),
+    )
+
+
 def _audited_candidate_hash(
     candidate: SchedulerBacktestCandidate, *, symbol: Symbol, initial_equity: Decimal
 ) -> str:
@@ -1117,7 +1256,7 @@ def _audited_candidate_hash(
         if isinstance(value, Decimal):
             if not value.is_finite():
                 raise ValueError("candidate definition contains a nonfinite Decimal")
-            return {"$decimal": "0" if value == 0 else format(value.normalize(), "f")}
+            return {"$decimal": _context_independent_decimal_text(value)}
         if isinstance(value, Mapping):
             return {key: canonical(item) for key, item in value.items()}
         if isinstance(value, (tuple, list)):
@@ -1135,6 +1274,30 @@ def _audited_candidate_hash(
         separators=(",", ":"), allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _context_independent_decimal_text(value: Decimal) -> str:
+    """Render finite Decimal values without applying the ambient arithmetic context."""
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise ValueError("canonical decimal must be finite")
+    sign, raw_digits, exponent = value.as_tuple()
+    if not any(raw_digits):
+        return "0"
+    digits = list(raw_digits)
+    while digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    coefficient = "".join(str(digit) for digit in digits)
+    if exponent >= 0:
+        rendered = coefficient + "0" * exponent
+    else:
+        decimal_position = len(coefficient) + exponent
+        rendered = (
+            coefficient[:decimal_position] + "." + coefficient[decimal_position:]
+            if decimal_position > 0
+            else "0." + "0" * (-decimal_position) + coefficient
+        )
+    return "-" + rendered if sign else rendered
 
 
 def _build_regime_bundle(
@@ -1417,11 +1580,22 @@ def run_scheduler_driven_regime_backtest(
                 max_holding_bars=open_position.owner_max_holding_bars,
             )
             if closed is not None:
-                trades.append(closed)
-                equity += closed.net_pnl
-                turnover += closed.exit_price * closed.quantity
-                owner = bundles[closed.owner_strategy_profile_id]
-                owner.guard.record_trade(index=index, closed_trade=closed, equity=equity)
+                accounting = _record_replay_closed_trade(
+                    closed,
+                    index=index,
+                    trades=trades,
+                    bundles=bundles,
+                    equity=equity,
+                    peak=peak,
+                    max_drawdown=max_drawdown,
+                    turnover=turnover,
+                )
+                equity, peak, max_drawdown, turnover = (
+                    accounting.equity,
+                    accounting.peak,
+                    accounting.max_drawdown,
+                    accounting.turnover,
+                )
                 open_position = None
         elif boundary < end_at and state is not None and state.new_entries_enabled:
             profile = state.active_strategy_profile_id
@@ -1443,28 +1617,16 @@ def run_scheduler_driven_regime_backtest(
                     )
                     if execution.error is not None:
                         raise execution.error
-                    if execution.result is not None and execution.result.order_result is not None:
-                        entry = execution.result.order_result
-                        levels = execution.result.take_profit_stop_loss
-                        if levels is not None and entry.average_price is not None and entry.executed_quantity is not None:
-                            open_position = BacktestPosition(
-                                direction=execution.result.generated_signal.signal.direction,
-                                entry_price=entry.average_price,
-                                quantity=entry.executed_quantity,
-                                take_profit=levels.take_profit,
-                                stop_loss=levels.stop_loss,
-                                opened_index=index,
-                                entry_fee=entry.average_price * entry.executed_quantity * FEE_RATE,
-                                margin=(entry.average_price * entry.executed_quantity) / bundle.candidate.leverage,
-                                opened_at=boundary,
-                                owner_strategy_profile_id=profile,
-                                owner_candidate_definition_hash=bundle.audited_candidate_definition_hash,
-                                owner_guard_hash=bundle.guard_hash,
-                                owner_leverage=bundle.candidate.leverage,
-                                owner_max_holding_bars=bundle.candidate.max_holding_bars,
-                            )
-                            turnover += open_position.notional
-                            bundle.guard.record_entry(index=index)
+                    open_position = _open_replay_position(
+                        execution.result,
+                        bundle=bundle,
+                        index=index,
+                        boundary=boundary,
+                        entry_reference_price=candle.close_price,
+                    )
+                    if open_position is not None:
+                        turnover += open_position.notional
+                        bundle.guard.record_entry(index=index)
 
         if start_at <= boundary < end_at:
             if state is None or state.active_strategy_profile_id is None:
@@ -1489,17 +1651,24 @@ def run_scheduler_driven_regime_backtest(
             equity_curve.append({"timestamp": boundary.isoformat(), "equity": str(portfolio_equity)})
 
     if open_position is not None:
-        last = selected.candles[-1]
-        closed = close_trade(
-            open_position, _exit_fill_price(last.close_price, open_position.direction),
-            "end_of_data", len(selected.candles) - 1, exit_at=last.closed_at,
-            market=selected,
+        closed = _force_close_replay_position(
+            open_position, market=selected, index=len(selected.candles) - 1
         )
-        trades.append(closed)
-        equity += closed.net_pnl
-        turnover += closed.exit_price * closed.quantity
-        bundles[closed.owner_strategy_profile_id].guard.record_trade(
-            index=len(selected.candles) - 1, closed_trade=closed, equity=equity
+        accounting = _record_replay_closed_trade(
+            closed,
+            index=len(selected.candles) - 1,
+            trades=trades,
+            bundles=bundles,
+            equity=equity,
+            peak=peak,
+            max_drawdown=max_drawdown,
+            turnover=turnover,
+        )
+        equity, peak, max_drawdown, turnover = (
+            accounting.equity,
+            accounting.peak,
+            accounting.max_drawdown,
+            accounting.turnover,
         )
 
     peak, max_drawdown = _update_drawdown(
@@ -1507,9 +1676,12 @@ def run_scheduler_driven_regime_backtest(
     )
     equity_curve.append({"timestamp": end_at.isoformat(), "equity": str(equity)})
 
-    gross = sum((item.gross_pnl for item in trades), Decimal("0"))
-    net = sum((item.net_pnl for item in trades), Decimal("0"))
-    fees = sum((item.fee_paid for item in trades), Decimal("0"))
+    aggregates = _aggregate_replay_trades(trades)
+    gross, net, fees = (
+        aggregates.gross_pnl,
+        aggregates.net_pnl,
+        aggregates.fee_paid,
+    )
     reported_definition_hash = mapping_candidate_definition_hash(audited_candidate_hashes)
     reported_universe_hash = mapping_candidate_universe_hash(audited_candidate_hashes)
     return {
@@ -1520,10 +1692,9 @@ def run_scheduler_driven_regime_backtest(
         "trade_count": len(trades), "gross_pnl": str(gross), "net_pnl": str(net),
         "fee_paid": str(fees), "return_ratio": str(net / initial_equity),
         "portfolio_max_drawdown_ratio": str(max_drawdown),
-        "maximum_adverse_excursion_ratio": str(max(
-            (item.maximum_adverse_excursion_ratio for item in trades),
-            default=Decimal("0"),
-        )),
+        "maximum_adverse_excursion_ratio": str(
+            aggregates.maximum_adverse_excursion_ratio
+        ),
         "trades": [_trade_payload(item) for item in trades],
         "equity_curve": equity_curve,
         "selection_events": selection_events,
@@ -1654,6 +1825,43 @@ def _canonical_result_hash(payload: Mapping[str, object]) -> str:
 
 
 def run_scheduler_driven_daily_regime_backtest(
+    market: MarketSnapshot,
+    *,
+    start_at: datetime,
+    end_at: datetime,
+    candidates: tuple[SchedulerBacktestCandidate, ...] | list[SchedulerBacktestCandidate],
+    model_artifact: object,
+    mapping_artifact: DailyStrategyMappingArtifact,
+    position_exit_policy: PositionExitPolicy,
+    candidate_manifest: object | None = None,
+    market_feature_provider: MarketFeatureProviderPort | None = None,
+    selection_repository=None,
+    symbol: Symbol = SYMBOL,
+    initial_equity: Decimal = INITIAL_EQUITY,
+    include_deferred: bool = False,
+    force_close_at_end: bool = True,
+) -> dict[str, object]:
+    """Run the daily replay under its frozen, caller-isolated Decimal context."""
+    with decimal_arithmetic_context():
+        return _run_scheduler_driven_daily_regime_backtest(
+            market,
+            start_at=start_at,
+            end_at=end_at,
+            candidates=candidates,
+            model_artifact=model_artifact,
+            mapping_artifact=mapping_artifact,
+            position_exit_policy=position_exit_policy,
+            candidate_manifest=candidate_manifest,
+            market_feature_provider=market_feature_provider,
+            selection_repository=selection_repository,
+            symbol=symbol,
+            initial_equity=initial_equity,
+            include_deferred=include_deferred,
+            force_close_at_end=force_close_at_end,
+        )
+
+
+def _run_scheduler_driven_daily_regime_backtest(
     market: MarketSnapshot,
     *,
     start_at: datetime,
@@ -1942,6 +2150,10 @@ def run_scheduler_driven_daily_regime_backtest(
                         and generated.signal.direction is SignalDirection.LONG
                     )
                     if opposite:
+                        if position.entry_reference_price is None:
+                            raise ValueError(
+                                "active exit requires the immutable entry reference price"
+                            )
                         closed = close_trade(
                             position,
                             _exit_fill_price(candle.close_price, position.direction),
@@ -1969,8 +2181,9 @@ def run_scheduler_driven_daily_regime_backtest(
                             )
                         exit_record = SelectionAuditRecord(
                             audit_type="daily_active_strategy_exit",
-                            schema_version="daily-active-strategy-exit-v1",
+                            schema_version="daily-active-strategy-exit-v2",
                             payload={
+                                "audit_schema_version": "daily-active-strategy-exit-v2",
                                 "selection_boundary": (
                                     None
                                     if current_selection is None
@@ -1995,14 +2208,32 @@ def run_scheduler_driven_daily_regime_backtest(
                                 "signal_id": signal_id,
                                 "signal_direction": generated.signal.direction.value,
                                 "signal_confidence": str(generated.signal.confidence),
+                                "selection_timestamp": current_selection.state.last_boundary_at.isoformat(),
+                                "exit_timestamp": boundary.isoformat(),
                                 "position_direction": position.direction.value,
+                                "direction": position.direction.value,
+                                "quantity": str(position.quantity),
+                                "entry_reference_close": str(position.entry_reference_price),
+                                "entry_fill": str(position.entry_price),
+                                "exit_reference_close": str(candle.close_price),
                                 "owner_candidate_id": position.owner_strategy_profile_id,
                                 "owner_candidate_definition_hash": position.owner_candidate_definition_hash,
                                 "owner_guard_hash": position.owner_guard_hash,
+                                "leverage": str(position.owner_leverage),
+                                "margin": str(position.margin),
                                 "exit_fill": str(closed.exit_price),
                                 "reference_close": str(candle.close_price),
                                 "entry_fee": str(position.entry_fee),
                                 "exit_fee": str(closed.fee_paid - position.entry_fee),
+                                "total_fee": str(closed.fee_paid),
+                                "entry_slippage_cost": str(
+                                    abs(position.entry_price - position.entry_reference_price)
+                                    * position.quantity
+                                ),
+                                "exit_slippage_cost": str(
+                                    abs(candle.close_price - closed.exit_price)
+                                    * position.quantity
+                                ),
                                 "slippage_cost": str(
                                     abs(candle.close_price - closed.exit_price)
                                     * position.quantity
@@ -2022,11 +2253,21 @@ def run_scheduler_driven_daily_regime_backtest(
                     else:
                         record_exit_hold("same_direction_signal")
             if closed is not None:
-                trades.append(closed)
-                equity += closed.net_pnl
-                turnover += closed.exit_price * closed.quantity
-                bundles[closed.owner_strategy_profile_id].guard.record_trade(
-                    index=index, closed_trade=closed, equity=equity
+                accounting = _record_replay_closed_trade(
+                    closed,
+                    index=index,
+                    trades=trades,
+                    bundles=bundles,
+                    equity=equity,
+                    peak=peak,
+                    max_drawdown=max_drawdown,
+                    turnover=turnover,
+                )
+                equity, peak, max_drawdown, turnover = (
+                    accounting.equity,
+                    accounting.peak,
+                    accounting.max_drawdown,
+                    accounting.turnover,
                 )
                 position = None
 
@@ -2055,35 +2296,16 @@ def run_scheduler_driven_daily_regime_backtest(
                     )
                     if execution_result.error is not None:
                         raise execution_result.error
-                    result = execution_result.result
-                    if result is not None and result.order_result is not None:
-                        entry = result.order_result
-                        levels = result.take_profit_stop_loss
-                        if levels is not None and entry.average_price is not None and entry.executed_quantity is not None:
-                            position = BacktestPosition(
-                                direction=result.generated_signal.signal.direction,
-                                entry_price=entry.average_price,
-                                quantity=entry.executed_quantity,
-                                take_profit=levels.take_profit,
-                                stop_loss=levels.stop_loss,
-                                opened_index=index,
-                                entry_fee=entry.average_price * entry.executed_quantity * FEE_RATE,
-                                margin=(entry.average_price * entry.executed_quantity) / bundle.candidate.leverage,
-                                opened_at=boundary,
-                                owner_strategy_profile_id=active_id,
-                                owner_candidate_definition_hash=bundle.audited_candidate_definition_hash,
-                                owner_guard_hash=bundle.guard_hash,
-                                owner_leverage=bundle.candidate.leverage,
-                                owner_max_holding_bars=bundle.candidate.max_holding_bars,
-                                owner_max_holding_deadline=(
-                                    None
-                                    if bundle.candidate.max_holding_bars is None
-                                    else boundary
-                                    + timedelta(minutes=bundle.candidate.max_holding_bars)
-                                ),
-                            )
-                            turnover += position.notional
-                            bundle.guard.record_entry(index=index)
+                    position = _open_replay_position(
+                        execution_result.result,
+                        bundle=bundle,
+                        index=index,
+                        boundary=boundary,
+                        entry_reference_price=candle.close_price,
+                    )
+                    if position is not None:
+                        turnover += position.notional
+                        bundle.guard.record_entry(index=index)
 
         if start_at <= boundary < end_at:
             marked = equity
@@ -2102,20 +2324,24 @@ def run_scheduler_driven_daily_regime_backtest(
             equity_curve.append({"timestamp": boundary.isoformat(), "equity": str(marked)})
 
     if position is not None and force_close_at_end:
-        last = selected.candles[-1]
-        closed = close_trade(
-            position,
-            _exit_fill_price(last.close_price, position.direction),
-            "end_of_data",
-            len(selected.candles) - 1,
-            exit_at=last.closed_at,
-            market=selected,
+        closed = _force_close_replay_position(
+            position, market=selected, index=len(selected.candles) - 1
         )
-        trades.append(closed)
-        equity += closed.net_pnl
-        turnover += closed.exit_price * closed.quantity
-        bundles[closed.owner_strategy_profile_id].guard.record_trade(
-            index=len(selected.candles) - 1, closed_trade=closed, equity=equity
+        accounting = _record_replay_closed_trade(
+            closed,
+            index=len(selected.candles) - 1,
+            trades=trades,
+            bundles=bundles,
+            equity=equity,
+            peak=peak,
+            max_drawdown=max_drawdown,
+            turnover=turnover,
+        )
+        equity, peak, max_drawdown, turnover = (
+            accounting.equity,
+            accounting.peak,
+            accounting.max_drawdown,
+            accounting.turnover,
         )
         position = None
 
@@ -2124,9 +2350,13 @@ def run_scheduler_driven_daily_regime_backtest(
     )
     if force_close_at_end:
         equity_curve.append({"timestamp": end_at.isoformat(), "equity": str(equity)})
-    gross = sum((trade.gross_pnl for trade in trades), Decimal("0"))
-    net = sum((trade.net_pnl for trade in trades), Decimal("0"))
-    fees = sum((trade.fee_paid for trade in trades), Decimal("0"))
+    aggregates = _aggregate_replay_trades(trades)
+    gross, net, fees = (
+        aggregates.gross_pnl,
+        aggregates.net_pnl,
+        aggregates.fee_paid,
+    )
+    turnover = aggregates.turnover_notional
     open_holding_bars = (
         0
         if position is None
@@ -2159,15 +2389,20 @@ def run_scheduler_driven_daily_regime_backtest(
         "initial_equity": str(initial_equity),
         "final_equity": str(equity),
         "trade_count": len(trades),
+        "win_count": aggregates.win_count,
+        "net_win_rate": str(
+            Decimal(aggregates.win_count) / Decimal(len(trades))
+            if trades
+            else Decimal("0")
+        ),
         "gross_pnl": str(gross),
         "net_pnl": str(net),
         "fee_paid": str(fees),
         "return_ratio": str(net / initial_equity),
         "portfolio_max_drawdown_ratio": str(max_drawdown),
-        "maximum_adverse_excursion_ratio": str(max(
-            (trade.maximum_adverse_excursion_ratio for trade in trades),
-            default=Decimal("0"),
-        )),
+        "maximum_adverse_excursion_ratio": str(
+            aggregates.maximum_adverse_excursion_ratio
+        ),
         "trades": [_daily_trade_payload(trade) for trade in trades],
         "equity_curve": equity_curve,
         "selection_events": selection_events,
@@ -2207,6 +2442,18 @@ def run_scheduler_driven_daily_regime_backtest(
         "guard_skips": guard_skips,
         "skipped_by_guard": {
             key: bundles[key].skipped_by_guard for key in sorted(bundles)
+        },
+        "guard_state_by_candidate": {
+            key: {
+                "last_entry_index": bundles[key].guard.last_entry_index,
+                "pause_until_index": bundles[key].guard.pause_until_index,
+                "consecutive_losses": bundles[key].guard.consecutive_losses,
+                "daily_trade_count": bundles[key].guard.daily_trade_count,
+                "daily_start_index": bundles[key].guard.daily_start_index,
+                "daily_start_equity": str(bundles[key].guard.daily_start_equity),
+                "peak_equity": str(bundles[key].guard.peak_equity),
+            }
+            for key in sorted(bundles)
         },
         "feature_unavailable_holds": feature_unavailable_holds,
         "feature_unavailable_hold_audits": feature_unavailable_hold_audits,
