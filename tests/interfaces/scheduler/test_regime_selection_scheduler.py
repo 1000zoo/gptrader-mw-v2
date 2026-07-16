@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock
 from concurrent.futures import ThreadPoolExecutor
 
@@ -23,6 +23,17 @@ from src.infrastructure.persistence import SqliteRegimeSelectionStateRepository
 from src.interfaces.scheduler.regime_selection_scheduler import (
     RegimeSelectionScheduler,
     ScheduledRegimeSelection,
+)
+from tests.application.usecases.regime.test_select_daily_strategy_usecase import (
+    BOUNDARY as DAILY_BOUNDARY,
+    COMPONENTS as DAILY_COMPONENTS,
+    _FrozenModel,
+    _candles as daily_candles,
+    _command as daily_command,
+)
+from src.application.usecases.regime.select_daily_strategy_usecase import (
+    DailySelectStrategyResult,
+    SelectDailyStrategyUseCase,
 )
 
 
@@ -280,3 +291,68 @@ def test_scheduled_selection_validates_invariants(kwargs, message) -> None:
     values = {"started_at": START, "finished_at": FINISH, **kwargs}
     with pytest.raises(ValueError, match=message):
         ScheduledRegimeSelection(**values)
+
+
+def test_scheduler_accepts_daily_selector_and_commits_consecutive_midnights(tmp_path) -> None:
+    repository = SqliteRegimeSelectionStateRepository(tmp_path / "daily-state.sqlite3")
+    scheduler = RegimeSelectionScheduler(
+        SelectDailyStrategyUseCase(), repository, now=lambda: START
+    )
+    first = scheduler.run_selection(
+        "daily-research", "BTCUSDT", lambda previous: daily_command(previous=previous)
+    )
+    second = scheduler.run_selection(
+        "daily-research",
+        "BTCUSDT",
+        lambda previous: daily_command(
+            previous=previous,
+            boundary=DAILY_BOUNDARY + timedelta(days=1),
+            candles=daily_candles(start=DAILY_BOUNDARY - timedelta(days=2)),
+            model=_FrozenModel(
+                ClusterAssignment(DAILY_COMPONENTS[1], 0.9, 0.05, None)
+            ),
+        ),
+    )
+
+    assert first.succeeded and second.succeeded
+    assert isinstance(first.result, DailySelectStrategyResult)
+    assert second.result.state.state_version == 2
+    assert repository.load("BTCUSDT") == second.result.state
+    assert repository.list_events("BTCUSDT") == (
+        SelectionEventType.CLASSIFICATION,
+        SelectionEventType.CLUSTER_TRANSITION,
+    )
+
+
+def test_scheduler_daily_duplicate_is_idempotent_and_conflict_is_rejected(tmp_path) -> None:
+    repository = SqliteRegimeSelectionStateRepository(tmp_path / "daily-retry.sqlite3")
+    usecase = Mock(wraps=SelectDailyStrategyUseCase())
+    scheduler = RegimeSelectionScheduler(usecase, repository, now=lambda: START)
+    factory = lambda previous: daily_command(previous=previous)
+
+    first = scheduler.run_selection("daily-research", "BTCUSDT", factory)
+    retry = scheduler.run_selection("daily-research", "BTCUSDT", factory)
+    conflicting_candles = list(daily_candles())
+    conflicting_candles[0] = replace(
+        conflicting_candles[0], volume=conflicting_candles[0].volume + 1
+    )
+    conflict = scheduler.run_selection(
+        "daily-research",
+        "BTCUSDT",
+        lambda previous: daily_command(
+            previous=previous,
+            candles=tuple(conflicting_candles),
+        ),
+    )
+
+    assert first.succeeded and retry.succeeded
+    retry_base = (
+        retry.result.base_result
+        if isinstance(retry.result, DailySelectStrategyResult)
+        else retry.result
+    )
+    assert retry_base == first.result.base_result
+    assert usecase.execute.call_count == 1
+    assert repository.list_events("BTCUSDT") == (SelectionEventType.CLASSIFICATION,)
+    assert not conflict.succeeded
+    assert "conflicting boundary commit" in str(conflict.error)

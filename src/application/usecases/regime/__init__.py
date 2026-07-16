@@ -30,6 +30,14 @@ from src.application.usecases.regime.select_strategy_usecase import (
     SelectionConfidenceThresholds,
     selection_command_input_hash,
 )
+from src.application.usecases.regime.select_daily_strategy_usecase import (
+    DailySelectStrategyCommand,
+    DailySelectStrategyResult,
+    DailySelectionAudit,
+    SelectDailyStrategyUseCase,
+    ThreeDayAssignmentArtifactPort,
+    daily_selection_command_input_hash,
+)
 
 __all__ = [
     "FitRegimeModelCommand",
@@ -54,4 +62,10 @@ __all__ = [
     "SelectStrategyUseCase",
     "SelectionConfidenceThresholds",
     "selection_command_input_hash",
+    "DailySelectStrategyCommand",
+    "DailySelectStrategyResult",
+    "DailySelectionAudit",
+    "SelectDailyStrategyUseCase",
+    "ThreeDayAssignmentArtifactPort",
+    "daily_selection_command_input_hash",
 ]

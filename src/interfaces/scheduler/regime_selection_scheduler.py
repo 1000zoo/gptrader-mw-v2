@@ -1,10 +1,10 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Protocol
 
 from src.application.usecases.regime.select_strategy_usecase import (
     SelectStrategyCommand,
-    SelectStrategyUseCase,
     selection_command_input_hash,
 )
 from src.domain.ports.regime_selection_state_repository_port import (
@@ -18,12 +18,41 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class RegimeSelectorPort(Protocol):
+    """Structural selector boundary shared by production and research selectors."""
+
+    def execute(self, command: object) -> object:
+        ...
+
+
+def _command_input_hash(command: object) -> str:
+    if isinstance(command, SelectStrategyCommand):
+        return selection_command_input_hash(command)
+    value = getattr(command, "selection_input_hash", None)
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError("selection command must expose a lowercase SHA256 input hash")
+    return value
+
+
+def _base_result(result: object) -> SelectStrategyResult:
+    if isinstance(result, SelectStrategyResult):
+        return result
+    base = getattr(result, "base_result", None)
+    if not isinstance(base, SelectStrategyResult):
+        raise ValueError("selector must return a canonical selection result")
+    return base
+
+
 @dataclass(frozen=True)
 class ScheduledRegimeSelection:
     schedule_name: str
     started_at: datetime
     finished_at: datetime
-    result: SelectStrategyResult | None = None
+    result: object | None = None
     error: Exception | None = None
 
     def __post_init__(self) -> None:
@@ -40,8 +69,8 @@ class ScheduledRegimeSelection:
             raise ValueError("finished_at cannot precede started_at")
         if (self.result is None) == (self.error is None):
             raise ValueError("exactly one of result or error is required")
-        if self.result is not None and not isinstance(self.result, SelectStrategyResult):
-            raise ValueError("result must be a SelectStrategyResult")
+        if self.result is not None:
+            _base_result(self.result)
         if self.error is not None and not isinstance(self.error, Exception):
             raise ValueError("error must be an Exception")
 
@@ -53,7 +82,7 @@ class ScheduledRegimeSelection:
 class RegimeSelectionScheduler:
     def __init__(
         self,
-        usecase: SelectStrategyUseCase,
+        usecase: RegimeSelectorPort,
         repository: RegimeSelectionStateRepositoryPort,
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -65,7 +94,7 @@ class RegimeSelectionScheduler:
         self,
         schedule_name: str,
         symbol: str,
-        command_factory: Callable[[RegimeSelectionState | None], SelectStrategyCommand],
+        command_factory: Callable[[RegimeSelectionState | None], object],
     ) -> ScheduledRegimeSelection:
         if (
             not isinstance(schedule_name, str)
@@ -80,15 +109,17 @@ class RegimeSelectionScheduler:
         try:
             previous_state = self._repository.load(symbol)
             command = command_factory(previous_state)
-            if not isinstance(command, SelectStrategyCommand):
-                raise ValueError("command factory must return a SelectStrategyCommand")
-            if command.symbol != symbol:
+            if getattr(command, "symbol", None) != symbol:
                 raise ValueError("selection command symbol must match scheduler symbol")
-            input_hash = selection_command_input_hash(command)
+            boundary_at = getattr(command, "boundary_at", None)
+            artifact_snapshot = getattr(command, "artifact_snapshot", None)
+            if not isinstance(boundary_at, datetime) or artifact_snapshot is None:
+                raise ValueError("command factory must return a regime selection command")
+            input_hash = _command_input_hash(command)
             existing = self._repository.find_committed_result(
                 symbol,
-                command.boundary_at,
-                command.artifact_snapshot.artifact_identity,
+                boundary_at,
+                artifact_snapshot.artifact_identity,
             )
             if existing is not None:
                 if existing.selection_input_hash != input_hash:
@@ -96,12 +127,14 @@ class RegimeSelectionScheduler:
                 result = existing
             else:
                 proposed = self._usecase.execute(command)
-                if proposed.selection_input_hash != input_hash:
+                proposed_base = _base_result(proposed)
+                if proposed_base.selection_input_hash != input_hash:
                     raise ValueError("selection result input hash does not match command")
-                result = self._repository.commit(
-                    proposed.expected_state_version,
-                    proposed,
+                committed = self._repository.commit(
+                    proposed_base.expected_state_version,
+                    proposed_base,
                 )
+                result = proposed if committed == proposed_base else committed
         except Exception as exc:
             runtime_logger.exception(
                 "regime selection scheduler failed",
@@ -128,4 +161,4 @@ class RegimeSelectionScheduler:
         )
 
 
-__all__ = ["RegimeSelectionScheduler", "ScheduledRegimeSelection"]
+__all__ = ["RegimeSelectionScheduler", "RegimeSelectorPort", "ScheduledRegimeSelection"]
