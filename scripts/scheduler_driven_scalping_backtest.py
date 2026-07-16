@@ -1786,6 +1786,11 @@ def run_scheduler_driven_daily_regime_backtest(
     active_exit_count = feature_unavailable_holds = 0
     active_exit_net = Decimal("0")
     exit_only_hold_reasons: dict[str, int] = {}
+    feature_unavailable_hold_audits: list[dict[str, object]] = []
+    exposure_candle_count = 0
+    eligible_replay_interval_count = int(
+        (end_at - start_at).total_seconds() // TIMEFRAME.duration_seconds
+    )
 
     def record_exit_hold(reason: str) -> None:
         exit_only_hold_reasons[reason] = exit_only_hold_reasons.get(reason, 0) + 1
@@ -1847,6 +1852,8 @@ def run_scheduler_driven_daily_regime_backtest(
 
         state = repository.load(symbol.pair)
         began_with_position = position is not None
+        if began_with_position and start_at < boundary <= end_at:
+            exposure_candle_count += 1
         if position is not None:
             closed = maybe_close_position(
                 position,
@@ -1884,6 +1891,49 @@ def run_scheduler_driven_daily_regime_backtest(
                         bundle.feature_unavailable_holds += 1
                         feature_unavailable_holds += 1
                         record_exit_hold("feature_unavailable")
+                        selection_audit = (
+                            None if current_selection is None else current_selection.audit_record
+                        )
+                        if selection_audit is None:
+                            raise ValueError(
+                                "feature-unavailable hold requires an audited selection"
+                            )
+                        source = dict(selection_audit.payload)
+                        unavailable_sources = tuple(sorted(unavailable))
+                        if not unavailable_sources:
+                            raise ValueError(
+                                "feature-unavailable hold requires canonical sources"
+                            )
+                        hold_record = SelectionAuditRecord(
+                            audit_type="daily_active_strategy_feature_unavailable_hold",
+                            schema_version="daily-active-strategy-hold-v1",
+                            payload={
+                                "boundary_at": boundary.isoformat(),
+                                "candle_at": boundary.isoformat(),
+                                "selection_boundary": current_selection.state.last_boundary_at.isoformat(),
+                                "component_fingerprint": state.current_cluster_fingerprint,
+                                "model_artifact_hash": source.get("model_artifact_hash"),
+                                "mapping_artifact_hash": source.get("mapping_artifact_hash"),
+                                "profile_hash": source.get("profile_hash"),
+                                "selection_input_hash": current_selection.selection_input_hash,
+                                "selection_audit_hash": selection_audit.audit_hash,
+                                "active_candidate_id": active_id,
+                                "active_candidate_definition_hash": bundle.audited_candidate_definition_hash,
+                                "signal_id": signal_id,
+                                "signal_direction": generated.signal.direction.value,
+                                "signal_confidence": str(generated.signal.confidence),
+                                "unavailable_sources": unavailable_sources,
+                                "reason": "feature_unavailable",
+                                "position_direction": position.direction.value,
+                                "owner_candidate_id": position.owner_strategy_profile_id,
+                                "owner_candidate_definition_hash": position.owner_candidate_definition_hash,
+                                "owner_guard_hash": position.owner_guard_hash,
+                                "position_exit_policy": position_exit_policy.value,
+                            },
+                        )
+                        hold_payload = json.loads(hold_record.canonical_json)
+                        hold_payload["audit_hash"] = hold_record.audit_hash
+                        feature_unavailable_hold_audits.append(hold_payload)
                     opposite = (
                         position.direction is SignalDirection.LONG
                         and generated.signal.direction is SignalDirection.SHORT
@@ -1904,6 +1954,19 @@ def run_scheduler_driven_daily_regime_backtest(
                             None if current_selection is None else current_selection.audit_record
                         )
                         source = {} if selection_audit is None else dict(selection_audit.payload)
+                        previous_candidate_id = source.get("previous_candidate_id")
+                        previous_candidate_hash = (
+                            None
+                            if previous_candidate_id is None
+                            else audited_hashes.get(previous_candidate_id)
+                        )
+                        if (
+                            previous_candidate_id is not None
+                            and previous_candidate_hash is None
+                        ):
+                            raise ValueError(
+                                "previous selected candidate is absent from the exact manifest"
+                            )
                         exit_record = SelectionAuditRecord(
                             audit_type="daily_active_strategy_exit",
                             schema_version="daily-active-strategy-exit-v1",
@@ -1925,7 +1988,8 @@ def run_scheduler_driven_daily_regime_backtest(
                                 "selection_audit_hash": (
                                     None if selection_audit is None else selection_audit.audit_hash
                                 ),
-                                "previous_candidate_id": source.get("previous_candidate_id"),
+                                "previous_candidate_id": previous_candidate_id,
+                                "previous_candidate_definition_hash": previous_candidate_hash,
                                 "active_candidate_id": active_id,
                                 "active_candidate_definition_hash": bundle.audited_candidate_definition_hash,
                                 "signal_id": signal_id,
@@ -2053,6 +2117,7 @@ def run_scheduler_driven_daily_regime_backtest(
         bundles[closed.owner_strategy_profile_id].guard.record_trade(
             index=len(selected.candles) - 1, closed_trade=closed, equity=equity
         )
+        position = None
 
     peak, max_drawdown = _update_drawdown(
         equity=equity, peak=peak, max_drawdown=max_drawdown
@@ -2062,6 +2127,29 @@ def run_scheduler_driven_daily_regime_backtest(
     gross = sum((trade.gross_pnl for trade in trades), Decimal("0"))
     net = sum((trade.net_pnl for trade in trades), Decimal("0"))
     fees = sum((trade.fee_paid for trade in trades), Decimal("0"))
+    open_holding_bars = (
+        0
+        if position is None
+        else len(selected.candles) - 1 - position.opened_index
+    )
+    reconciled_holding_bars = sum(trade.holding_bars for trade in trades) + open_holding_bars
+    if reconciled_holding_bars != exposure_candle_count:
+        raise ValueError("position holding bars do not reconcile to replay exposure")
+    exposure_ratio = (
+        Decimal(exposure_candle_count) / Decimal(eligible_replay_interval_count)
+        if eligible_replay_interval_count
+        else Decimal("0")
+    )
+    if not exposure_ratio.is_finite() or not Decimal("0") <= exposure_ratio <= Decimal("1"):
+        raise ValueError("replay exposure ratio is invalid")
+    feature_unavailable_hold_audits = sorted(
+        feature_unavailable_hold_audits,
+        key=lambda item: (
+            item["payload"]["candle_at"],
+            item["payload"]["signal_id"],
+            item["audit_hash"],
+        ),
+    )
     payload = {
         "engine": "scheduler_driven_daily_regime_selection",
         "position_exit_policy": position_exit_policy.value,
@@ -2121,11 +2209,16 @@ def run_scheduler_driven_daily_regime_backtest(
             key: bundles[key].skipped_by_guard for key in sorted(bundles)
         },
         "feature_unavailable_holds": feature_unavailable_holds,
+        "feature_unavailable_hold_audits": feature_unavailable_hold_audits,
         "feature_unavailable_holds_by_candidate": {
             key: bundles[key].feature_unavailable_holds for key in sorted(bundles)
         },
         "active_opposite_exit_count": active_exit_count,
         "active_opposite_exit_net_pnl": str(active_exit_net),
+        "exposure_candle_count": exposure_candle_count,
+        "eligible_replay_interval_count": eligible_replay_interval_count,
+        "exposure_ratio": str(exposure_ratio),
+        "reconciled_holding_bar_count": reconciled_holding_bars,
         "actual_turnover_notional": str(turnover),
         "candidate_definition_hashes": audited_hashes,
         "candidate_definition_hash": mapping_candidate_definition_hash(audited_hashes),

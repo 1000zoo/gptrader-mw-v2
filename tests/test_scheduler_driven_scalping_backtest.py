@@ -323,6 +323,208 @@ def test_daily_regime_active_opposite_exits_without_same_candle_reversal(monkeyp
     assert repeated["result_hash"] == result["result_hash"]
 
 
+def _daily_test_artifacts(candidates):
+    import scripts.scheduler_driven_scalping_backtest as module
+    from src.domain.regime.mapping import candidate_universe_hash
+    from tests.application.usecases.regime.test_select_daily_strategy_usecase import _mapping
+
+    hashes = {
+        item.candidate_id: module._audited_candidate_hash(
+            item, symbol=Symbol("BTC", "USDT"), initial_equity=Decimal("10000")
+        )
+        for item in candidates
+    }
+    mapping = _mapping()
+    return hashes, replace(
+        mapping,
+        candidate_hashes=hashes,
+        candidate_universe_hash=candidate_universe_hash(tuple(sorted(hashes))),
+        candidate_assessments=tuple(
+            replace(item, candidate_hash=hashes[item.candidate_id])
+            for item in mapping.candidate_assessments
+        ),
+    )
+
+
+def test_daily_regime_switch_exit_audit_binds_previous_candidate_hash(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+    from src.domain.regime.model import ClusterAssignment
+    from tests.application.usecases.regime.test_select_daily_strategy_usecase import (
+        COMPONENTS,
+        _FrozenModel,
+        _candles,
+    )
+
+    class Directional:
+        def __init__(self, direction):
+            self.direction = direction
+
+        def evaluate(self, context):
+            return StrategyResult("directional", Signal(self.direction, Decimal("1")))
+
+    monkeypatch.setattr(
+        module,
+        "build_strategies",
+        lambda candidate: (
+            Directional(
+                SignalDirection.LONG
+                if candidate.candidate_id == "candidate-a"
+                else SignalDirection.SHORT
+            ),
+        ),
+    )
+    start = datetime(2026, 4, 6, tzinfo=timezone.utc)
+    candidates = tuple(
+        replace(
+            _regime_candidate(candidate_id),
+            take_profit_ratio=Decimal("0.8"),
+            stop_loss_ratio=Decimal("0.9"),
+        )
+        for candidate_id in ("candidate-a", "candidate-b")
+    )
+    hashes, mapping = _daily_test_artifacts(candidates)
+    base_model = _FrozenModel(ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0))
+
+    class SwitchingModel:
+        def __init__(self):
+            self.calls = 0
+
+        def __getattr__(self, name):
+            return getattr(base_model, name)
+
+        def assign(self, vector):
+            component = COMPONENTS[0] if self.calls == 0 else COMPONENTS[3]
+            self.calls += 1
+            return ClusterAssignment(component, 0.9, 0.05, 1.0)
+
+    result = run_scheduler_driven_daily_regime_backtest(
+        MarketSnapshot(_candles(count=4320 + 1442, start=start - timedelta(days=3))),
+        start_at=start,
+        end_at=start + timedelta(days=1, minutes=2),
+        candidates=candidates,
+        model_artifact=SwitchingModel(),
+        mapping_artifact=mapping,
+        candidate_manifest=tuple(sorted(hashes.items())),
+        position_exit_policy=PositionExitPolicy.ACTIVE_STRATEGY_OPPOSITE,
+    )
+
+    trade = next(
+        item for item in result["trades"]
+        if item["exit_reason"] == "active_strategy_opposite_signal"
+    )
+    audit = trade["exit_audit"]["payload"]
+    assert audit["previous_candidate_id"] == "candidate-a"
+    assert audit["previous_candidate_definition_hash"] == hashes["candidate-a"]
+    assert audit["active_candidate_id"] == "candidate-b"
+    assert audit["active_candidate_definition_hash"] == hashes["candidate-b"]
+    assert result["exposure_candle_count"] == sum(
+        item["holding_bars"] for item in result["trades"]
+    )
+
+
+def test_daily_regime_feature_unavailable_holds_are_canonical_and_hashed(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+    from src.domain.regime.model import ClusterAssignment
+    from tests.application.usecases.regime.test_select_daily_strategy_usecase import (
+        COMPONENTS,
+        _FrozenModel,
+        _candles,
+    )
+
+    class EnterThenWait:
+        def __init__(self):
+            self.calls = 0
+
+        def evaluate(self, context):
+            self.calls += 1
+            signal = (
+                Signal(SignalDirection.LONG, Decimal("1"))
+                if self.calls == 1
+                else Signal.wait()
+            )
+            return StrategyResult("enter-then-wait", signal)
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (EnterThenWait(),))
+    start = datetime(2026, 4, 6, tzinfo=timezone.utc)
+    candidates = (
+        _regime_candidate("candidate-a"),
+        _regime_candidate("candidate-b"),
+    )
+    hashes, mapping = _daily_test_artifacts(candidates)
+
+    def replay():
+        return run_scheduler_driven_daily_regime_backtest(
+            MarketSnapshot(_candles(count=4322, start=start - timedelta(days=3))),
+            start_at=start,
+            end_at=start + timedelta(minutes=2),
+            candidates=candidates,
+            model_artifact=_FrozenModel(
+                ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0)
+            ),
+            mapping_artifact=mapping,
+            candidate_manifest=tuple(sorted(hashes.items())),
+            market_feature_provider=EmptyMarketFeatureProvider(("z-source", "a-source")),
+            position_exit_policy=PositionExitPolicy.ACTIVE_STRATEGY_OPPOSITE,
+        )
+
+    result = replay()
+    holds = result["feature_unavailable_hold_audits"]
+    assert len(holds) == 2
+    assert [item["payload"]["candle_at"] for item in holds] == sorted(
+        item["payload"]["candle_at"] for item in holds
+    )
+    assert all(
+        item["payload"]["boundary_at"] == item["payload"]["candle_at"]
+        for item in holds
+    )
+    assert all(item["audit_hash"] for item in holds)
+    assert all(item["payload"]["unavailable_sources"] == ["a-source", "z-source"] for item in holds)
+    assert replay() == result
+    assert result["exposure_candle_count"] == 2
+    assert result["eligible_replay_interval_count"] == 2
+    assert result["exposure_ratio"] == "1"
+    assert sum(item["holding_bars"] for item in result["trades"]) == 2
+
+
+def test_daily_regime_no_trade_exposure_is_zero(monkeypatch) -> None:
+    import scripts.scheduler_driven_scalping_backtest as module
+    from src.domain.regime.model import ClusterAssignment
+    from tests.application.usecases.regime.test_select_daily_strategy_usecase import (
+        COMPONENTS,
+        _FrozenModel,
+        _candles,
+    )
+
+    class AlwaysWait:
+        def evaluate(self, context):
+            return StrategyResult("wait", Signal.wait())
+
+    monkeypatch.setattr(module, "build_strategies", lambda candidate: (AlwaysWait(),))
+    start = datetime(2026, 4, 6, tzinfo=timezone.utc)
+    candidates = (
+        _regime_candidate("candidate-a"),
+        _regime_candidate("candidate-b"),
+    )
+    hashes, mapping = _daily_test_artifacts(candidates)
+    result = run_scheduler_driven_daily_regime_backtest(
+        MarketSnapshot(_candles(count=4323, start=start - timedelta(days=3))),
+        start_at=start,
+        end_at=start + timedelta(minutes=3),
+        candidates=candidates,
+        model_artifact=_FrozenModel(
+            ClusterAssignment(COMPONENTS[0], 0.9, 0.05, 1.0)
+        ),
+        mapping_artifact=mapping,
+        candidate_manifest=tuple(sorted(hashes.items())),
+        position_exit_policy=PositionExitPolicy.ENTRY_OWNER_ONLY,
+    )
+
+    assert result["trade_count"] == 0
+    assert result["exposure_candle_count"] == 0
+    assert result["eligible_replay_interval_count"] == 3
+    assert result["exposure_ratio"] == "0"
+
+
 def _actual_artifact_pair(candidates):
     import scripts.scheduler_driven_scalping_backtest as module
     from tests.infrastructure.regime.test_json_regime_artifact_repository import (
