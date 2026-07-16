@@ -15,7 +15,7 @@ from typing import Mapping
 import numpy as np
 
 from src.domain.regime.cluster_diagnostic import ClusterDiagnosticFit
-from src.domain.regime.model import ClusterAssignment, RegimeModelConfig
+from src.domain.regime.model import ClusterAssignment, RegimeModelConfig, component_fingerprint
 from src.domain.regime.three_day_chart_features import (
     THREE_DAY_CHART_FEATURE_REGISTRY_V1,
     THREE_DAY_CHART_FEATURE_SCHEMA_VERSION,
@@ -24,6 +24,9 @@ from src.domain.regime.three_day_chart_features import (
 from src.domain.regime.three_day_daily_profile import (
     PROFILE_ID,
     ThreeDayDailyResearchProfile,
+)
+from src.infrastructure.exchange.binance.research_data.historical_feature_loader import (
+    iter_archive_requests,
 )
 
 
@@ -51,7 +54,7 @@ _TOP_FIELDS = frozenset(
         "numeric_index_to_fingerprint", "canonical_fingerprint_order",
         "assignment_confidence_policy", "source_provenance", "source_combined_hash",
         "feature_history_hash", "fit_input_vector_hash", "code_provenance_hash",
-        "stability_gates", "artifact_hash",
+        "model_gates", "artifact_hash",
     }
 )
 
@@ -105,6 +108,91 @@ def _pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
+def _original_space_fingerprints(fit: ClusterDiagnosticFit) -> tuple[str, ...]:
+    return tuple(
+        component_fingerprint(
+            model_type="gmm",
+            feature_schema_version=fit.schema_version,
+            feature_names=fit.feature_names,
+            mean=tuple(
+                mean[index] * fit.scales[index] + fit.medians[index]
+                for index in range(len(fit.feature_names))
+            ),
+            covariance=tuple(
+                covariance[index] * fit.scales[index] ** 2
+                for index in range(len(fit.feature_names))
+            ),
+            weight=fit.weights[component],
+        )
+        for component, (mean, covariance) in enumerate(zip(fit.means, fit.covariances))
+    )
+
+
+def _standardized_fingerprints(
+    *, schema_version: str, feature_names: tuple[str, ...], means: tuple[tuple[float, ...], ...],
+    covariances: tuple[tuple[float, ...], ...], weights: tuple[float, ...],
+) -> tuple[str, ...]:
+    return tuple(
+        component_fingerprint(
+            model_type="gmm", feature_schema_version=schema_version,
+            feature_names=feature_names, mean=mean, covariance=covariances[index],
+            weight=weights[index],
+        )
+        for index, mean in enumerate(means)
+    )
+
+
+def validate_three_day_k4_source_provenance(
+    provenance: tuple[Mapping[str, object], ...] | list[Mapping[str, object]],
+) -> tuple[Mapping[str, object], ...]:
+    profile = ThreeDayDailyResearchProfile()
+    start = profile.fold.cluster_fit.start_at - timedelta(days=3)
+    end = profile.fold.cluster_fit.end_at
+    requests = tuple(iter_archive_requests("klines", "BTCUSDT", start, end, now=end + timedelta(days=32)))
+    rows = tuple(provenance)
+    if len(rows) != len(requests):
+        raise ValueError("source provenance must match the exact ordered archive request count")
+    expected_fields = {
+        "period", "url", "member_identity", "bytes", "sha256", "expected_sha256",
+        "checksum_verified", "source", "symbol", "timeframe", "granularity",
+        "requested_start_at", "requested_end_at",
+    }
+    expected_start = _time(start)
+    expected_end = _time(end)
+    identities: set[tuple[str, str]] = set()
+    copied = []
+    for row, request in zip(rows, requests):
+        if not isinstance(row, Mapping) or set(row) != expected_fields:
+            raise ValueError("source provenance fields are incompatible")
+        expected_member = request.filename.removesuffix(".zip") + ".csv"
+        expected_identity = (request.period, request.url)
+        if expected_identity in identities:
+            raise ValueError("source provenance archive identity is duplicated")
+        identities.add(expected_identity)
+        if (
+            row["period"] != request.period or row["url"] != request.url
+            or row["member_identity"] != expected_member
+            or row["granularity"] != request.granularity
+            or row["source"] != "klines" or row["symbol"] != "BTCUSDT"
+            or row["timeframe"] != "1m"
+            or row["requested_start_at"] != expected_start
+            or row["requested_end_at"] != expected_end
+        ):
+            raise ValueError("source provenance order, coverage, or archive identity is incompatible")
+        if not isinstance(row["bytes"], int) or isinstance(row["bytes"], bool) or row["bytes"] <= 0:
+            raise ValueError("source provenance bytes are invalid")
+        if row["checksum_verified"] is not True:
+            raise ValueError("source provenance checksum was not verified")
+        for name in ("sha256", "expected_sha256"):
+            value = row[name]
+            if not isinstance(value, str) or not _HEX64.fullmatch(value):
+                raise ValueError(f"source provenance {name} is invalid")
+        if row["sha256"] != row["expected_sha256"]:
+            raise ValueError("source provenance content and expected checksums differ")
+        copied.append(MappingProxyType(dict(row)))
+    return tuple(copied)
+
+
 @dataclass(frozen=True)
 class ThreeDayK4ModelArtifact:
     fit: ClusterDiagnosticFit
@@ -117,7 +205,7 @@ class ThreeDayK4ModelArtifact:
     feature_history_hash: str
     fit_input_vector_hash: str
     code_provenance_hash: str
-    stability_gates: Mapping[str, object]
+    model_gates: Mapping[str, object]
     artifact_version: str = THREE_DAY_K4_MODEL_ARTIFACT_VERSION
     profile_id: str = PROFILE_ID
     profile_version: str = PROFILE_ID
@@ -181,23 +269,7 @@ class ThreeDayK4ModelArtifact:
             or self.usable_anchor_count != (self.training_end_at - self.training_start_at).days
         ):
             raise ValueError("usable anchor coverage is incompatible with Cluster Fit")
-        provenance = tuple(MappingProxyType(dict(row)) for row in self.source_provenance)
-        if not provenance:
-            raise ValueError("source provenance cannot be empty")
-        for row in provenance:
-            if set(row) != {"period", "url", "member_identity", "bytes", "sha256"}:
-                raise ValueError("source provenance fields are incompatible")
-            if not all(isinstance(row[key], str) and row[key] for key in ("period", "url", "member_identity")):
-                raise ValueError("source provenance text is invalid")
-            if (
-                not row["url"].startswith("https://data.binance.vision/")
-                or not row["url"].endswith("/" + row["member_identity"])
-            ):
-                raise ValueError("source provenance URL and member identity are incompatible")
-            if not isinstance(row["bytes"], int) or isinstance(row["bytes"], bool) or row["bytes"] <= 0:
-                raise ValueError("source provenance bytes are invalid")
-            if not isinstance(row["sha256"], str) or not _HEX64.fullmatch(row["sha256"]):
-                raise ValueError("source provenance sha256 is invalid")
+        provenance = validate_three_day_k4_source_provenance(self.source_provenance)
         for value, name in (
             (self.feature_history_hash, "feature history hash"),
             (self.fit_input_vector_hash, "fit input vector hash"),
@@ -205,23 +277,47 @@ class ThreeDayK4ModelArtifact:
         ):
             if not isinstance(value, str) or not _HEX64.fullmatch(value):
                 raise ValueError(f"{name} is invalid")
-        gates = MappingProxyType(dict(self.stability_gates))
+        if self.feature_history_hash != self.fit_input_vector_hash:
+            raise ValueError("feature history and fit input vector hashes must match exact Cluster Fit inputs")
+        gates = MappingProxyType(dict(self.model_gates))
         required_gates = {
-            "converged", "iterations", "lower_bound", "minimum_adjusted_rand_index",
-            "minimum_adjusted_rand_index_threshold",
-            "minimum_normalized_mutual_information", "maximum_matched_centroid_distance",
-            "minimum_normalized_mutual_information_threshold",
-            "maximum_matched_centroid_distance_threshold",
-            "maximum_prevalence_drift", "all_components_represented",
-            "maximum_prevalence_drift_threshold", "low_confidence_rate",
-            "maximum_low_confidence_rate_threshold",
-            "all_chronological_blocks_represented", "nondegenerate_confidence", "passed",
+            "convergence_required", "converged", "iterations", "lower_bound",
+            "finite_scaler_required", "finite_scaler", "finite_model_parameters_required",
+            "finite_model_parameters", "positive_weights_required", "minimum_weight",
+            "weight_sum_expected", "weight_sum_tolerance", "weight_sum",
+            "covariance_floor_threshold", "minimum_covariance",
+            "component_count_expected", "component_count",
+            "all_components_represented_required", "all_components_represented",
+            "all_chronological_blocks_represented_required", "all_chronological_blocks_represented",
+            "minimum_adjusted_rand_index", "minimum_adjusted_rand_index_threshold",
+            "minimum_normalized_mutual_information", "minimum_normalized_mutual_information_threshold",
+            "maximum_matched_centroid_distance", "maximum_matched_centroid_distance_threshold",
+            "maximum_prevalence_drift", "maximum_prevalence_drift_threshold",
+            "gmm_probability_threshold", "gmm_margin_threshold", "distance_threshold_policy",
+            "minimum_observed_dominant_probability", "minimum_observed_probability_margin",
+            "distance_threshold", "distance_result",
+            "low_confidence_rate", "maximum_low_confidence_rate_threshold", "nondegenerate_confidence",
+            "feature_registry_version_expected", "feature_registry_exact",
+            "feature_family_cap_maximum_count", "feature_family_cap_maximum_share",
+            "feature_family_observed_maximum_count", "feature_family_observed_maximum_share",
+            "feature_family_cap_passed", "passed",
         }
         if set(gates) != required_gates:
             raise ValueError("stability gate fields are incompatible")
-        if any(gates[name] is not True for name in ("converged", "all_components_represented", "all_chronological_blocks_represented", "nondegenerate_confidence", "passed")):
+        required_true = (
+            "convergence_required", "converged", "finite_scaler_required", "finite_scaler",
+            "finite_model_parameters_required", "finite_model_parameters", "positive_weights_required",
+            "all_components_represented_required", "all_components_represented",
+            "all_chronological_blocks_represented_required", "all_chronological_blocks_represented",
+            "nondegenerate_confidence", "feature_registry_exact", "feature_family_cap_passed", "passed",
+        )
+        if any(gates[name] is not True for name in required_true):
             raise ValueError("model stability gates did not pass")
-        numeric = tuple(gates[name] for name in required_gates - {"converged", "all_components_represented", "all_chronological_blocks_represented", "nondegenerate_confidence", "passed"})
+        nonnumeric = set(required_true) | {
+            "distance_threshold_policy", "distance_threshold", "distance_result",
+            "feature_registry_version_expected",
+        }
+        numeric = tuple(gates[name] for name in required_gates - nonnumeric)
         if any(not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) for value in numeric):
             raise ValueError("stability gate numeric results must be finite")
         if not isinstance(gates["iterations"], int) or gates["iterations"] <= 0:
@@ -232,6 +328,14 @@ class ThreeDayK4ModelArtifact:
             "maximum_matched_centroid_distance_threshold": 0.5,
             "maximum_prevalence_drift_threshold": 0.2,
             "maximum_low_confidence_rate_threshold": 0.25,
+            "weight_sum_expected": 1.0,
+            "weight_sum_tolerance": 1e-8,
+            "covariance_floor_threshold": 1e-6,
+            "component_count_expected": 4,
+            "gmm_probability_threshold": 0.65,
+            "gmm_margin_threshold": 0.10,
+            "feature_family_cap_maximum_count": 5,
+            "feature_family_cap_maximum_share": 0.5,
         }
         if any(gates[name] != value for name, value in expected_thresholds.items()):
             raise ValueError("model stability gate thresholds are incompatible")
@@ -251,6 +355,30 @@ class ThreeDayK4ModelArtifact:
             or gates["low_confidence_rate"] > 0.25
         ):
             raise ValueError("serialized model gate results do not pass frozen thresholds")
+        finite_scaler = all(math.isfinite(value) for values in (self.fit.lower_bounds, self.fit.upper_bounds, self.fit.medians, self.fit.scales) for value in values)
+        finite_model = all(math.isfinite(value) for values in (*self.fit.means, self.fit.weights, *self.fit.covariances) for value in values)
+        if (
+            gates["distance_threshold_policy"] != "not_applicable_for_gmm"
+            or gates["distance_threshold"] != "not_applicable_for_gmm"
+            or gates["distance_result"] != "not_applicable_for_gmm"
+            or gates["feature_registry_version_expected"] != THREE_DAY_FEATURE_REGISTRY_VERSION
+            or gates["finite_scaler"] != finite_scaler
+            or gates["finite_model_parameters"] != finite_model
+            or gates["minimum_weight"] != min(self.fit.weights)
+            or gates["weight_sum"] != math.fsum(self.fit.weights)
+            or not math.isclose(gates["weight_sum"], 1.0, rel_tol=1e-8, abs_tol=1e-8)
+            or gates["minimum_covariance"] != min(value for row in self.fit.covariances for value in row)
+            or gates["minimum_covariance"] < 1e-6
+            or gates["component_count"] != 4
+            or gates["feature_family_observed_maximum_count"] != max(counts.values())
+            or gates["feature_family_observed_maximum_share"] != max(counts.values()) / len(self.fit.feature_names)
+        ):
+            raise ValueError("serialized fixed model gate results do not match fitted parameters")
+        if (
+            not 0 <= gates["minimum_observed_dominant_probability"] <= 1
+            or not 0 <= gates["minimum_observed_probability_margin"] <= 1
+        ):
+            raise ValueError("assignment confidence gate results must be probabilities")
         if (
             gates["converged"] != self.fit.converged
             or gates["iterations"] != self.fit.iterations
@@ -258,7 +386,7 @@ class ThreeDayK4ModelArtifact:
         ):
             raise ValueError("fit convergence metadata does not match stability gates")
         object.__setattr__(self, "source_provenance", provenance)
-        object.__setattr__(self, "stability_gates", gates)
+        object.__setattr__(self, "model_gates", gates)
         object.__setattr__(self, "artifact_hash", _hash(self._payload(include_hash=False)))
 
     @classmethod
@@ -267,7 +395,7 @@ class ThreeDayK4ModelArtifact:
 
     @property
     def component_fingerprints(self) -> tuple[str, ...]:
-        return self.fit.fingerprints
+        return self.canonical_fingerprint_order
 
     @property
     def symbol(self) -> str:
@@ -317,11 +445,11 @@ class ThreeDayK4ModelArtifact:
 
     @property
     def numeric_index_to_fingerprint(self) -> Mapping[int, str]:
-        return MappingProxyType(dict(enumerate(self.fit.fingerprints)))
+        return MappingProxyType(dict(enumerate(_original_space_fingerprints(self.fit))))
 
     @property
     def canonical_fingerprint_order(self) -> tuple[str, ...]:
-        return self.fit.fingerprints
+        return tuple(sorted(_original_space_fingerprints(self.fit)))
 
     @property
     def source_combined_hash(self) -> str:
@@ -354,7 +482,7 @@ class ThreeDayK4ModelArtifact:
         order = np.argsort(-probabilities, kind="stable")
         winner, runner_up = int(order[0]), int(order[1])
         return ClusterAssignment(
-            fingerprint=self.fit.fingerprints[winner],
+            fingerprint=self.numeric_index_to_fingerprint[winner],
             dominant_probability=float(probabilities[winner]),
             second_probability=float(probabilities[runner_up]),
             distance=None,
@@ -362,7 +490,7 @@ class ThreeDayK4ModelArtifact:
 
     def _payload(self, *, include_hash: bool) -> dict[str, object]:
         profile = ThreeDayDailyResearchProfile()
-        gates = dict(self.stability_gates)
+        gates = dict(self.model_gates)
         payload: dict[str, object] = {
             "artifact_version": self.artifact_version,
             "profile_id": self.profile_id,
@@ -391,16 +519,16 @@ class ThreeDayK4ModelArtifact:
             "converged": gates["converged"], "iterations": gates["iterations"], "lower_bound": gates["lower_bound"],
             "weights": list(self.fit.weights), "means": [list(row) for row in self.fit.means],
             "covariances": [list(row) for row in self.fit.covariances],
-            "component_fingerprints": list(self.fit.fingerprints),
-            "numeric_index_to_fingerprint": {str(i): value for i, value in enumerate(self.fit.fingerprints)},
-            "canonical_fingerprint_order": list(self.fit.fingerprints),
+            "component_fingerprints": list(self.canonical_fingerprint_order),
+            "numeric_index_to_fingerprint": {str(i): value for i, value in self.numeric_index_to_fingerprint.items()},
+            "canonical_fingerprint_order": list(self.canonical_fingerprint_order),
             "assignment_confidence_policy": self.assignment_confidence_policy,
             "source_provenance": [dict(row) for row in self.source_provenance],
             "source_combined_hash": self.source_combined_hash,
             "feature_history_hash": self.feature_history_hash,
             "fit_input_vector_hash": self.fit_input_vector_hash,
             "code_provenance_hash": self.code_provenance_hash,
-            "stability_gates": gates,
+            "model_gates": gates,
         }
         if include_hash:
             payload["artifact_hash"] = self.artifact_hash
@@ -445,23 +573,30 @@ class ThreeDayK4ModelArtifact:
         for name, expected in fixed.items():
             if payload[name] != expected:
                 raise ValueError(f"{name.replace('_', ' ')} is incompatible")
-        fingerprints = tuple(payload["component_fingerprints"])
-        if payload["canonical_fingerprint_order"] != list(fingerprints) or payload["numeric_index_to_fingerprint"] != {str(i): value for i, value in enumerate(fingerprints)}:
-            raise ValueError("component index mapping is incompatible")
+        artifact_fingerprints = tuple(payload["component_fingerprints"])
+        if payload["canonical_fingerprint_order"] != list(artifact_fingerprints) or artifact_fingerprints != tuple(sorted(artifact_fingerprints)):
+            raise ValueError("canonical component fingerprint order is incompatible")
         if payload["source_combined_hash"] != _hash({"archives": payload["source_provenance"]}):
             raise ValueError("source provenance combined hash mismatch")
-        gates = dict(payload["stability_gates"])
+        gates = dict(payload["model_gates"])
         for key in ("converged", "iterations", "lower_bound"):
             if payload[key] != gates[key]:
                 raise ValueError(f"{key.replace('_', ' ')} gate mismatch")
         config = RegimeModelConfig("gmm", 4, 20260714, "diag", 1e-6)
+        feature_names = tuple(payload["retained_feature_names"])
+        means = tuple(tuple(row) for row in payload["means"])
+        covariances = tuple(tuple(row) for row in payload["covariances"])
+        weights = tuple(payload["weights"])
         fit = ClusterDiagnosticFit(
             schema_version=payload["feature_schema_version"], symbol=payload["symbol"], config=config,
-            feature_names=tuple(payload["retained_feature_names"]),
+            feature_names=feature_names,
             lower_bounds=tuple(payload["lower_bounds"]), upper_bounds=tuple(payload["upper_bounds"]),
             medians=tuple(payload["medians"]), scales=tuple(payload["scales"]),
-            fingerprints=fingerprints, means=tuple(tuple(row) for row in payload["means"]),
-            weights=tuple(payload["weights"]), covariances=tuple(tuple(row) for row in payload["covariances"]),
+            fingerprints=_standardized_fingerprints(
+                schema_version=payload["feature_schema_version"], feature_names=feature_names,
+                means=means, covariances=covariances, weights=weights,
+            ),
+            means=means, weights=weights, covariances=covariances,
             distance_thresholds=(),
             converged=payload["converged"], iterations=payload["iterations"],
             lower_bound=payload["lower_bound"],
@@ -474,13 +609,23 @@ class ThreeDayK4ModelArtifact:
             last_usable_anchor_at=_parse_time(payload["last_usable_anchor_at"], "last_usable_anchor_at"),
             usable_anchor_count=payload["usable_anchor_count"], source_provenance=tuple(payload["source_provenance"]),
             feature_history_hash=payload["feature_history_hash"], fit_input_vector_hash=payload["fit_input_vector_hash"],
-            code_provenance_hash=payload["code_provenance_hash"], stability_gates=gates,
+            code_provenance_hash=payload["code_provenance_hash"], model_gates=gates,
         )
         if artifact.artifact_hash != supplied_hash:
             raise ValueError("artifact hash mismatch after reconstruction")
+        if payload["numeric_index_to_fingerprint"] != {
+            str(index): value for index, value in artifact.numeric_index_to_fingerprint.items()
+        } or artifact_fingerprints != artifact.canonical_fingerprint_order:
+            raise ValueError("component index mapping is incompatible")
+        canonical_input = encoded.decode("utf-8") if isinstance(encoded, bytes) else encoded
+        if canonical_input != artifact.to_json():
+            raise ValueError("artifact JSON must use exact canonical encoding")
         return artifact
 
     deserialize = from_json
 
 
-__all__ = ["THREE_DAY_K4_MODEL_ARTIFACT_VERSION", "ThreeDayK4ModelArtifact"]
+__all__ = [
+    "THREE_DAY_K4_MODEL_ARTIFACT_VERSION", "ThreeDayK4ModelArtifact",
+    "validate_three_day_k4_source_provenance",
+]

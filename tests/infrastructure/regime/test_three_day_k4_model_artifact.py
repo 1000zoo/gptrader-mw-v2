@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 
 import pytest
@@ -14,6 +14,7 @@ from src.infrastructure.regime.three_day_k4_model_artifact import (
     ThreeDayK4ModelArtifact,
 )
 from src.infrastructure.regime.sklearn_cluster_diagnostic import SklearnClusterDiagnostic
+from src.infrastructure.exchange.binance.research_data.historical_feature_loader import iter_archive_requests
 
 
 UTC = timezone.utc
@@ -62,6 +63,29 @@ def _fit() -> ClusterDiagnosticFit:
 
 
 def _artifact() -> ThreeDayK4ModelArtifact:
+    context_start = datetime(2020, 12, 29, tzinfo=UTC)
+    training_end = datetime(2025, 6, 30, tzinfo=UTC)
+    provenance = tuple(
+        {
+            "period": request.period,
+            "url": request.url,
+            "member_identity": request.filename.removesuffix(".zip") + ".csv",
+            "bytes": 123,
+            "sha256": "a" * 64,
+            "expected_sha256": "a" * 64,
+            "checksum_verified": True,
+            "source": "klines",
+            "symbol": "BTCUSDT",
+            "timeframe": "1m",
+            "granularity": request.granularity,
+            "requested_start_at": "2020-12-29T00:00:00Z",
+            "requested_end_at": "2025-06-30T00:00:00Z",
+        }
+        for request in iter_archive_requests(
+            "klines", "BTCUSDT", context_start, training_end,
+            now=training_end + timedelta(days=32),
+        )
+    )
     return ThreeDayK4ModelArtifact.from_fit(
         _fit(),
         training_start_at=datetime(2021, 1, 1, tzinfo=UTC),
@@ -69,22 +93,29 @@ def _artifact() -> ThreeDayK4ModelArtifact:
         first_usable_anchor_at=datetime(2021, 1, 1, tzinfo=UTC),
         last_usable_anchor_at=datetime(2025, 6, 29, tzinfo=UTC),
         usable_anchor_count=1641,
-        source_provenance=(
-            {
-                "period": "2021-01",
-                "url": "https://data.binance.vision/data/futures/um/monthly/klines/BTCUSDT/1m/BTCUSDT-1m-2021-01.zip",
-                "member_identity": "BTCUSDT-1m-2021-01.zip",
-                "bytes": 123,
-                "sha256": "a" * 64,
-            },
-        ),
-        feature_history_hash="b" * 64,
+        source_provenance=provenance,
+        feature_history_hash="c" * 64,
         fit_input_vector_hash="c" * 64,
         code_provenance_hash="d" * 64,
-        stability_gates={
+        model_gates={
+            "convergence_required": True,
             "converged": True,
             "iterations": 7,
             "lower_bound": -1.25,
+            "finite_scaler_required": True,
+            "finite_scaler": True,
+            "finite_model_parameters_required": True,
+            "finite_model_parameters": True,
+            "positive_weights_required": True,
+            "minimum_weight": 0.1,
+            "weight_sum_expected": 1.0,
+            "weight_sum_tolerance": 1e-8,
+            "weight_sum": 1.0,
+            "covariance_floor_threshold": 1e-6,
+            "minimum_covariance": 1.0,
+            "component_count_expected": 4,
+            "component_count": 4,
+            "all_components_represented_required": True,
             "minimum_adjusted_rand_index": 0.9,
             "minimum_adjusted_rand_index_threshold": 0.8,
             "minimum_normalized_mutual_information": 0.9,
@@ -95,7 +126,22 @@ def _artifact() -> ThreeDayK4ModelArtifact:
             "maximum_prevalence_drift_threshold": 0.2,
             "low_confidence_rate": 0.1,
             "maximum_low_confidence_rate_threshold": 0.25,
+            "gmm_probability_threshold": 0.65,
+            "gmm_margin_threshold": 0.10,
+            "minimum_observed_dominant_probability": 0.8,
+            "minimum_observed_probability_margin": 0.2,
+            "distance_threshold": "not_applicable_for_gmm",
+            "distance_result": "not_applicable_for_gmm",
+            "distance_threshold_policy": "not_applicable_for_gmm",
+            "feature_registry_version_expected": "three-day-chart-feature-registry-v1",
+            "feature_registry_exact": True,
+            "feature_family_cap_maximum_count": 5,
+            "feature_family_cap_maximum_share": 0.5,
+            "feature_family_observed_maximum_count": 1,
+            "feature_family_observed_maximum_share": 0.25,
+            "feature_family_cap_passed": True,
             "all_components_represented": True,
+            "all_chronological_blocks_represented_required": True,
             "all_chronological_blocks_represented": True,
             "nondegenerate_confidence": True,
             "passed": True,
@@ -128,9 +174,51 @@ def test_artifact_round_trip_is_canonical_context_independent_and_assignment_equ
         _fit(), (_vector(),), THREE_DAY_CHART_FEATURE_REGISTRY_V1
     )[0]
     actual = restored.assign(_vector())
-    assert actual.fingerprint == expected.fingerprint
+    expected_index = _fit().fingerprints.index(expected.fingerprint)
+    assert actual.fingerprint == restored.numeric_index_to_fingerprint[expected_index]
     assert actual.dominant_probability == pytest.approx(expected.dominant_probability, abs=1e-15)
     assert actual.second_probability == pytest.approx(expected.second_probability, abs=1e-15)
+
+
+def test_artifact_component_ids_use_original_feature_space_profiles() -> None:
+    fit = _fit()
+    scaled = ClusterDiagnosticFit(
+        **{
+            **fit.__dict__,
+            "medians": (10.0, 20.0, 30.0, 40.0),
+            "scales": (2.0, 3.0, 4.0, 5.0),
+            "fingerprints": tuple(
+                component_fingerprint(
+                    model_type="gmm",
+                    feature_schema_version=fit.schema_version,
+                    feature_names=fit.feature_names,
+                    mean=mean,
+                    covariance=fit.covariances[index],
+                    weight=fit.weights[index],
+                )
+                for index, mean in enumerate(fit.means)
+            ),
+        }
+    )
+    artifact = ThreeDayK4ModelArtifact.from_fit(
+        scaled,
+        **{key: value for key, value in _artifact().__dict__.items() if key not in {"fit", "artifact_hash"}},
+    )
+    expected = tuple(
+        component_fingerprint(
+            model_type="gmm",
+            feature_schema_version=scaled.schema_version,
+            feature_names=scaled.feature_names,
+            mean=tuple(mean[i] * scaled.scales[i] + scaled.medians[i] for i in range(4)),
+            covariance=tuple(covariance[i] * scaled.scales[i] ** 2 for i in range(4)),
+            weight=scaled.weights[index],
+        )
+        for index, (mean, covariance) in enumerate(zip(scaled.means, scaled.covariances))
+    )
+    assert tuple(artifact.numeric_index_to_fingerprint.values()) == expected
+    assert artifact.canonical_fingerprint_order == tuple(sorted(expected))
+    assert expected != scaled.fingerprints
+    assert ThreeDayK4ModelArtifact.from_json(artifact.to_json()).assign(_vector()).fingerprint in expected
 
 
 @pytest.mark.parametrize("field", ("profile_id", "feature_schema_version", "training_start_at", "feature_history_hash"))
@@ -156,6 +244,19 @@ def test_artifact_json_fails_closed_for_duplicate_missing_extra_and_unknown_fiel
             ThreeDayK4ModelArtifact.from_json(json.dumps(payload))
 
 
+@pytest.mark.parametrize("mutation", ("pretty", "reordered", "newline"))
+def test_artifact_json_requires_exact_canonical_bytes(mutation: str) -> None:
+    payload = json.loads(_artifact().to_json())
+    if mutation == "pretty":
+        encoded = json.dumps(payload, indent=2, sort_keys=True)
+    elif mutation == "reordered":
+        encoded = json.dumps(dict(reversed(tuple(payload.items()))), separators=(",", ":"), sort_keys=False)
+    else:
+        encoded = _artifact().to_json() + "\n"
+    with pytest.raises(ValueError, match="canonical"):
+        ThreeDayK4ModelArtifact.from_json(encoded)
+
+
 def test_artifact_rejects_component_and_numeric_parameter_corruption() -> None:
     for mutate in (
         lambda payload: payload["component_fingerprints"].__setitem__(0, "f" * 24),
@@ -167,3 +268,35 @@ def test_artifact_rejects_component_and_numeric_parameter_corruption() -> None:
         mutate(payload)
         with pytest.raises(ValueError):
             ThreeDayK4ModelArtifact.from_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("mode", ("duplicate", "omitted", "extra", "reordered"))
+def test_artifact_constructor_rejects_nonexact_archive_provenance(mode: str) -> None:
+    base = _artifact()
+    rows = list(base.source_provenance)
+    if mode == "duplicate":
+        rows.insert(1, rows[0])
+    elif mode == "omitted":
+        rows.pop(1)
+    elif mode == "extra":
+        rows.append(rows[-1])
+    else:
+        rows[0], rows[1] = rows[1], rows[0]
+    kwargs = {key: value for key, value in base.__dict__.items() if key not in {"fit", "artifact_hash", "source_provenance"}}
+    with pytest.raises(ValueError, match="provenance"):
+        ThreeDayK4ModelArtifact.from_fit(base.fit, source_provenance=tuple(rows), **kwargs)
+
+
+def test_model_gates_are_immutable_exact_and_fail_closed_for_missing_or_extra_fields() -> None:
+    base = _artifact()
+    with pytest.raises(TypeError):
+        base.model_gates["passed"] = False
+    for mode in ("missing", "extra"):
+        gates = dict(base.model_gates)
+        if mode == "missing":
+            gates.pop("finite_scaler")
+        else:
+            gates["unapproved_gate"] = True
+        kwargs = {key: value for key, value in base.__dict__.items() if key not in {"fit", "artifact_hash", "model_gates"}}
+        with pytest.raises(ValueError, match="gate fields"):
+            ThreeDayK4ModelArtifact.from_fit(base.fit, model_gates=gates, **kwargs)

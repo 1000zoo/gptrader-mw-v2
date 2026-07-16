@@ -252,6 +252,11 @@ class ThreeDayDailyResearchProfile:
                 "precision": self.decimal_arithmetic_precision,
                 "rounding": self.decimal_arithmetic_rounding,
             },
+            "strict_risk_policy": self.strict_risk_policy.canonical_payload(),
+            "sensitivity_policies": {
+                name: policy.canonical_payload()
+                for name, policy in sorted(self.sensitivity_policies.items())
+            },
             "fold": {
                 name: _interval_payload(getattr(self.fold, name))
                 for name in ("cluster_fit", "mapping_fit", "validation", "test")

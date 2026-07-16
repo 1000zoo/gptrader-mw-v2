@@ -45,7 +45,9 @@ class _Downloader:
                 "open_time,open,high,low,close,volume,close_time,quote_volume,count,"
                 "taker_buy_volume,taker_buy_quote_volume,ignore\n0,1,1,1,1,1,0,1,1,0,0,0\n",
             )
-        return DownloadResult("downloaded", destination, "a" * 64, destination.stat().st_size)
+        return DownloadResult(
+            "downloaded", destination, "a" * 64, destination.stat().st_size, "a" * 64
+        )
 
 
 def _rows(
@@ -137,11 +139,23 @@ def test_loader_returns_exact_vectors_and_immutable_stable_provenance(tmp_path: 
     assert provenance[0] == {
         "period": "2024-07",
         "url": _request().url,
-        "sha256": "a" * 64,
-        "bytes": provenance[0]["bytes"],
-        "member_identity": _request().filename,
-    }
-    assert tuple(provenance[0]) == ("period", "url", "sha256", "bytes", "member_identity")
+            "sha256": "a" * 64,
+            "expected_sha256": "a" * 64,
+            "checksum_verified": True,
+            "bytes": provenance[0]["bytes"],
+            "member_identity": _request().filename.removesuffix(".zip") + ".csv",
+            "source": "klines",
+            "symbol": "BTCUSDT",
+            "timeframe": "1m",
+            "granularity": "monthly",
+            "requested_start_at": "2024-07-01T00:00:00Z",
+            "requested_end_at": "2024-07-06T00:00:00Z",
+        }
+    assert tuple(provenance[0]) == (
+        "period", "url", "sha256", "expected_sha256", "checksum_verified",
+        "bytes", "member_identity", "source", "symbol", "timeframe", "granularity",
+        "requested_start_at", "requested_end_at",
+    )
     with pytest.raises(TypeError):
         provenance[0]["status"] = "cached"
 
@@ -189,6 +203,33 @@ def test_loader_rejects_any_break_in_exact_utc_continuity(tmp_path: Path, kind: 
 def test_loader_rejects_wrong_request_symbol_or_url(tmp_path: Path, archive_request: ArchiveRequest) -> None:
     with pytest.raises(ValueError, match="request"):
         _load(tmp_path, request=archive_request)
+
+
+@pytest.mark.parametrize("mode", ("duplicate", "omitted", "extra", "reordered"))
+def test_loader_rejects_nonexact_archive_request_schedule_before_download(tmp_path: Path, mode: str) -> None:
+    from src.infrastructure.exchange.binance.research_data.three_day_feature_history import load_three_day_feature_history
+
+    canonical = _request()
+    rows = {
+        "duplicate": (canonical, canonical),
+        "omitted": (),
+        "extra": (canonical, ArchiveRequest("klines", "BTCUSDT", "daily", "2024-07-01", archive_url("klines", "BTCUSDT", "2024-07-01", "daily"))),
+        "reordered": (ArchiveRequest("klines", "BTCUSDT", "daily", "2024-07-01", archive_url("klines", "BTCUSDT", "2024-07-01", "daily")), canonical),
+    }[mode]
+    called = []
+
+    class SpyDownloader:
+        def download(self, *args, **kwargs):
+            called.append(True)
+            raise AssertionError("download must not run")
+
+    with pytest.raises(ValueError, match="archive request|no Binance"):
+        load_three_day_feature_history(
+            symbol="BTCUSDT", start=START, end=END, raw_root=tmp_path,
+            expected_anchor_count=2, downloader=SpyDownloader(),
+            request_factory=lambda *args, **kwargs: rows,
+        )
+    assert called == []
 
 
 def test_loader_rejects_noncanonical_request_period(tmp_path: Path) -> None:

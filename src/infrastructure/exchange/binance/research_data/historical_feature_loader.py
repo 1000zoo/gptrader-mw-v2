@@ -102,6 +102,7 @@ class DownloadResult:
     path: Path
     sha256: str | None = None
     bytes_received: int = 0
+    expected_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -259,7 +260,7 @@ class ArchiveDownloader:
                         expected_archive_filename=destination.name,
                     )
                 return DownloadResult(
-                    "cached", destination, existing_hash, existing_size
+                    "cached", destination, existing_hash, existing_size, expected
                 )
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = _unique_temp_path(destination)
@@ -316,7 +317,7 @@ class ArchiveDownloader:
                 )
             os.replace(temporary, destination)
             return DownloadResult(
-                "downloaded", destination, actual, bytes_received
+                "downloaded", destination, actual, bytes_received, expected
             )
         except BaseException:
             temporary.unlink(missing_ok=True)
@@ -362,7 +363,7 @@ def validate_archive(
     *,
     source: str,
     expected_archive_filename: str | None = None,
-) -> None:
+) -> str:
     _require_source(source)
     archive_filename = expected_archive_filename or Path(path).name
     expected_member = archive_filename.removesuffix(".zip") + ".csv"
@@ -397,6 +398,7 @@ def validate_archive(
                     _validate_first_data_row(first, source)
                     for row in rows:
                         _validate_first_data_row(row, source)
+            return members[0].filename
     except zipfile.BadZipFile as exc:
         raise ValueError(f"invalid ZIP archive: {path}") from exc
 

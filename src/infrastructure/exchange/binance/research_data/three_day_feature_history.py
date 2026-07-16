@@ -147,6 +147,11 @@ def load_three_day_feature_history(
     )
     if not requests:
         raise ValueError("no Binance kline archive requests cover interval")
+    expected_requests = tuple(
+        iter_archive_requests("klines", symbol, start, end, now=end + timedelta(days=32))
+    )
+    if requests != expected_requests:
+        raise ValueError("archive requests must exactly match canonical ordered coverage")
 
     provenance: list[Mapping[str, object]] = []
     window: deque[Candle] = deque(maxlen=MINUTES_PER_THREE_DAYS)
@@ -181,12 +186,20 @@ def load_three_day_feature_history(
         ):
             raise ValueError("archive sha256 must be canonical lowercase hexadecimal")
         if (
+            not isinstance(result.expected_sha256, str)
+            or len(result.expected_sha256) != 64
+            or result.expected_sha256 != result.expected_sha256.lower()
+            or any(character not in "0123456789abcdef" for character in result.expected_sha256)
+            or result.expected_sha256 != result.sha256
+        ):
+            raise ValueError("archive expected checksum must exactly match content sha256")
+        if (
             not isinstance(result.bytes_received, int)
             or isinstance(result.bytes_received, bool)
             or result.bytes_received <= 0
         ):
             raise ValueError("archive bytes must be a positive integer")
-        validate_archive(
+        member_identity = validate_archive(
             result.path,
             source="klines",
             expected_archive_filename=request.filename,
@@ -197,8 +210,16 @@ def load_three_day_feature_history(
                     "period": request.period,
                     "url": request.url,
                     "sha256": result.sha256,
+                    "expected_sha256": result.expected_sha256,
+                    "checksum_verified": True,
                     "bytes": result.bytes_received,
-                    "member_identity": request.filename,
+                    "member_identity": member_identity,
+                    "source": "klines",
+                    "symbol": symbol,
+                    "timeframe": "1m",
+                    "granularity": request.granularity,
+                    "requested_start_at": start.isoformat().replace("+00:00", "Z"),
+                    "requested_end_at": end.isoformat().replace("+00:00", "Z"),
                 }
             )
         )

@@ -460,8 +460,7 @@ def test_cross_half_prevalence_uses_refits_mapped_to_common_primary_ids() -> Non
 
 def test_checksum_failure_aborts_before_vectors_or_outputs(tmp_path: Path) -> None:
     from src.infrastructure.exchange.binance.research_data.historical_feature_loader import (
-        ArchiveRequest,
-        ChecksumMismatchError,
+            ChecksumMismatchError,
     )
     from scripts.chart_regime_balance_diagnostic import acquire_feature_vectors
 
@@ -469,14 +468,10 @@ def test_checksum_failure_aborts_before_vectors_or_outputs(tmp_path: Path) -> No
         def download(self, *args, **kwargs):
             raise ChecksumMismatchError("fixture checksum mismatch")
 
-    request = ArchiveRequest(
-        "klines", "BTCUSDT", "monthly", "2024-07",
-        "https://data.binance.vision/data/futures/um/monthly/klines/BTCUSDT/1m/BTCUSDT-1m-2024-07.zip",
-    )
     with pytest.raises(ChecksumMismatchError, match="checksum"):
         acquire_feature_vectors(
             symbol="BTCUSDT", start=START, end=END, raw_root=tmp_path,
-            downloader=BadChecksumDownloader(), request_factory=lambda *args, **kwargs: (request,),
+            downloader=BadChecksumDownloader(),
         )
     assert not list(tmp_path.rglob("*.json"))
     assert not list(tmp_path.rglob("*.md"))

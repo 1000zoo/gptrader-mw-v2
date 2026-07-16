@@ -74,7 +74,10 @@ from src.infrastructure.regime.json_regime_artifact_repository import (
 )
 from src.infrastructure.regime.sklearn_regime_model import SklearnRegimeModel
 from src.infrastructure.regime.sklearn_cluster_diagnostic import SklearnClusterDiagnostic
-from src.infrastructure.regime.three_day_k4_model_artifact import ThreeDayK4ModelArtifact
+from src.infrastructure.regime.three_day_k4_model_artifact import (
+    ThreeDayK4ModelArtifact,
+    validate_three_day_k4_source_provenance,
+)
 from src.infrastructure.exchange.binance.research_data.three_day_feature_history import (
     load_three_day_feature_history,
 )
@@ -845,25 +848,7 @@ def _three_day_vector_hash(vectors: tuple[ThreeDayChartFeatureVector, ...]) -> s
 def _validate_three_day_fit_provenance(
     provenance: Sequence[Mapping[str, object]], code_provenance_hash: str
 ) -> tuple[Mapping[str, object], ...]:
-    rows = tuple(provenance)
-    expected = {"period", "url", "sha256", "bytes", "member_identity"}
-    if not rows:
-        raise ValueError("source provenance cannot be empty")
-    for row in rows:
-        if not isinstance(row, Mapping) or set(row) != expected:
-            raise ValueError("source provenance fields are incompatible")
-        if any(not isinstance(row[name], str) or not row[name] for name in ("period", "url", "member_identity")):
-            raise ValueError("source provenance identity is invalid")
-        if (
-            not row["url"].startswith("https://data.binance.vision/")
-            or not row["url"].endswith("/" + row["member_identity"])
-        ):
-            raise ValueError("source provenance URL and member identity are incompatible")
-        digest = row["sha256"]
-        if not isinstance(digest, str) or len(digest) != 64 or digest != digest.lower() or any(character not in "0123456789abcdef" for character in digest):
-            raise ValueError("source provenance checksum is invalid")
-        if not isinstance(row["bytes"], int) or isinstance(row["bytes"], bool) or row["bytes"] <= 0:
-            raise ValueError("source provenance byte count is invalid")
+    rows = validate_three_day_k4_source_provenance(tuple(provenance))
     if (
         not isinstance(code_provenance_hash, str)
         or len(code_provenance_hash) != 64
@@ -981,9 +966,24 @@ def fit_fold_local_three_day_k4_model(
             and nondegenerate_confidence
         )
         gates = {
+            "convergence_required": True,
             "converged": primary.converged,
             "iterations": primary.iterations,
             "lower_bound": primary.lower_bound,
+            "finite_scaler_required": True,
+            "finite_scaler": all(math.isfinite(value) for values in (primary.lower_bounds, primary.upper_bounds, primary.medians, primary.scales) for value in values),
+            "finite_model_parameters_required": True,
+            "finite_model_parameters": all(math.isfinite(value) for values in (*primary.means, primary.weights, *primary.covariances) for value in values),
+            "positive_weights_required": True,
+            "minimum_weight": min(primary.weights),
+            "weight_sum_expected": 1.0,
+            "weight_sum_tolerance": 1e-8,
+            "weight_sum": math.fsum(primary.weights),
+            "covariance_floor_threshold": profile.regularization,
+            "minimum_covariance": min(value for row in primary.covariances for value in row),
+            "component_count_expected": 4,
+            "component_count": len(primary.fingerprints),
+            "all_components_represented_required": True,
             "minimum_adjusted_rand_index": minimum_ari,
             "minimum_adjusted_rand_index_threshold": MODEL_GATE_THRESHOLDS["minimum_seed_ari"],
             "minimum_normalized_mutual_information": minimum_nmi,
@@ -994,7 +994,28 @@ def fit_fold_local_three_day_k4_model(
             "maximum_prevalence_drift_threshold": MODEL_GATE_THRESHOLDS["maximum_prevalence_drift"],
             "low_confidence_rate": low_confidence_rate,
             "maximum_low_confidence_rate_threshold": MODEL_GATE_THRESHOLDS["maximum_low_confidence_rate"],
+            "gmm_probability_threshold": 0.65,
+            "gmm_margin_threshold": 0.10,
+            "minimum_observed_dominant_probability": min(item.dominant_probability for item in assignments),
+            "minimum_observed_probability_margin": min(item.dominant_probability - item.second_probability for item in assignments),
+            "distance_threshold": "not_applicable_for_gmm",
+            "distance_result": "not_applicable_for_gmm",
+            "distance_threshold_policy": "not_applicable_for_gmm",
+            "feature_registry_version_expected": "three-day-chart-feature-registry-v1",
+            "feature_registry_exact": True,
+            "feature_family_cap_maximum_count": 5,
+            "feature_family_cap_maximum_share": 0.5,
+            "feature_family_observed_maximum_count": max(
+                sum(spec.family == family and spec.name in primary.feature_names for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+                for family in {spec.family for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1}
+            ),
+            "feature_family_observed_maximum_share": max(
+                sum(spec.family == family and spec.name in primary.feature_names for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1) / len(primary.feature_names)
+                for family in {spec.family for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1}
+            ),
+            "feature_family_cap_passed": True,
             "all_components_represented": represented,
+            "all_chronological_blocks_represented_required": True,
             "all_chronological_blocks_represented": block_represented,
             "nondegenerate_confidence": nondegenerate_confidence,
             "passed": passed,
@@ -1013,7 +1034,7 @@ def fit_fold_local_three_day_k4_model(
             feature_history_hash=vector_hash,
             fit_input_vector_hash=vector_hash,
             code_provenance_hash=code_provenance_hash,
-            stability_gates=gates,
+            model_gates=gates,
         )
     except (TypeError, ValueError) as error:
         return ThreeDayK4FitOutcome("failed-model-cash", None, (str(error),))

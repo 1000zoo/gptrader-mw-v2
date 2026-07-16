@@ -194,6 +194,10 @@ def test_profile_number_serialization_never_uses_ambient_decimal_precision():
             payloads.append(ThreeDayDailyResearchProfile().canonical_payload())
 
     assert payloads[0] == payloads[1] == payloads[2]
+    assert payloads[0]["strict_risk_policy"] == STRICT_RISK_POLICY.canonical_payload()
+    assert payloads[0]["sensitivity_policies"] == {
+        name: policy.canonical_payload() for name, policy in sorted(SENSITIVITY_POLICIES.items())
+    }
 
 
 @pytest.mark.parametrize(
