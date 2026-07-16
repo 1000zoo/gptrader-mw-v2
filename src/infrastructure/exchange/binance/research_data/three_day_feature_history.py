@@ -199,11 +199,15 @@ def load_three_day_feature_history(
             or result.bytes_received <= 0
         ):
             raise ValueError("archive bytes must be a positive integer")
-        member_identity = validate_archive(
-            result.path,
-            source="klines",
-            expected_archive_filename=request.filename,
-        )
+        member_identity = result.member_identity
+        if member_identity is None:
+            # Backward-compatible custom downloaders may not carry validation
+            # metadata. Validate once here; the standard downloader already did.
+            member_identity = validate_archive(
+                result.path,
+                source="klines",
+                expected_archive_filename=request.filename,
+            )
         provenance.append(
             MappingProxyType(
                 {

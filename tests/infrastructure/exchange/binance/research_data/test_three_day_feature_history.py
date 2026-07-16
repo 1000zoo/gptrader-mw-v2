@@ -160,6 +160,31 @@ def test_loader_returns_exact_vectors_and_immutable_stable_provenance(tmp_path: 
         provenance[0]["status"] = "cached"
 
 
+def test_loader_reuses_downloader_validated_member_without_revalidating_archive(monkeypatch, tmp_path: Path) -> None:
+    import src.infrastructure.exchange.binance.research_data.three_day_feature_history as module
+
+    request = _request()
+    downloader = _Downloader(request)
+    original = downloader.download
+
+    def download(*args, **kwargs):
+        result = original(*args, **kwargs)
+        return DownloadResult(
+            result.status, result.path, result.sha256, result.bytes_received,
+            result.expected_sha256, request.filename.removesuffix(".zip") + ".csv",
+        )
+
+    downloader.download = download
+    calls = []
+    monkeypatch.setattr(module, "validate_archive", lambda *args, **kwargs: calls.append(True))
+    module.load_three_day_feature_history(
+        symbol="BTCUSDT", start=START, end=END, raw_root=tmp_path,
+        expected_anchor_count=2, downloader=downloader,
+        request_factory=lambda *args, **kwargs: (request,), row_reader=lambda path: _rows(),
+    )
+    assert calls == []
+
+
 @pytest.mark.parametrize("expected", [0, -1, True, 2.0, "2"])
 def test_loader_rejects_invalid_expected_anchor_count(tmp_path: Path, expected: object) -> None:
     with pytest.raises(ValueError, match="expected_anchor_count"):

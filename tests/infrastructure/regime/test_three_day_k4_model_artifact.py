@@ -1,6 +1,8 @@
-from datetime import datetime, timedelta, timezone
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+import hashlib
 import json
+import random
 
 import pytest
 
@@ -160,6 +162,13 @@ def _vector() -> ThreeDayChartFeatureVector:
     )
 
 
+def _rehash_payload(payload: dict[str, object]) -> None:
+    unhashed = {key: value for key, value in payload.items() if key != "artifact_hash"}
+    payload["artifact_hash"] = hashlib.sha256(
+        json.dumps(unhashed, allow_nan=False, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+
+
 def test_artifact_round_trip_is_canonical_context_independent_and_assignment_equivalent() -> None:
     artifact = _artifact()
     encoded = artifact.to_json()
@@ -254,6 +263,64 @@ def test_artifact_rejects_ambiguous_or_nonfinite_original_space_component_profil
         ThreeDayK4ModelArtifact.from_fit(changed, **kwargs)
 
 
+def test_artifact_rejects_half_unit_standardized_mean_lost_by_large_median_cancellation() -> None:
+    fit = _fit()
+    means = tuple(
+        tuple((1e12 + component * 0.5) if index == 0 else value for index, value in enumerate(mean))
+        for component, mean in enumerate(fit.means)
+    )
+    records = sorted(
+        (
+            component_fingerprint(
+                model_type="gmm", feature_schema_version=fit.schema_version,
+                feature_names=fit.feature_names, mean=mean,
+                covariance=fit.covariances[index], weight=fit.weights[index],
+            ),
+            mean, fit.weights[index], fit.covariances[index],
+        )
+        for index, mean in enumerate(means)
+    )
+    changed = replace(
+        fit,
+        medians=(1e16, 0.0, 0.0, 0.0),
+        scales=(1.0,) * 4,
+        fingerprints=tuple(row[0] for row in records), means=tuple(row[1] for row in records),
+        weights=tuple(row[2] for row in records), covariances=tuple(row[3] for row in records),
+    )
+    base = _artifact()
+    kwargs = {key: value for key, value in base.__dict__.items() if key not in {"fit", "artifact_hash"}}
+    with pytest.raises(ValueError, match="precision collapse|ULP|ambiguous"):
+        ThreeDayK4ModelArtifact.from_fit(changed, **kwargs)
+
+
+def test_artifact_normal_binary_scaled_profiles_preserve_diagnostic_assignment_probabilities() -> None:
+    rng = random.Random(20260714)
+    base = _artifact()
+    for _ in range(20):
+        medians = tuple(float(rng.randint(-8, 8)) for _ in range(4))
+        scales = tuple(rng.choice((0.5, 1.0, 2.0, 4.0)) for _ in range(4))
+        fit = replace(_fit(), medians=medians, scales=scales)
+        kwargs = {key: value for key, value in base.__dict__.items() if key not in {"fit", "artifact_hash"}}
+        artifact = ThreeDayK4ModelArtifact.from_fit(fit, **kwargs)
+        values = {
+            spec.name: rng.uniform(-5.0, 5.0)
+            for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1
+        }
+        vector = ThreeDayChartFeatureVector(
+            "BTCUSDT", datetime(2025, 7, 7, tzinfo=UTC),
+            datetime(2025, 7, 4, tzinfo=UTC), values,
+        )
+        expected = SklearnClusterDiagnostic().assign(
+            fit, (vector,), THREE_DAY_CHART_FEATURE_REGISTRY_V1
+        )[0]
+        actual = artifact.assign(vector)
+        expected_index = fit.fingerprints.index(expected.fingerprint)
+        assert actual.fingerprint == artifact.numeric_index_to_fingerprint[expected_index]
+        assert actual.dominant_probability == pytest.approx(expected.dominant_probability, abs=4e-15)
+        assert actual.second_probability == pytest.approx(expected.second_probability, abs=4e-15)
+        assert actual.distance is expected.distance is None
+
+
 @pytest.mark.parametrize("field", ("profile_id", "feature_schema_version", "training_start_at", "feature_history_hash"))
 def test_artifact_rejects_bound_contract_drift(field: str) -> None:
     payload = json.loads(_artifact().to_json())
@@ -297,10 +364,30 @@ def test_artifact_rejects_component_and_numeric_parameter_corruption() -> None:
         lambda payload: payload["covariances"][0].__setitem__(0, 0.0),
     ):
         payload = json.loads(_artifact().to_json())
-        payload.pop("artifact_hash")
         mutate(payload)
+        _rehash_payload(payload)
         with pytest.raises(ValueError):
             ThreeDayK4ModelArtifact.from_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("semantic", ("model_gate", "provenance"))
+def test_rehashed_semantic_corruption_reaches_inner_contract_validator(semantic: str) -> None:
+    payload = json.loads(_artifact().to_json())
+    if semantic == "model_gate":
+        payload["model_gates"]["finite_scaler"] = False
+    else:
+        payload["source_provenance"][0]["period"] = "2020-11"
+        payload["source_combined_hash"] = hashlib.sha256(
+            json.dumps(
+                {"archives": payload["source_provenance"]}, allow_nan=False,
+                ensure_ascii=True, separators=(",", ":"), sort_keys=True,
+            ).encode()
+        ).hexdigest()
+    _rehash_payload(payload)
+    with pytest.raises(ValueError, match="gate|provenance|coverage|archive identity"):
+        ThreeDayK4ModelArtifact.from_json(
+            json.dumps(payload, allow_nan=False, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+        )
 
 
 @pytest.mark.parametrize("mode", ("duplicate", "omitted", "extra", "reordered"))

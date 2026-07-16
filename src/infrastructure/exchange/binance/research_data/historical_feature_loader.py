@@ -103,6 +103,7 @@ class DownloadResult:
     sha256: str | None = None
     bytes_received: int = 0
     expected_sha256: str | None = None
+    member_identity: str | None = None
 
 
 @dataclass(frozen=True)
@@ -253,14 +254,15 @@ class ArchiveDownloader:
             expected = self._fetch_checksum(url + ".CHECKSUM", destination.name)
             existing_hash = _sha256_file(destination)
             if existing_hash.lower() == expected.lower():
+                member_identity = None
                 if source is not None:
-                    validate_archive(
+                    member_identity = validate_archive(
                         destination,
                         source=source,
                         expected_archive_filename=destination.name,
                     )
                 return DownloadResult(
-                    "cached", destination, existing_hash, existing_size, expected
+                    "cached", destination, existing_hash, existing_size, expected, member_identity
                 )
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = _unique_temp_path(destination)
@@ -309,15 +311,16 @@ class ArchiveDownloader:
                 raise ChecksumMismatchError(
                     f"SHA-256 mismatch for {destination.name}: expected {expected}, got {actual}"
                 )
+            member_identity = None
             if source is not None:
-                validate_archive(
+                member_identity = validate_archive(
                     temporary,
                     source=source,
                     expected_archive_filename=destination.name,
                 )
             os.replace(temporary, destination)
             return DownloadResult(
-                "downloaded", destination, actual, bytes_received, expected
+                "downloaded", destination, actual, bytes_received, expected, member_identity
             )
         except BaseException:
             temporary.unlink(missing_ok=True)

@@ -128,16 +128,23 @@ def _original_space_profiles(
                 raise ValueError("original-space component variance underflow is ambiguous")
             for index, value in enumerate(original_mean):
                 reconstructed = (value - fit.medians[index]) / fit.scales[index]
-                if not math.isclose(reconstructed, mean[index], rel_tol=1e-12, abs_tol=1e-15):
+                if not _within_ulp_budget(reconstructed, mean[index]):
                     raise ValueError("original-space component mean precision collapse is ambiguous")
             for index, value in enumerate(original_variance):
                 reconstructed = value / (fit.scales[index] * fit.scales[index])
-                if not math.isclose(reconstructed, covariance[index], rel_tol=1e-12, abs_tol=1e-15):
+                if not _within_ulp_budget(reconstructed, covariance[index]):
                     raise ValueError("original-space component variance precision collapse is ambiguous")
             profiles.append((original_mean, original_variance, fit.weights[component]))
     except OverflowError as exc:
         raise ValueError("original-space component profile overflow is nonfinite") from exc
     return tuple(profiles)
+
+
+def _within_ulp_budget(actual: float, expected: float, *, budget: int = 4) -> bool:
+    if not math.isfinite(actual) or not math.isfinite(expected):
+        return False
+    tolerance = budget * max(math.ulp(actual), math.ulp(expected))
+    return abs(actual - expected) <= tolerance
 
 
 def _original_space_fingerprints(fit: ClusterDiagnosticFit) -> tuple[str, ...]:
@@ -647,12 +654,12 @@ class ThreeDayK4ModelArtifact:
             feature_history_hash=payload["feature_history_hash"], fit_input_vector_hash=payload["fit_input_vector_hash"],
             code_provenance_hash=payload["code_provenance_hash"], model_gates=gates,
         )
-        if artifact.artifact_hash != supplied_hash:
-            raise ValueError("artifact hash mismatch after reconstruction")
         if payload["numeric_index_to_fingerprint"] != {
             str(index): value for index, value in artifact.numeric_index_to_fingerprint.items()
         } or artifact_fingerprints != artifact.canonical_fingerprint_order:
             raise ValueError("component index mapping is incompatible")
+        if artifact.artifact_hash != supplied_hash:
+            raise ValueError("artifact hash mismatch after reconstruction")
         canonical_input = encoded.decode("utf-8") if isinstance(encoded, bytes) else encoded
         if canonical_input != artifact.to_json():
             raise ValueError("artifact JSON must use exact canonical encoding")
