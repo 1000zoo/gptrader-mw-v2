@@ -62,6 +62,8 @@ class DailyStrategyEvidence:
     component_fingerprint: str
     candidate_id: str
     cluster_anchor_at: datetime
+    feature_start_at: datetime
+    feature_end_at: datetime
     outcome_start_at: datetime
     outcome_end_at: datetime
     initial_equity: Decimal
@@ -99,13 +101,19 @@ class DailyStrategyEvidence:
         _text(self.candidate_id, "candidate_id")
         timestamps = (
             self.cluster_anchor_at,
+            self.feature_start_at,
+            self.feature_end_at,
             self.outcome_start_at,
             self.outcome_end_at,
         )
         if any(not _midnight_utc(value) for value in timestamps):
             raise ValueError("daily evidence bounds must be canonical midnight UTC")
+        if self.feature_end_at != self.cluster_anchor_at:
+            raise ValueError("feature end must match the cluster anchor")
         if self.cluster_anchor_at != self.outcome_start_at:
             raise ValueError("cluster anchor must match the daily outcome start")
+        if self.feature_start_at != self.feature_end_at - timedelta(days=3):
+            raise ValueError("daily evidence feature interval must span exactly three days")
         if self.outcome_end_at != self.outcome_start_at + timedelta(days=1):
             raise ValueError("daily evidence outcome must span exactly one day")
 
@@ -182,6 +190,58 @@ class DailyStrategyEvidence:
             if sum(trade_pnls, Decimal(0)) != self.net_pnl:
                 raise ValueError("trade PnLs must reconcile to net PnL")
             object.__setattr__(self, "trade_pnls", trade_pnls)
+
+    def canonical_payload(self) -> dict[str, object]:
+        decimal_fields = (
+            "initial_equity",
+            "final_equity",
+            "gross_pnl",
+            "net_pnl",
+            "gross_return_ratio",
+            "net_return_ratio",
+            "fees",
+            "exposure_ratio",
+            "turnover_ratio",
+            "maximum_drawdown_ratio",
+            "maximum_adverse_excursion_ratio",
+            "profit_factor",
+            "downside_deviation_ratio",
+            "expected_shortfall_10_ratio",
+            "median_daily_return_ratio",
+            "tenth_percentile_daily_return_ratio",
+            "worst_seven_day_return_ratio",
+            "return_without_best_episode_ratio",
+            "top_episode_profit_share",
+            "top_five_trade_profit_share",
+        )
+        payload: dict[str, object] = {
+            "component_fingerprint": self.component_fingerprint,
+            "candidate_id": self.candidate_id,
+            "cluster_anchor_at": _timestamp(self.cluster_anchor_at),
+            "feature_interval": {
+                "start_at": _timestamp(self.feature_start_at),
+                "end_at": _timestamp(self.feature_end_at),
+            },
+            "outcome_interval": {
+                "start_at": _timestamp(self.outcome_start_at),
+                "end_at": _timestamp(self.outcome_end_at),
+            },
+            "closed_trade_count": self.closed_trade_count,
+            "availability_status": self.availability_status,
+            "availability_reason": self.availability_reason,
+            "candidate_hash": self.candidate_hash,
+            "model_artifact_hash": self.model_artifact_hash,
+            "data_hash": self.data_hash,
+            "cost_config_hash": self.cost_config_hash,
+            "engine_config_hash": self.engine_config_hash,
+            "trade_pnls": None
+            if self.trade_pnls is None
+            else [_decimal_text(value) for value in self.trade_pnls],
+        }
+        payload.update(
+            {field: _decimal_text(getattr(self, field)) for field in decimal_fields}
+        )
+        return payload
 
 
 @dataclass(frozen=True)
@@ -312,19 +372,26 @@ class DailyStrategyMappingArtifact:
             _text(candidate, "candidate id")
             _hash(value, "candidate hash")
 
-        components = tuple(self.component_fingerprints)
-        if len(components) != 4 or len(set(components)) != 4:
+        supplied_components = tuple(self.component_fingerprints)
+        if len(supplied_components) != 4 or len(set(supplied_components)) != 4:
             raise ValueError("artifact requires exactly four unique component fingerprints")
-        if components != tuple(sorted(components)):
-            raise ValueError("component fingerprints must be sorted")
-        for component in components:
+        for component in supplied_components:
             _text(component, "component fingerprint")
+        components = tuple(sorted(supplied_components))
 
-        entries = tuple(self.entries)
-        if any(not isinstance(entry, DailyStrategyMappingEntry) for entry in entries):
+        supplied_entries = tuple(self.entries)
+        if any(not isinstance(entry, DailyStrategyMappingEntry) for entry in supplied_entries):
             raise ValueError("entries must contain daily strategy mapping entries")
-        if tuple(entry.component_fingerprint for entry in entries) != components:
+        entries_by_component = {
+            entry.component_fingerprint: entry for entry in supplied_entries
+        }
+        if (
+            len(supplied_entries) != len(components)
+            or len(entries_by_component) != len(supplied_entries)
+            or set(entries_by_component) != set(components)
+        ):
             raise ValueError("mapping entry component coverage is inconsistent")
+        entries = tuple(entries_by_component[component] for component in components)
         if any(
             entry.strategy_candidate_id not in candidate_ids
             for entry in entries
@@ -463,6 +530,19 @@ def daily_mapping_artifact_hash(artifact: DailyStrategyMappingArtifact) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def daily_strategy_evidence_hash(evidence: DailyStrategyEvidence) -> str:
+    if not isinstance(evidence, DailyStrategyEvidence):
+        raise ValueError("daily strategy evidence is required")
+    encoded = json.dumps(
+        evidence.canonical_payload(),
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _decimal_text(value: Decimal) -> str:
     normalized = value.normalize()
     if normalized == 0:
@@ -472,9 +552,13 @@ def _decimal_text(value: Decimal) -> str:
 
 def _interval_payload(interval: UtcInterval) -> dict[str, str]:
     return {
-        "start_at": interval.start_at.isoformat().replace("+00:00", "Z"),
-        "end_at": interval.end_at.isoformat().replace("+00:00", "Z"),
+        "start_at": _timestamp(interval.start_at),
+        "end_at": _timestamp(interval.end_at),
     }
+
+
+def _timestamp(value: datetime) -> str:
+    return value.isoformat().replace("+00:00", "Z")
 
 
 __all__ = [
@@ -484,4 +568,5 @@ __all__ = [
     "DailyStrategyMappingArtifact",
     "DailyStrategyMappingEntry",
     "daily_mapping_artifact_hash",
+    "daily_strategy_evidence_hash",
 ]

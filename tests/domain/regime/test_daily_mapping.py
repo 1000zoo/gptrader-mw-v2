@@ -21,6 +21,7 @@ from src.domain.regime.daily_mapping import (
     DailyStrategyMappingArtifact,
     DailyStrategyMappingEntry,
     daily_mapping_artifact_hash,
+    daily_strategy_evidence_hash,
 )
 
 
@@ -37,6 +38,8 @@ def evidence(**changes) -> DailyStrategyEvidence:
         "component_fingerprint": "component-a",
         "candidate_id": "candidate-a",
         "cluster_anchor_at": dt("2025-07-10"),
+        "feature_start_at": dt("2025-07-07"),
+        "feature_end_at": dt("2025-07-10"),
         "outcome_start_at": dt("2025-07-10"),
         "outcome_end_at": dt("2025-07-11"),
         "initial_equity": Decimal("1000"),
@@ -144,6 +147,10 @@ def artifact(**changes) -> DailyStrategyMappingArtifact:
 def test_daily_evidence_binds_three_day_anchor_to_exact_one_day_outcome():
     item = evidence()
 
+    assert (item.feature_start_at, item.feature_end_at) == (
+        item.cluster_anchor_at - timedelta(days=3),
+        item.cluster_anchor_at,
+    )
     assert item.outcome_start_at == item.cluster_anchor_at
     assert item.outcome_end_at - item.outcome_start_at == timedelta(days=1)
     assert item.trade_pnls == (Decimal("2"), Decimal("3"))
@@ -158,6 +165,7 @@ def test_daily_mapping_contracts_are_exported_from_regime_api():
         "DailyStrategyMappingArtifact": DailyStrategyMappingArtifact,
         "DailyStrategyMappingEntry": DailyStrategyMappingEntry,
         "daily_mapping_artifact_hash": daily_mapping_artifact_hash,
+        "daily_strategy_evidence_hash": daily_strategy_evidence_hash,
     }
 
     assert {name: getattr(regime, name) for name in expected} == expected
@@ -168,6 +176,10 @@ def test_daily_mapping_contracts_are_exported_from_regime_api():
     ("changes", "message"),
     [
         ({"cluster_anchor_at": dt("2025-07-09")}, "cluster anchor"),
+        ({"feature_start_at": dt("2025-07-08")}, "exactly three days"),
+        ({"feature_end_at": dt("2025-07-09")}, "feature end"),
+        ({"feature_start_at": datetime(2025, 7, 7)}, "canonical midnight UTC"),
+        ({"feature_end_at": dt("2025-07-10") + timedelta(hours=1)}, "canonical midnight UTC"),
         ({"outcome_end_at": dt("2025-07-12")}, "exactly one day"),
         ({"outcome_start_at": datetime(2025, 7, 10)}, "canonical midnight UTC"),
         ({"outcome_start_at": dt("2025-07-10") + timedelta(hours=1)}, "canonical midnight UTC"),
@@ -180,6 +192,24 @@ def test_daily_mapping_contracts_are_exported_from_regime_api():
 def test_daily_evidence_rejects_interval_identity_and_availability_drift(changes, message):
     with pytest.raises(ValueError, match=message):
         evidence(**changes)
+
+
+def test_daily_evidence_canonical_payload_and_hash_bind_feature_interval():
+    first = evidence()
+    shifted = evidence(
+        cluster_anchor_at=dt("2025-07-11"),
+        feature_start_at=dt("2025-07-08"),
+        feature_end_at=dt("2025-07-11"),
+        outcome_start_at=dt("2025-07-11"),
+        outcome_end_at=dt("2025-07-12"),
+    )
+
+    assert first.canonical_payload()["feature_interval"] == {
+        "start_at": "2025-07-07T00:00:00Z",
+        "end_at": "2025-07-10T00:00:00Z",
+    }
+    assert len(daily_strategy_evidence_hash(first)) == 64
+    assert daily_strategy_evidence_hash(first) != daily_strategy_evidence_hash(shifted)
 
 
 def test_cash_mapping_entry_is_explicit_and_requires_a_rejection_reason():
@@ -209,10 +239,12 @@ def test_artifact_requires_exactly_four_unique_component_entries_and_freezes_col
         artifact(component_fingerprints=("component-a",) * 4)
     with pytest.raises(ValueError, match="component coverage"):
         artifact(entries=result.entries[:-1])
-    with pytest.raises(ValueError, match="sorted"):
+    with pytest.raises(ValueError, match="component coverage"):
         artifact(
-            component_fingerprints=tuple(reversed(result.component_fingerprints)),
-            entries=tuple(reversed(result.entries)),
+            entries=(
+                replace(result.entries[0], component_fingerprint="component-b"),
+                *result.entries[1:],
+            )
         )
 
 
@@ -261,9 +293,18 @@ def test_artifact_hash_is_canonical_and_binds_the_payload():
     first = artifact()
     second = artifact()
     reordered = replace(first, candidate_assessments=tuple(reversed(first.candidate_assessments)))
+    permuted = artifact(
+        component_fingerprints=tuple(reversed(first.component_fingerprints)),
+        entries=tuple(reversed(first.entries)),
+        candidate_assessments=tuple(reversed(first.candidate_assessments)),
+    )
 
     assert daily_mapping_artifact_hash(first) == daily_mapping_artifact_hash(second)
     assert daily_mapping_artifact_hash(first) == daily_mapping_artifact_hash(reordered)
+    assert permuted.component_fingerprints == first.component_fingerprints
+    assert permuted.entries == first.entries
+    assert permuted.candidate_assessments == first.candidate_assessments
+    assert daily_mapping_artifact_hash(first) == daily_mapping_artifact_hash(permuted)
     assert len(daily_mapping_artifact_hash(first)) == 64
     assert daily_mapping_artifact_hash(first) != daily_mapping_artifact_hash(
         replace(first, model_artifact_hash=sha("different-model"))

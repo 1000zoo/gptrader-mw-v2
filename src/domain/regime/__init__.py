@@ -12,6 +12,7 @@ from src.domain.regime.daily_mapping import (
     DailyStrategyMappingArtifact,
     DailyStrategyMappingEntry,
     daily_mapping_artifact_hash,
+    daily_strategy_evidence_hash,
 )
 from src.domain.regime.three_day_chart_features import (
     THREE_DAY_CHART_FEATURE_REGISTRY_V1,
@@ -80,6 +81,7 @@ __all__ = [
     "DailyStrategyMappingArtifact",
     "DailyStrategyMappingEntry",
     "daily_mapping_artifact_hash",
+    "daily_strategy_evidence_hash",
     "THREE_DAY_CHART_FEATURE_REGISTRY_V1",
     "THREE_DAY_CHART_FEATURE_SCHEMA_VERSION",
     "ThreeDayChartFeatureVector",
