@@ -268,7 +268,28 @@ def _is_midnight_utc(value: datetime) -> bool:
 
 
 def _number_text(value: float) -> str:
-    return format(Decimal(str(value)).normalize(), "f")
+    number = Decimal(str(value))
+    sign, raw_digits, exponent = number.as_tuple()
+    if not any(raw_digits):
+        return "0"
+    digits = list(raw_digits)
+    while digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    coefficient = "".join(str(digit) for digit in digits)
+    if exponent >= 0:
+        rendered = coefficient + "0" * exponent
+    else:
+        decimal_position = len(coefficient) + exponent
+        if decimal_position > 0:
+            rendered = (
+                coefficient[:decimal_position]
+                + "."
+                + coefficient[decimal_position:]
+            )
+        else:
+            rendered = "0." + "0" * (-decimal_position) + coefficient
+    return "-" + rendered if sign else rendered
 
 
 def _interval_payload(interval: UtcInterval) -> dict[str, str]:

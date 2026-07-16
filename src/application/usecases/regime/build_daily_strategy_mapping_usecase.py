@@ -295,6 +295,8 @@ def _aligned_component_corrected_lower_bounds(
     _validate_random_seed(random_seed)
     if not isinstance(block_days, int) or isinstance(block_days, bool) or block_days < 1:
         raise ValueError("block days must be a positive integer")
+    if type(confidence) is not float or not math.isfinite(confidence):
+        raise ValueError("bootstrap confidence must be a finite float")
     if not 0 < confidence < 1:
         raise ValueError("bootstrap confidence must be between zero and one")
     if maximum_attempts is None:

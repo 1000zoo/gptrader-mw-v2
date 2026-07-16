@@ -268,6 +268,31 @@ def test_corrected_bounds_reject_invalid_private_bootstrap_controls(kwargs) -> N
         )
 
 
+@pytest.mark.parametrize(
+    "confidence",
+    [
+        Decimal("0.95"),
+        "0.95",
+        1,
+        True,
+        float("nan"),
+        float("inf"),
+        0.0,
+        1.0,
+        -0.1,
+    ],
+)
+def test_corrected_bounds_require_strict_finite_float_confidence(confidence) -> None:
+    with pytest.raises(ValueError, match="confidence"):
+        _aligned_component_corrected_lower_bounds(
+            {"candidate": (Decimal("0.001"),) * 30},
+            ("target",) * 30,
+            "target",
+            resamples=1,
+            confidence=confidence,
+        )
+
+
 def test_expected_shortfall_is_mean_of_exact_worst_ceiling_ten_percent() -> None:
     values = tuple(map(Decimal, ["-0.20", "-0.10", *(["0.01"] * 9)]))
     assert expected_shortfall_10(values) == Decimal("-0.15")

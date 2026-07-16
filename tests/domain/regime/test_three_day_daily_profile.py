@@ -1,6 +1,6 @@
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -183,6 +183,17 @@ def test_research_profile_freezes_decimal_arithmetic_policy():
         "precision": 50,
         "rounding": "ROUND_HALF_EVEN",
     }
+
+
+def test_profile_number_serialization_never_uses_ambient_decimal_precision():
+    payloads = []
+    for precision in (1, 6, 60):
+        with localcontext() as context:
+            context.prec = precision
+            assert profile_module._number_text(0.95) == "0.95"
+            payloads.append(ThreeDayDailyResearchProfile().canonical_payload())
+
+    assert payloads[0] == payloads[1] == payloads[2]
 
 
 @pytest.mark.parametrize(

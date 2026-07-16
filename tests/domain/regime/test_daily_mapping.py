@@ -538,6 +538,21 @@ def test_artifact_hash_is_independent_of_decimal_context_precision():
     assert low_precision_hash == high_precision_hash
 
 
+def test_artifact_profile_payload_and_hash_are_stable_at_extreme_ambient_precisions():
+    result = artifact()
+    payloads = []
+    hashes = []
+
+    for precision in (1, 6, 60):
+        with localcontext() as context:
+            context.prec = precision
+            payloads.append(result.canonical_payload())
+            hashes.append(daily_mapping_artifact_hash(result))
+
+    assert payloads[0] == payloads[1] == payloads[2]
+    assert hashes[0] == hashes[1] == hashes[2]
+
+
 def test_artifact_rejects_fit_interval_or_frozen_schema_drift():
     result = artifact()
 
