@@ -74,6 +74,23 @@ def test_maximum_adverse_excursion_is_directional_and_includes_exit_candle(direc
     assert _maximum_adverse_excursion_ratio(position, market, 1) == expected
 
 
+def test_maximum_adverse_excursion_excludes_entry_candle_giant_wick():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    symbol = Symbol("BTC", "USDT")
+    timeframe = Timeframe(1, "m")
+    market = BacktestMarketSnapshot(tuple(
+        Candle(symbol, timeframe, start + timedelta(minutes=index),
+               start + timedelta(minutes=index + 1), Decimal("100"), high,
+               low, Decimal("100"), Decimal("1"))
+        for index, (high, low) in enumerate(((Decimal("200"), Decimal("1")), (Decimal("101"), Decimal("99"))))
+    ))
+    long = BacktestPosition(SignalDirection.LONG, Decimal("100"), Decimal("1"), Decimal("120"),
+                            Decimal("80"), 0, Decimal("0"), Decimal("100"))
+    short = replace(long, direction=SignalDirection.SHORT)
+    assert _maximum_adverse_excursion_ratio(long, market, 1) == Decimal("0.01")
+    assert _maximum_adverse_excursion_ratio(short, market, 1) == Decimal("0.01")
+
+
 def test_trade_detail_serialization_rejects_missing_mae_audit() -> None:
     trade = BacktestTrade(
         entry_price=Decimal("100"), exit_price=Decimal("101"),

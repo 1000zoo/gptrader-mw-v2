@@ -3266,10 +3266,12 @@ def _maximum_adverse_excursion_ratio(
     market: MarketSnapshot | BacktestMarketSnapshot,
     exit_index: int,
 ) -> Decimal:
-    """Conservative MAE through the whole exit candle; intrabar path is unknown."""
+    """MAE after entry-close through the whole exit candle; intrabar exit order is unknown."""
     if not position.opened_index <= exit_index < len(market.candles):
         raise ValueError("MAE indices must cover an open position through its exit candle")
-    held = market.candles[position.opened_index : exit_index + 1]
+    held = market.candles[position.opened_index + 1 : exit_index + 1]
+    if not held:
+        return Decimal("0")
     if position.direction is SignalDirection.LONG:
         adverse = max(Decimal("0"), position.entry_price - min(c.low_price for c in held))
     else:

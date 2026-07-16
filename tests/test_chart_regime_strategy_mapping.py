@@ -1405,7 +1405,7 @@ def _result_for_trades(kwargs, trades, **overrides):
 def _candidate(candidate_id: str, *, equity_ratio: str = "0.1") -> SchedulerBacktestCandidate:
     return SchedulerBacktestCandidate(
         candidate_id=candidate_id,
-        strategies=(StrategyCandidateSpec("unused", {"threshold": Decimal("2")}),),
+        strategies=(StrategyCandidateSpec("mtf", {}),),
         take_profit_ratio=Decimal("0.01"),
         stop_loss_ratio=Decimal("0.02"),
         equity_ratio=Decimal(equity_ratio),

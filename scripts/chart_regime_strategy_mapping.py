@@ -29,6 +29,7 @@ if str(ROOT) not in sys.path:
 from scripts.deferred_strategy_registry import (
     ensure_candidate_group_allowed,
     ensure_candidate_ids_allowed,
+    load_deferred_strategy_registry,
 )
 from scripts.scheduler_driven_scalping_backtest import (
     BACKTEST_ENGINE_VERSION,
@@ -52,6 +53,7 @@ from scripts.scheduler_driven_scalping_backtest import (
     required_warmup_candles,
     validate_unique_candidate_ids,
     default_candidate,
+    candidate_payload,
 )
 from src.application.usecases.regime.build_strategy_mapping_usecase import (
     BuildStrategyMappingCommand,
@@ -73,9 +75,12 @@ from src.infrastructure.regime.json_regime_artifact_repository import (
 from src.infrastructure.regime.sklearn_regime_model import SklearnRegimeModel
 from src.application.services.chart_feature_extractor import ChartFeatureExtractor
 from src.application.services.daily_strategy_evidence import (
+    DailyCandidateCatalog,
+    DailyEvidenceReplayContract,
     DailyEvidenceRunIdentity,
-    build_three_day_daily_candidate_manifest,
-    run_daily_strategy_evidence,
+    candidate_feature_requirements,
+    build_three_day_daily_candidate_manifest as _build_daily_candidate_manifest,
+    run_daily_strategy_evidence as _run_daily_strategy_evidence,
 )
 from src.domain.market import Candle, Timeframe
 from src.domain.market_feature import MarketFeatureSet, MarketFeatureValue
@@ -93,6 +98,54 @@ from src.domain.regime import (
 
 
 _WEEK = timedelta(days=7)
+
+
+def _canonical_daily_candidate_groups():
+    return {
+        "all": build_scheduler_candidates(),
+        "alpha": alpha_entry_candidates(),
+        "counter": counter_microstructure_candidates(),
+        "discovered": discovered_metrics_candidates(),
+        "exact": exact_historical_candidates(),
+        "metrics": metrics_positioning_candidates(),
+        "microstructure": microstructure_alpha_candidates(),
+        "multi": multi_frequency_candidates(),
+    }
+
+
+def build_three_day_daily_candidate_manifest(*, candidate_groups=None, expected_count=459):
+    groups = _canonical_daily_candidate_groups() if candidate_groups is None else candidate_groups
+    catalog = DailyCandidateCatalog(
+        candidate_groups=groups,
+        deferred_registry=load_deferred_strategy_registry(),
+        candidate_id_validator=lambda ids: ensure_candidate_ids_allowed(ids, include_deferred=True),
+        candidate_payload_builder=candidate_payload,
+    )
+    return _build_daily_candidate_manifest(catalog=catalog, expected_count=expected_count)
+
+
+def canonical_daily_evidence_replay_contract(*, replay_callable=None):
+    return DailyEvidenceReplayContract(
+        replay=replay_callable or run_scheduler_driven_backtest,
+        engine_name="scheduler_driven",
+        engine_version=BACKTEST_ENGINE_VERSION,
+        cost_model={
+            "venue": "binance_usd_m_futures",
+            "fee_rate_per_side": str(FEE_RATE),
+            "slippage_rate_per_side": str(SLIPPAGE_RATE),
+            "funding_fee": "excluded",
+        },
+        timeframe=TIMEFRAME,
+        timeframe_label="1m",
+        warmup_resolver=required_warmup_candles,
+    )
+
+
+def run_daily_strategy_evidence(*, replay_callable=None, **kwargs):
+    return _run_daily_strategy_evidence(
+        replay_contract=canonical_daily_evidence_replay_contract(replay_callable=replay_callable),
+        **kwargs,
+    )
 _SUMMARY_DECIMAL_FIELDS = (
     "initial_equity",
     "final_equity",
@@ -1228,91 +1281,10 @@ def _mapping_report(artifact) -> dict[str, object]:
     }
 
 
-def _combine_requirement_alternatives(
-    groups: Sequence[tuple[dict[str, tuple[str, ...]], ...]],
-) -> tuple[dict[str, tuple[str, ...]], ...]:
-    combined = ({},)
-    for alternatives in groups:
-        expanded = []
-        for left in combined:
-            for right in alternatives:
-                merged = dict(left)
-                for name, sources in right.items():
-                    merged[name] = tuple(sorted(set(merged.get(name, ())) | set(sources)))
-                expanded.append(merged)
-        combined = tuple(expanded)
-    unique = {
-        tuple((name, tuple(sources)) for name, sources in sorted(item.items())): item
-        for item in combined
-    }
-    return tuple(unique[key] for key in sorted(unique))
-
-
-def _strategy_feature_requirements(
-    strategy: object,
-) -> tuple[dict[str, tuple[str, ...]], ...]:
-    direct = getattr(strategy, "required_features", None)
-    if isinstance(direct, Mapping):
-        return ({name: tuple(sources) for name, sources in direct.items()},)
-    inner = getattr(strategy, "inner", None)
-    if inner is not None:
-        return _strategy_feature_requirements(inner)
-    children = getattr(strategy, "children", ())
-    if children:
-        return _combine_requirement_alternatives(
-            tuple(_strategy_feature_requirements(child) for child in children)
-        )
-    name = type(strategy).__name__
-    if name == "FlowExhaustionReversalStrategy":
-        return ({
-            "taker_imbalance": tuple(strategy.taker_imbalance_sources),
-            "cvd_delta": tuple(strategy.cvd_delta_sources),
-        },)
-    if name in {"OpenInterestImpulseStrategy", "OpenInterestDivergenceStrategy"}:
-        return ({
-            "open_interest_change_ratio_5m": ("metrics",),
-            "taker_long_short_volume_ratio": ("metrics",),
-        },)
-    if name == "PositioningCrowdingReversalStrategy":
-        return ({
-            "top_trader_position_long_short_ratio": ("metrics",),
-            "global_long_short_ratio": ("metrics",),
-            "taker_long_short_volume_ratio": ("metrics",),
-        },)
-    if name == "GlobalRatioShockReversalStrategy":
-        return ({"global_long_short_change_5m": ("metrics",)},)
-    if name == "PremiumFundingReversionStrategy":
-        flow = {
-            "taker_imbalance": tuple(strategy.taker_imbalance_sources),
-            "cvd_delta": tuple(strategy.cvd_delta_sources),
-        }
-        return (
-            {**flow, "premium_index": tuple(strategy.premium_sources)},
-            {
-                **flow,
-                "mark_price": tuple(strategy.mark_sources),
-                "index_price": tuple(strategy.index_sources),
-            },
-        )
-    if name == "SessionOpeningRangeStrategy":
-        return ({
-            "taker_imbalance": tuple(strategy.taker_imbalance_sources),
-            "cvd_delta": tuple(strategy.cvd_delta_sources),
-            "trade_intensity": tuple(strategy.trade_intensity_sources),
-        },)
-    return ({},)
-
-
 def _candidate_feature_requirements(
     candidate: SchedulerBacktestCandidate,
 ) -> tuple[dict[str, tuple[str, ...]], ...]:
-    try:
-        strategies = build_strategies(candidate)
-    except ValueError:
-        return ({},)
-    return _combine_requirement_alternatives(
-        tuple(_strategy_feature_requirements(strategy) for strategy in strategies)
-    )
+    return candidate_feature_requirements(candidate)
 
 
 def _mapping_feature_coverage(

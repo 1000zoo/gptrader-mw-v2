@@ -4,6 +4,9 @@ from decimal import Decimal
 import json
 import hashlib
 import os
+import multiprocessing
+import subprocess
+import sys
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -18,6 +21,7 @@ from scripts.scheduler_driven_scalping_backtest import (
     FEE_RATE,
     FEATURE_CACHE_SCHEMA_VERSION,
     SLIPPAGE_RATE,
+    StrategyCandidateSpec,
     build_scheduler_candidates,
     candidate_definition_hash,
     feature_provider_config_hash,
@@ -33,10 +37,18 @@ from src.application.services.daily_strategy_evidence import (
     DAILY_EVIDENCE_SCHEMA_VERSION,
     AppendOnlyEvidenceLedger,
     DailyEvidenceRunIdentity,
-    build_three_day_daily_candidate_manifest,
     evidence_file_lock,
     evidence_lock_path,
     market_snapshot_hash,
+    SUPPORTED_STRATEGY_REQUIREMENT_KINDS,
+    DailyCandidateCatalog,
+    DailyEvidenceReplayContract,
+    build_three_day_daily_candidate_manifest as build_pure_daily_manifest,
+    run_daily_strategy_evidence as run_pure_daily_evidence,
+)
+from scripts.chart_regime_strategy_mapping import (
+    build_three_day_daily_candidate_manifest,
+    canonical_daily_evidence_replay_contract,
     run_daily_strategy_evidence,
 )
 
@@ -61,6 +73,23 @@ def _all_groups(candidate):
     }
 
 
+def _lock_probe(path, active, maximum, ready, release):
+    with evidence_file_lock(Path(path), timeout_seconds=2):
+        with active.get_lock(), maximum.get_lock():
+            active.value += 1
+            maximum.value = max(maximum.value, active.value)
+        ready.put(True)
+        release.wait(2)
+        with active.get_lock():
+            active.value -= 1
+
+
+def _crashing_lock_holder(path, ready):
+    with evidence_file_lock(Path(path), timeout_seconds=2):
+        ready.put(True)
+        os._exit(17)
+
+
 def test_three_day_manifest_freezes_exact_repository_universe_without_registry_mutation():
     before = json.dumps(load_deferred_strategy_registry(), sort_keys=True)
 
@@ -71,6 +100,7 @@ def test_three_day_manifest_freezes_exact_repository_universe_without_registry_m
     assert tuple(entry.candidate_id for entry in manifest.entries) == manifest.candidate_ids
     assert all(entry.definition_hash for entry in manifest.entries)
     assert all(entry.required_feature_alternatives for entry in manifest.entries)
+    assert all(entry.deferred_pattern_provenance for entry in manifest.entries)
     assert {group for entry in manifest.entries for group, _ in entry.deferred_groups} == {
         "all", "alpha", "counter", "discovered", "exact", "metrics", "microstructure", "multi"
     }
@@ -79,6 +109,43 @@ def test_three_day_manifest_freezes_exact_repository_universe_without_registry_m
     }
     assert manifest == build_three_day_daily_candidate_manifest()
     assert json.dumps(load_deferred_strategy_registry(), sort_keys=True) == before
+
+
+def test_application_daily_service_imports_without_loading_executable_scripts():
+    completed = subprocess.run(
+        [sys.executable, "-c", "import sys; import src.application.services.daily_strategy_evidence; assert not any(n.startswith('scripts.') for n in sys.modules)"],
+        cwd=Path(__file__).resolve().parents[3], capture_output=True, text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_pure_manifest_builder_accepts_explicit_fake_catalog():
+    candidate = SimpleNamespace(
+        candidate_id="fake-candidate",
+        strategies=(SimpleNamespace(kind="mtf", params={}),),
+    )
+    groups = _all_groups(candidate)
+    registry = {"families": [
+        {"candidate_group": group, "status": "deferred", "candidate_id_patterns": ["fake-*"]}
+        for group in groups
+    ]}
+    catalog = DailyCandidateCatalog(
+        candidate_groups=groups,
+        deferred_registry=registry,
+        candidate_id_validator=lambda _ids: None,
+        candidate_payload_builder=lambda item: {"candidate_id": item.candidate_id, "strategies": [{"kind": "mtf", "params": {}}]},
+    )
+    manifest = build_pure_daily_manifest(catalog=catalog, expected_count=1)
+    assert manifest.candidate_ids == ("fake-candidate",)
+
+
+def test_canonical_wrapper_binds_the_scheduler_engine_contract():
+    from scripts.scheduler_driven_scalping_backtest import run_scheduler_driven_backtest
+
+    contract = canonical_daily_evidence_replay_contract()
+    assert contract.replay is run_scheduler_driven_backtest
+    assert contract.engine_version == BACKTEST_ENGINE_VERSION
+    assert contract.timeframe == Timeframe(1, "m")
 
 
 def test_manifest_collapses_identical_duplicates_and_rejects_conflicting_definitions():
@@ -111,6 +178,22 @@ def test_manifest_requires_exactly_all_eight_nonempty_public_groups(groups):
 def test_manifest_rejects_explicit_empty_group_map_instead_of_using_defaults():
     with pytest.raises(ValueError, match="eight|group"):
         build_three_day_daily_candidate_manifest(candidate_groups={}, expected_count=459)
+
+
+def test_feature_requirement_registry_is_exhaustive_for_all_459_candidates():
+    manifest = build_three_day_daily_candidate_manifest()
+    specs = [spec for entry in manifest.entries for spec in entry.candidate.strategies]
+    assert len(manifest.entries) == 459
+    assert specs
+    assert {spec.kind for spec in specs} <= SUPPORTED_STRATEGY_REQUIREMENT_KINDS
+    assert all(entry.required_feature_alternatives for entry in manifest.entries)
+
+
+def test_manifest_rejects_unknown_strategy_kind_fail_closed():
+    candidate = build_scheduler_candidates()[0]
+    unknown = replace(candidate, strategies=(StrategyCandidateSpec("unknown-kind", {}),))
+    with pytest.raises(ValueError, match="unsupported.*kind|unknown-kind"):
+        build_three_day_daily_candidate_manifest(candidate_groups=_all_groups(unknown), expected_count=1)
 
 
 def test_generic_daily_ledger_is_idempotent_and_rejects_conflicts(tmp_path: Path):
@@ -229,25 +312,92 @@ def test_public_ledger_load_waits_for_exclusive_writer_lock(tmp_path: Path):
         assert reader.result() == [_row()]
 
 
-def test_generic_daily_ledger_recovers_dead_lock_but_times_out_on_live_owner(tmp_path: Path):
+def test_leftover_lock_file_is_not_itself_a_lock(tmp_path: Path):
     path = tmp_path / "evidence.jsonl"
     lock_path = evidence_lock_path(path)
     lock_path.write_text(json.dumps({"pid": 2**30, "token": "dead", "created_at": 0}), encoding="utf-8")
     AppendOnlyEvidenceLedger(path, DAILY_EVIDENCE_KEY_FIELDS).append(_row())
-    assert not lock_path.exists()
-
-    lock_path.write_text(json.dumps({"pid": os.getpid(), "token": "live", "created_at": time.time()}), encoding="utf-8")
-    with pytest.raises(TimeoutError):
-        with evidence_file_lock(path, timeout_seconds=0.02, stale_seconds=0):
-            pass
-
-
-def test_generic_daily_lock_does_not_remove_replaced_owner_token(tmp_path: Path):
-    path = tmp_path / "evidence.jsonl"
-    lock_path = evidence_lock_path(path)
-    with evidence_file_lock(path):
-        lock_path.write_text(json.dumps({"pid": os.getpid(), "token": "replacement", "created_at": time.time()}), encoding="utf-8")
     assert lock_path.exists()
+
+
+def test_live_os_lock_times_out(tmp_path: Path):
+    path = tmp_path / "evidence.jsonl"
+    entered = threading.Event()
+    release = threading.Event()
+
+    def holder():
+        with evidence_file_lock(path):
+            entered.set()
+            release.wait(1)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    assert entered.wait(1)
+    with pytest.raises(TimeoutError):
+        with evidence_file_lock(path, timeout_seconds=0.02):
+            pass
+    release.set()
+    thread.join()
+
+
+def test_os_lock_serializes_processes_and_crash_releases_it(tmp_path: Path):
+    path = tmp_path / "evidence.jsonl"
+    context = multiprocessing.get_context("spawn")
+    active = context.Value("i", 0)
+    maximum = context.Value("i", 0)
+    ready = context.Queue()
+    release = context.Event()
+    processes = [context.Process(target=_lock_probe, args=(str(path), active, maximum, ready, release)) for _ in range(3)]
+    for process in processes:
+        process.start()
+    assert ready.get(timeout=5) is True
+    time.sleep(0.05)
+    assert maximum.value == 1
+    release.set()
+    for process in processes:
+        process.join(5)
+        assert process.exitcode == 0
+    assert maximum.value == 1
+
+    crashed = context.Process(target=_crashing_lock_holder, args=(str(path), ready))
+    crashed.start()
+    assert ready.get(timeout=5) is True
+    crashed.join(5)
+    assert crashed.exitcode == 17
+    with evidence_file_lock(path, timeout_seconds=1):
+        pass
+
+
+def test_incremental_ledger_parses_seed_once_and_only_external_tail(tmp_path: Path):
+    path = tmp_path / "evidence.jsonl"
+    seed = [_row(candidate_id=f"candidate-{index:05d}") for index in range(10000)]
+    path.write_bytes(b"".join((json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n").encode() for row in seed))
+    ledger = AppendOnlyEvidenceLedger(path, DAILY_EVIDENCE_KEY_FIELDS)
+    ledger.load()
+    seeded_bytes = path.stat().st_size
+    for index in range(1000):
+        assert ledger.append(_row(candidate_id=f"tail-{index:04d}"))
+    external = _row(candidate_id="external")
+    with path.open("ab") as output:
+        output.write((json.dumps(external, sort_keys=True, separators=(",", ":")) + "\n").encode())
+        output.flush()
+        os.fsync(output.fileno())
+    assert ledger.append(external) is False
+    assert ledger.full_parse_count == 1
+    assert ledger.parsed_byte_count <= path.stat().st_size + 4096
+    assert ledger.parsed_byte_count >= seeded_bytes
+
+
+def test_incremental_ledger_rebuilds_once_after_file_replacement(tmp_path: Path):
+    path = tmp_path / "evidence.jsonl"
+    ledger = AppendOnlyEvidenceLedger(path, DAILY_EVIDENCE_KEY_FIELDS)
+    ledger.append(_row(candidate_id="before"))
+    ledger.load()
+    replacement = tmp_path / "replacement.jsonl"
+    replacement.write_text(json.dumps(_row(candidate_id="after"), sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+    os.replace(replacement, path)
+    assert ledger.load() == [_row(candidate_id="after")]
+    assert ledger.full_parse_count == 1
 
 
 def _utc(value: str):
@@ -278,6 +428,7 @@ def _identity(manifest, market, provider=None):
         profile_id=PROFILE_ID, feature_schema_version=THREE_DAY_CHART_FEATURE_SCHEMA_VERSION,
         phase="Validation", phase_start_at=_utc("2025-07-10"),
         phase_end_at=_utc("2025-07-11"), model_artifact_hash="1" * 64,
+        candidate_manifest_hash=manifest.manifest_hash,
         candidate_universe_hash=manifest.candidate_universe_hash,
         ordered_candidate_definition_hashes=manifest.ordered_definition_hashes,
         market_data_hash=market_snapshot_hash(market),
@@ -316,6 +467,98 @@ def _zero_replay(candidate, manifest, start, provider=None):
         "feature_provenance": getattr(provider, "feature_provenance", {}) if provider else {},
         "future_feature_access_count": 0,
     }
+
+
+def test_pure_daily_run_uses_explicit_replay_contract(tmp_path):
+    candidate = replace(build_scheduler_candidates()[0], candle_limit=1)
+    manifest = build_three_day_daily_candidate_manifest(candidate_groups=_all_groups(candidate), expected_count=1)
+    start = _utc("2025-07-10")
+    market = _market(start - timedelta(minutes=1), 1441)
+    contract = DailyEvidenceReplayContract(
+        replay=lambda *_args, **_kwargs: _zero_replay(candidate, manifest, start),
+        engine_name="scheduler_driven",
+        engine_version=BACKTEST_ENGINE_VERSION,
+        cost_model={"venue": "binance_usd_m_futures", "fee_rate_per_side": str(FEE_RATE),
+                    "slippage_rate_per_side": str(SLIPPAGE_RATE), "funding_fee": "excluded"},
+        timeframe=Timeframe(1, "m"), timeframe_label="1m",
+        warmup_resolver=lambda _candidates, _provider: 1,
+    )
+    rows = run_pure_daily_evidence(
+        manifest=manifest, phase="Validation", outcome_start_at=start,
+        component_fingerprint="component-a", market=market,
+        market_feature_provider=None, run_identity=_identity(manifest, market),
+        ledger=AppendOnlyEvidenceLedger(tmp_path / "pure.jsonl", DAILY_EVIDENCE_KEY_FIELDS),
+        replay_contract=contract,
+    )
+    assert rows[0].availability_status == "available"
+
+
+def test_run_identity_rejects_manifest_requirement_or_provenance_drift_before_replay(tmp_path):
+    candidate = replace(build_scheduler_candidates()[0], candle_limit=1)
+    manifest = build_three_day_daily_candidate_manifest(candidate_groups=_all_groups(candidate), expected_count=1)
+    drifted_entry = replace(
+        manifest.entries[0],
+        required_feature_alternatives=((('synthetic_feature', ('fixture',)),),),
+        deferred_groups=(("all", "changed-provenance"),),
+    )
+    drifted = replace(
+        manifest,
+        entries=(drifted_entry,),
+        manifest_hash=candidate_definition_hash({"requirements_or_provenance": "changed"}),
+    )
+    start = _utc("2025-07-10")
+    market = _market(start - timedelta(minutes=1), 1441)
+    replayed = False
+
+    def replay(*_args, **_kwargs):
+        nonlocal replayed
+        replayed = True
+
+    with pytest.raises(ValueError, match="manifest"):
+        run_daily_strategy_evidence(
+            manifest=drifted, phase="Validation", outcome_start_at=start,
+            component_fingerprint="component-a", market=market,
+            market_feature_provider=None, run_identity=_identity(manifest, market),
+            ledger=AppendOnlyEvidenceLedger(tmp_path / "manifest.jsonl", DAILY_EVIDENCE_KEY_FIELDS),
+            replay_callable=replay,
+        )
+    assert replayed is False
+
+
+def test_provider_identity_mutation_during_replay_fails_without_ledger_append(tmp_path):
+    candidate = replace(build_scheduler_candidates()[0], candle_limit=1)
+    manifest = build_three_day_daily_candidate_manifest(candidate_groups=_all_groups(candidate), expected_count=1)
+    start = _utc("2025-07-10")
+    market = _market(start - timedelta(minutes=1), 1441)
+
+    class Provider:
+        feature_cache_hash = "a" * 64
+        feature_cache_schema_version = FEATURE_CACHE_SCHEMA_VERSION
+        feature_source_coverage = {}
+        feature_unavailable_counts = {}
+        feature_provenance = {"generation": 1}
+        required_warmup_candles = 1
+
+        def load_features(self, *_args):
+            return SimpleNamespace(get=lambda _name: None)
+
+    provider = Provider()
+    path = tmp_path / "mutating.jsonl"
+
+    def replay(*_args, **_kwargs):
+        payload = _zero_replay(candidate, manifest, start, provider)
+        provider.feature_provenance["generation"] = 2
+        return payload
+
+    with pytest.raises(ValueError, match="mutated|provider"):
+        run_daily_strategy_evidence(
+            manifest=manifest, phase="Validation", outcome_start_at=start,
+            component_fingerprint="component-a", market=market,
+            market_feature_provider=provider, run_identity=_identity(manifest, market, provider),
+            ledger=AppendOnlyEvidenceLedger(path, DAILY_EVIDENCE_KEY_FIELDS),
+            replay_callable=replay,
+        )
+    assert not path.exists()
 
 
 @pytest.mark.parametrize(
