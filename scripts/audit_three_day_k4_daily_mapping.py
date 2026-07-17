@@ -300,6 +300,165 @@ def _reconstruct_cluster_fit(
         return None
 
 
+def _reconstruct_failed_model_attempt(
+    report: Mapping[str, object], published_model: Mapping[str, object],
+    failures: list[str],
+) -> Mapping[str, object] | None:
+    sources = report.get("source_verification", {})
+    raw_root = sources.get("raw_kline_root") if isinstance(sources, Mapping) else None
+    if not raw_root:
+        failures.append("failed-model raw refit requires verified raw_kline_root")
+        return None
+    try:
+        _progress("reconstructing failed Cluster Fit model attempt")
+        provenance = published_model.get("source_provenance", ())
+        vectors, rebuilt_provenance = _load_cluster_fit_vectors(
+            Path(str(raw_root)), provenance
+        )
+        code_hash = hashlib.sha256(
+            (ROOT / "scripts" / "chart_regime_strategy_mapping.py").read_bytes()
+        ).hexdigest()
+        outcome = _fit_cluster_model(vectors, rebuilt_provenance, code_hash)
+        if getattr(outcome, "artifact", None) is not None:
+            failures.append("raw-refitted K4 unexpectedly passed frozen gates")
+            return None
+        rebuilt = getattr(outcome, "model_attempt", None)
+        if not isinstance(rebuilt, Mapping):
+            failures.append("raw-refitted K4 did not emit a model attempt")
+            return None
+        _same(rebuilt, published_model, failures, "raw-refitted failed K4 model attempt")
+        return rebuilt
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        failures.append(f"raw-refitted failed K4 reconstruction failed: {error}")
+        return None
+
+
+def _audit_failed_model_terminal(
+    *, report: Mapping[str, object], model: Mapping[str, object],
+    mapping: Mapping[str, object], inputs: AuditInputs,
+    input_bytes: Mapping[str, bytes | None], failures: list[str],
+) -> dict[str, object]:
+    if report.get("status") != "failed-model-cash":
+        failures.append("failed-model terminal status is invalid")
+    if report.get("test_comparisons") != {}:
+        failures.append("failed-model terminal must not contain Test comparisons")
+    attempt_hash = model.get("attempt_hash")
+    unhashed_attempt = {key: value for key, value in model.items() if key != "attempt_hash"}
+    if attempt_hash != _hash(unhashed_attempt):
+        failures.append("failed-model attempt hash mismatch")
+    _same(model, report.get("model_attempt"), failures, "report/model attempt binding")
+    if report.get("model_attempt_hash") != attempt_hash:
+        failures.append("report model attempt hash mismatch")
+    if model.get("schema_version") != "three-day-k4-model-attempt-v1":
+        failures.append("failed-model attempt schema is invalid")
+    if model.get("status") != "failed-model-gates":
+        failures.append("failed-model attempt status is invalid")
+    failed_names = model.get("failed_gate_names")
+    gates = model.get("model_gates")
+    if (
+        not isinstance(failed_names, list) or not failed_names
+        or failed_names != sorted(set(failed_names))
+        or not isinstance(gates, Mapping) or gates.get("passed") is not False
+    ):
+        failures.append("failed-model gate result is invalid")
+    elif any(
+        name not in gates or f"{name}_threshold" not in gates
+        or gates.get(f"{name}_passed") is not False
+        for name in failed_names
+    ):
+        failures.append("failed-model gate metrics/thresholds are incomplete")
+    if report.get("rejection_reasons") != failed_names:
+        failures.append("failed-model rejection reasons mismatch")
+
+    expected_access = {
+        "candidate_manifest_frozen": False,
+        "evidence_ledger_opened": False,
+        "mapping_built": False,
+        "test_loader_called": False,
+    }
+    if report.get("pipeline_access") != expected_access:
+        failures.append("failed-model pipeline access proof is invalid")
+    forbidden = {
+        "candidate_manifest", "evidence", "strict_mapping", "final_mapping",
+        "pre_test_freeze", "pre_test_freeze_hash", "global_fixed_baseline",
+        "events", "trades", "equity_curve",
+    }
+    present = sorted(forbidden.intersection(report))
+    if present:
+        failures.append(f"failed-model report contains post-gate material: {present}")
+    leakage = report.get("leakage_audit")
+    if not isinstance(leakage, Mapping) or leakage.get("test_loader_called") is not False or leakage.get("first_test_read") is not None:
+        failures.append("failed-model Test non-read proof is invalid")
+
+    cash = report.get("cash_only_mapping")
+    _same(mapping, cash, failures, "report/cash sentinel binding")
+    mapping_hash = mapping.get("artifact_hash")
+    unhashed_mapping = {key: value for key, value in mapping.items() if key != "artifact_hash"}
+    if mapping_hash != _hash(unhashed_mapping):
+        failures.append("cash sentinel artifact hash mismatch")
+    if (
+        mapping.get("schema_version") != "three-day-k4-cash-sentinel-v1"
+        or mapping.get("status") != "cash-only-model-gate-failure"
+        or mapping.get("model_attempt_hash") != attempt_hash
+        or mapping.get("rejection_reasons") != failed_names
+    ):
+        failures.append("cash sentinel model-gate binding is invalid")
+
+    raw_count = _audit_raw_inputs(model, report, failures)
+    rebuilt = _reconstruct_failed_model_attempt(report, model, failures)
+    if rebuilt is None:
+        failures.append("failed-model attempt could not be independently reconstructed")
+
+    sources = report.get("source_verification", {})
+    reported_base = sources.get("evidence_rows_path") if isinstance(sources, Mapping) else None
+    ledger_base = inputs.evidence_rows_path or (Path(str(reported_base)) if reported_base else None)
+    if ledger_base is None:
+        failures.append("failed-model evidence ledger base is missing")
+    else:
+        for phase in ("mapping_fit", "validation"):
+            if _phase_ledger_override(ledger_base, phase).exists():
+                failures.append(f"failed-model terminal unexpectedly has {phase} evidence ledger")
+
+    publication = report.get("publication")
+    from scripts.chart_regime_strategy_mapping import (
+        THREE_DAY_PUBLICATION_HASH_DEFINITION,
+    )
+    expected_keys = {
+        "hash_definition", "report_payload_hash", "model_byte_hash",
+        "mapping_byte_hash", "markdown_byte_hash",
+    }
+    if not isinstance(publication, Mapping) or set(publication) != expected_keys:
+        failures.append("report publication output binding is invalid")
+        publication = {}
+    if publication.get("hash_definition") != THREE_DAY_PUBLICATION_HASH_DEFINITION:
+        failures.append("report publication hash_definition is invalid")
+    payload = {key: value for key, value in report.items() if key != "publication"}
+    if publication.get("report_payload_hash") != _hash(payload):
+        failures.append("report publication payload hash mismatch")
+    for label in ("model", "mapping", "markdown"):
+        raw = input_bytes.get(label)
+        if raw is not None and publication.get(f"{label}_byte_hash") != hashlib.sha256(raw).hexdigest():
+            failures.append(f"{label} report output hash mismatch")
+
+    return {
+        "schema_version": "three-day-k4-daily-independent-audit-v1",
+        "passed": not failures,
+        "checked_counts": {
+            "raw_inputs": raw_count, "candidates": 0, "evidence_rows": 0,
+            "test_transitions": 0, "test_trades": 0,
+        },
+        "hashes": {
+            "report_file_hash": hashlib.sha256(input_bytes["report"]).hexdigest() if input_bytes["report"] is not None else None,
+            "model_file_hash": hashlib.sha256(input_bytes["model"]).hexdigest() if input_bytes["model"] is not None else None,
+            "mapping_file_hash": hashlib.sha256(input_bytes["mapping"]).hexdigest() if input_bytes["mapping"] is not None else None,
+            "markdown_file_hash": hashlib.sha256(input_bytes["markdown"]).hexdigest() if input_bytes["markdown"] is not None else None,
+            "pre_test_freeze_hash": None,
+            "model_artifact_hash": None,
+            "mapping_artifact_hash": mapping_hash,
+            "model_attempt_hash": attempt_hash,
+        },
+        "failures": failures,
+    }
 def _audit_manifest(
     report: Mapping[str, object], factory: Callable[[], Mapping[str, object]], failures: list[str]
 ) -> Mapping[str, object]:
@@ -1192,6 +1351,12 @@ def audit_three_day_k4_daily_mapping(
     mapping = _read_canonical_json_bytes(
         input_bytes["mapping"] or b"", failures, "mapping"
     )
+
+    if report.get("terminal_stage") == "model_gate_failed":
+        return _audit_failed_model_terminal(
+            report=report, model=model, mapping=mapping, inputs=inputs,
+            input_bytes=input_bytes, failures=failures,
+        )
 
     parsed_model = _audit_model(
         report.get("model_artifact", {}) if isinstance(report.get("model_artifact"), Mapping) else {},

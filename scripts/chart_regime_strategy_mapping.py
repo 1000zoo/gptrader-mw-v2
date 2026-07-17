@@ -364,6 +364,43 @@ class ThreeDayPublication:
 
 
 def render_three_day_markdown(report: Mapping[str, object]) -> str:
+    if report.get("terminal_stage") == "model_gate_failed":
+        attempt = report.get("model_attempt", {})
+        gates = attempt.get("model_gates", {}) if isinstance(attempt, Mapping) else {}
+        failed = attempt.get("failed_gate_names", ()) if isinstance(attempt, Mapping) else ()
+        lines = [
+            "# BTCUSDT three-day K4 daily strategy mapping",
+            "",
+            "The frozen K4 model gates failed, so the experiment stopped at cash before candidate, evidence, mapping, or Test access.",
+            "",
+            f"- Status: `{report.get('status')}`",
+            f"- Model attempt: `{attempt.get('attempt_hash', 'missing') if isinstance(attempt, Mapping) else 'missing'}`",
+            f"- Cluster Fit anchors: `{attempt.get('fit_input_anchor_count', 'missing') if isinstance(attempt, Mapping) else 'missing'}`",
+            f"- Failed gates: `{', '.join(str(item) for item in failed)}`",
+            "",
+            "## Fixed model gates",
+            "",
+            "| Gate | Value | Threshold | Passed |",
+            "|---|---:|---:|---:|",
+        ]
+        for name in failed if isinstance(failed, (tuple, list)) else ():
+            threshold_name = f"{name}_threshold"
+            lines.append(
+                f"| `{name}` | {gates.get(name, 'missing')} | "
+                f"{gates.get(threshold_name, 'missing')} | {gates.get(f'{name}_passed', False)} |"
+            )
+        lines.extend((
+            "", "## Leakage and execution boundary", "",
+            "- Candidate manifest frozen: `false`",
+            "- Evidence ledger opened: `false`",
+            "- Strategy mapping built: `false`",
+            "- Untouched Test loaded: `false`",
+            "- Resulting action: `cash-only`",
+            "",
+            "No strategy performance or backtest result exists for this stopped run.",
+            "",
+        ))
+        return "\n".join(lines)
     mapping = report.get("strict_mapping", {})
     comparisons = report.get("test_comparisons", {})
     lines = [
@@ -1379,19 +1416,65 @@ def build_three_day_experiment_dependencies(args) -> ThreeDayExperimentDependenc
 
 
 def _publish_model_failure(args, failure: ThreeDayModelGateFailure) -> None:
-    reason = list(failure.outcome.rejection_reasons) or ["fixed-k4-model-gates"]
+    attempt = failure.outcome.model_attempt
+    if not isinstance(attempt, Mapping):
+        raise ValueError("failed K4 publication requires a canonical model attempt")
+    attempt_payload = dict(attempt)
+    supplied_attempt_hash = attempt_payload.pop("attempt_hash", None)
+    if supplied_attempt_hash != _canonical_hash(attempt_payload):
+        raise ValueError("failed K4 model attempt hash is invalid")
+    reason = list(failure.outcome.rejection_reasons)
+    if reason != list(attempt.get("failed_gate_names", ())):
+        raise ValueError("failed K4 rejection reasons do not match model attempt")
+    mapping_payload = {
+        "schema_version": "three-day-k4-cash-sentinel-v1",
+        "status": "cash-only-model-gate-failure",
+        "model_attempt_hash": supplied_attempt_hash,
+        "rejection_reasons": reason,
+    }
+    mapping = {
+        **mapping_payload,
+        "artifact_hash": _canonical_hash(mapping_payload),
+    }
     report = {
         "schema_version": "three-day-daily-k4-report-v1",
-        "status": "failed-model-cash", "rejection_reasons": reason,
+        "status": "failed-model-cash", "terminal_stage": "model_gate_failed",
+        "rejection_reasons": reason,
+        "source_verification": {
+            "raw_kline_root": Path(args.raw_kline_root).as_posix(),
+            "raw_inputs": list(attempt["source_provenance"]),
+            "fit_input_vector_hash": attempt["fit_input_vector_hash"],
+            "evidence_rows_path": Path(args.evidence_rows_path).as_posix(),
+        },
+        "model_attempt": dict(attempt),
+        "model_attempt_hash": supplied_attempt_hash,
+        "cash_only_mapping": mapping,
+        "pipeline_access": {
+            "candidate_manifest_frozen": False,
+            "evidence_ledger_opened": False,
+            "mapping_built": False,
+            "test_loader_called": False,
+        },
         "test_comparisons": {},
-        "leakage_audit": {"test_loader_called": False, "adoption_status": "inconclusive"},
+        "leakage_audit": {
+            "test_loader_called": False, "first_test_read": None,
+            "adoption_status": "inconclusive", "test_policy": "strict",
+        },
     }
-    model = (json.dumps({"kind": "cash_only", "reason": reason}, sort_keys=True) + "\n").encode()
-    mapping = (json.dumps({"kind": "cash_only", "reason": reason}, sort_keys=True) + "\n").encode()
-    rendered = render_three_day_publication(report=report, model_json=model, mapping_json=mapping)
+    model_bytes = (
+        json.dumps(_canonicalize_report(attempt), sort_keys=True, separators=(",", ":"), allow_nan=False)
+        + "\n"
+    ).encode("utf-8")
+    mapping_bytes = (
+        json.dumps(_canonicalize_report(mapping), sort_keys=True, separators=(",", ":"), allow_nan=False)
+        + "\n"
+    ).encode("utf-8")
+    rendered = render_three_day_publication(
+        report=report, model_json=model_bytes, mapping_json=mapping_bytes
+    )
     write_three_day_publication_atomic(
         report_json=rendered.report_json, report_markdown=rendered.report_markdown,
-        model_json=model, mapping_json=mapping,
+        model_json=model_bytes, mapping_json=mapping_bytes,
         output_json=args.output_json, output_markdown=args.output_markdown,
         output_model=args.output_model, output_mapping=args.output_mapping,
     )
@@ -2412,6 +2495,85 @@ class ThreeDayK4FitOutcome:
     status: str
     artifact: ThreeDayK4ModelArtifact | None
     rejection_reasons: tuple[str, ...] = ()
+    model_attempt: Mapping[str, object] | None = None
+
+
+def _failed_three_day_k4_model_attempt(
+    *, primary, gates: Mapping[str, object], fit_vectors, source_provenance,
+    code_provenance_hash: str, profile: ThreeDayDailyResearchProfile,
+) -> dict[str, object]:
+    checks = {
+        "all_components_represented": bool(gates["all_components_represented"]),
+        "all_chronological_blocks_represented": bool(
+            gates["all_chronological_blocks_represented"]
+        ),
+        "minimum_adjusted_rand_index": (
+            float(gates["minimum_adjusted_rand_index"])
+            >= float(gates["minimum_adjusted_rand_index_threshold"])
+        ),
+        "minimum_normalized_mutual_information": (
+            float(gates["minimum_normalized_mutual_information"])
+            >= float(gates["minimum_normalized_mutual_information_threshold"])
+        ),
+        "maximum_matched_centroid_distance": (
+            float(gates["maximum_matched_centroid_distance"])
+            <= float(gates["maximum_matched_centroid_distance_threshold"])
+        ),
+        "maximum_prevalence_drift": (
+            float(gates["maximum_prevalence_drift"])
+            <= float(gates["maximum_prevalence_drift_threshold"])
+        ),
+        "maximum_low_confidence_rate": bool(gates["nondegenerate_confidence"]),
+        "maximum_distance_exceedance_rate": bool(gates["distance_result"]),
+    }
+    failed = sorted(name for name, passed in checks.items() if not passed)
+    enriched_gates = dict(gates)
+    enriched_gates.update({
+        "all_components_represented_threshold": True,
+        "all_chronological_blocks_represented_threshold": True,
+        "maximum_low_confidence_rate": gates["low_confidence_rate"],
+        "maximum_distance_exceedance_rate": gates["distance_exceedance_rate"],
+    })
+    enriched_gates.update({f"{name}_passed": passed for name, passed in checks.items()})
+    vector_hash = _three_day_vector_hash(fit_vectors)
+    payload = {
+        "schema_version": "three-day-k4-model-attempt-v1",
+        "status": "failed-model-gates",
+        "profile_id": profile.profile_id,
+        "model_config": {
+            "model_type": "gmm", "cluster_count": 4,
+            "covariance_type": "diag", "random_seed": profile.random_seed,
+            "regularization": profile.regularization,
+        },
+        "fit_interval": {
+            "start_at": profile.fold.cluster_fit.start_at.isoformat(),
+            "end_at": profile.fold.cluster_fit.end_at.isoformat(),
+        },
+        "fit_input_anchor_count": len(fit_vectors),
+        "first_usable_anchor_at": fit_vectors[0].anchor_at.isoformat(),
+        "last_usable_anchor_at": fit_vectors[-1].anchor_at.isoformat(),
+        "fit_input_vector_hash": vector_hash,
+        "feature_names": list(primary.feature_names),
+        "source_provenance": list(source_provenance),
+        "source_provenance_hash": _canonical_hash(list(source_provenance)),
+        "code_provenance_hash": code_provenance_hash,
+        "model_parameters": {
+            "converged": primary.converged,
+            "iterations": primary.iterations,
+            "lower_bound": primary.lower_bound,
+            "lower_bounds": list(primary.lower_bounds),
+            "upper_bounds": list(primary.upper_bounds),
+            "medians": list(primary.medians),
+            "scales": list(primary.scales),
+            "weights": list(primary.weights),
+            "means": [list(row) for row in primary.means],
+            "covariances": [list(row) for row in primary.covariances],
+            "component_fingerprints": list(primary.fingerprints),
+        },
+        "model_gates": enriched_gates,
+        "failed_gate_names": failed,
+    }
+    return {**payload, "attempt_hash": _canonical_hash(payload)}
 
 
 def _three_day_vector_hash(vectors: tuple[ThreeDayChartFeatureVector, ...]) -> str:
@@ -2623,7 +2785,15 @@ def fit_fold_local_three_day_k4_model(
             "passed": passed,
         }
         if not passed:
-            return ThreeDayK4FitOutcome("failed-model-cash", None, ("fixed-k4-model-gates",))
+            attempt = _failed_three_day_k4_model_attempt(
+                primary=primary, gates=gates, fit_vectors=fit_vectors,
+                source_provenance=validated_provenance,
+                code_provenance_hash=code_provenance_hash, profile=profile,
+            )
+            return ThreeDayK4FitOutcome(
+                "failed-model-cash", None,
+                tuple(attempt["failed_gate_names"]), attempt,
+            )
         vector_hash = _three_day_vector_hash(fit_vectors)
         artifact = ThreeDayK4ModelArtifact.from_fit(
             primary,

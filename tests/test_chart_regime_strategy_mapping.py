@@ -645,6 +645,71 @@ def test_three_day_model_gate_failure_publishes_cash_without_test(monkeypatch) -
     assert calls == ["verify", "cash-report"]
 
 
+def test_model_gate_failure_publication_is_explicit_hash_bound_and_cash_only(tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    attempt_payload = {
+        "schema_version": "three-day-k4-model-attempt-v1",
+        "status": "failed-model-gates",
+        "profile_id": "three-day-daily-k4-v1",
+        "source_provenance": [{
+            "url": "https://example.invalid/BTCUSDT-1m-2021-01.zip",
+            "sha256": "a" * 64, "expected_sha256": "a" * 64,
+            "bytes": 1, "member_identity": "BTCUSDT-1m-2021-01.csv",
+        }],
+        "fit_input_vector_hash": "b" * 64,
+        "fit_input_anchor_count": 1641,
+        "code_provenance_hash": "c" * 64,
+        "model_gates": {
+            "maximum_matched_centroid_distance": 2.35,
+            "maximum_matched_centroid_distance_threshold": 0.5,
+            "maximum_matched_centroid_distance_passed": False,
+            "distance_exceedance_rate": 0.046,
+            "maximum_distance_exceedance_rate_threshold": 0.02,
+            "maximum_distance_exceedance_rate_passed": False,
+            "passed": False,
+        },
+        "failed_gate_names": [
+            "maximum_distance_exceedance_rate",
+            "maximum_matched_centroid_distance",
+        ],
+    }
+    attempt = {
+        **attempt_payload,
+        "attempt_hash": module._canonical_hash(attempt_payload),
+    }
+    args = SimpleNamespace(
+        raw_kline_root=tmp_path / "raw", evidence_rows_path=tmp_path / "evidence.jsonl",
+        output_json=tmp_path / "report.json", output_markdown=tmp_path / "report.md",
+        output_model=tmp_path / "model.json", output_mapping=tmp_path / "mapping.json",
+    )
+    outcome = module.ThreeDayK4FitOutcome(
+        "failed-model-cash", None, tuple(attempt["failed_gate_names"]), attempt,
+    )
+
+    module._publish_model_failure(args, module.ThreeDayModelGateFailure(outcome))
+
+    report = json.loads(args.output_json.read_bytes())
+    model = json.loads(args.output_model.read_bytes())
+    mapping = json.loads(args.output_mapping.read_bytes())
+    assert model == attempt
+    assert report["terminal_stage"] == "model_gate_failed"
+    assert report["model_attempt"] == attempt
+    assert report["source_verification"]["raw_inputs"] == attempt["source_provenance"]
+    assert report["pipeline_access"] == {
+        "candidate_manifest_frozen": False,
+        "evidence_ledger_opened": False,
+        "mapping_built": False,
+        "test_loader_called": False,
+    }
+    assert mapping["status"] == "cash-only-model-gate-failure"
+    assert mapping["model_attempt_hash"] == attempt["attempt_hash"]
+    assert mapping["artifact_hash"] == module._canonical_hash({
+        key: value for key, value in mapping.items() if key != "artifact_hash"
+    })
+    assert b"maximum_matched_centroid_distance" in args.output_markdown.read_bytes()
+
+
 def test_concrete_model_gate_failure_never_expands_candidate_factories(monkeypatch, tmp_path) -> None:
     import scripts.chart_regime_strategy_mapping as module
 

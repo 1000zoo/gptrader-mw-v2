@@ -601,6 +601,100 @@ def test_auditor_accepts_actual_task7_publication_envelope_and_byte_formats(tmp_
     assert result["passed"] is True, result["failures"]
 
 
+def test_auditor_independently_accepts_exact_model_gate_terminal_branch(
+    monkeypatch, tmp_path
+) -> None:
+    import scripts.audit_three_day_k4_daily_mapping as audit_module
+    import scripts.chart_regime_strategy_mapping as experiment
+
+    attempt_payload = {
+        "schema_version": "three-day-k4-model-attempt-v1",
+        "status": "failed-model-gates",
+        "profile_id": "three-day-daily-k4-v1",
+        "source_provenance": [], "fit_input_vector_hash": "b" * 64,
+        "fit_input_anchor_count": 1641, "code_provenance_hash": "c" * 64,
+        "model_gates": {
+            "maximum_matched_centroid_distance": 2.35,
+            "maximum_matched_centroid_distance_threshold": 0.5,
+            "maximum_matched_centroid_distance_passed": False,
+            "passed": False,
+        },
+        "failed_gate_names": ["maximum_matched_centroid_distance"],
+    }
+    attempt = {
+        **attempt_payload, "attempt_hash": experiment._canonical_hash(attempt_payload),
+    }
+    args = SimpleNamespace(
+        raw_kline_root=tmp_path / "raw", evidence_rows_path=tmp_path / "evidence.jsonl",
+        output_json=tmp_path / "report.json", output_markdown=tmp_path / "report.md",
+        output_model=tmp_path / "model.json", output_mapping=tmp_path / "mapping.json",
+    )
+    experiment._publish_model_failure(
+        args,
+        experiment.ThreeDayModelGateFailure(experiment.ThreeDayK4FitOutcome(
+            "failed-model-cash", None, ("maximum_matched_centroid_distance",), attempt,
+        )),
+    )
+    monkeypatch.setattr(
+        audit_module, "_reconstruct_failed_model_attempt",
+        lambda report, published, failures: copy.deepcopy(attempt),
+        raising=False,
+    )
+
+    result = audit_three_day_k4_daily_mapping(
+        AuditInputs(args.output_json, args.output_markdown, args.output_model, args.output_mapping),
+        candidate_manifest_factory=lambda: (_ for _ in ()).throw(
+            AssertionError("candidate factory must remain unread")
+        ),
+    )
+
+    assert result["passed"] is True, result["failures"]
+    assert result["checked_counts"] == {
+        "raw_inputs": 0, "candidates": 0, "evidence_rows": 0,
+        "test_transitions": 0, "test_trades": 0,
+    }
+    assert result["hashes"]["model_attempt_hash"] == attempt["attempt_hash"]
+
+    unexpected_ledger = audit_module._phase_ledger_override(
+        args.evidence_rows_path, "mapping_fit"
+    )
+    unexpected_ledger.parent.mkdir(parents=True, exist_ok=True)
+    unexpected_ledger.write_bytes(b"{}\n")
+    with_ledger = audit_three_day_k4_daily_mapping(
+        AuditInputs(args.output_json, args.output_markdown, args.output_model, args.output_mapping),
+        candidate_manifest_factory=lambda: {},
+    )
+    assert with_ledger["passed"] is False
+    assert any("unexpectedly has mapping_fit evidence ledger" in item for item in with_ledger["failures"])
+
+
+def test_failed_model_refit_rejects_self_consistent_attempt_forgery(
+    monkeypatch, tmp_path
+) -> None:
+    import scripts.audit_three_day_k4_daily_mapping as module
+
+    original = {"attempt_hash": "a" * 64, "source_provenance": []}
+    forged = {**original, "attempt_hash": "b" * 64}
+    monkeypatch.setattr(
+        module, "_load_cluster_fit_vectors", lambda *args: ((object(),), ({},))
+    )
+
+    class Outcome:
+        artifact = None
+        model_attempt = original
+
+    monkeypatch.setattr(module, "_fit_cluster_model", lambda *args: Outcome())
+    failures: list[str] = []
+
+    rebuilt = module._reconstruct_failed_model_attempt(
+        {"source_verification": {"raw_kline_root": str(tmp_path)}},
+        forged, failures,
+    )
+
+    assert rebuilt == original
+    assert any("raw-refitted failed K4 model attempt" in item for item in failures)
+
+
 @pytest.mark.parametrize("mutation", ("missing", "ambiguous", "missing_key", "extra_key"))
 def test_output_binding_is_exact_and_fail_closed(tmp_path, mutation) -> None:
     inputs, report = _write_bundle(tmp_path)
