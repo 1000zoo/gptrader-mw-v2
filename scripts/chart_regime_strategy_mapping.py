@@ -112,7 +112,9 @@ from src.application.services.daily_strategy_evidence import (
     candidate_feature_requirements,
     build_three_day_daily_candidate_manifest as _build_daily_candidate_manifest,
     run_daily_strategy_evidence as _run_daily_strategy_evidence,
-    market_snapshot_hash,
+)
+from src.application.services.verified_market_timeline import (
+    VerifiedPhaseMarketTimeline,
 )
 from src.domain.market import Candle, Timeframe
 from src.domain.market_feature import MarketFeatureSet, MarketFeatureValue
@@ -488,6 +490,12 @@ def render_three_day_markdown(report: Mapping[str, object]) -> str:
     return "\n".join(lines)
 
 
+THREE_DAY_PUBLICATION_HASH_DEFINITION = (
+    "report_payload_hash covers the canonical report excluding publication metadata; "
+    "byte hashes cover the exact companion file bytes"
+)
+
+
 def render_three_day_publication(
     *, report: Mapping[str, object], model_json: bytes, mapping_json: bytes
 ) -> ThreeDayPublication:
@@ -499,10 +507,7 @@ def render_three_day_publication(
     markdown = render_three_day_markdown(normalized).encode("utf-8")
     envelope = dict(normalized)
     envelope["publication"] = {
-        "hash_definition": (
-            "report_payload_hash covers the canonical report excluding publication metadata; "
-            "byte hashes cover the exact companion file bytes"
-        ),
+        "hash_definition": THREE_DAY_PUBLICATION_HASH_DEFINITION,
         "report_payload_hash": _canonical_hash(normalized),
         "model_byte_hash": hashlib.sha256(model_json).hexdigest(),
         "mapping_byte_hash": hashlib.sha256(mapping_json).hexdigest(),
@@ -975,6 +980,27 @@ def _load_exact_minute_market(
     return MarketSnapshot(tuple(candles)), archives
 
 
+def _build_verified_phase_daily_slices(market, calendar, warmup):
+    timeline = VerifiedPhaseMarketTimeline.from_market(market)
+    return timeline, tuple(
+        timeline.daily_slice(day, warmup_minutes=warmup) for day in calendar
+    )
+
+
+def _run_verified_phase_daily_evidence(
+    *, manifest, phase, calendar, assignments, daily_markets,
+    provider, identity, ledger,
+):
+    rows = []
+    for day, component, daily_market in zip(calendar, assignments, daily_markets):
+        rows.extend(run_daily_strategy_evidence(
+            manifest=manifest, phase=phase, outcome_start_at=day,
+            component_fingerprint=component, market=daily_market,
+            market_feature_provider=provider, run_identity=identity, ledger=ledger,
+        ))
+    return tuple(rows)
+
+
 def load_three_day_phase_evidence(
     args: argparse.Namespace,
     *,
@@ -1000,6 +1026,9 @@ def load_three_day_phase_evidence(
         symbol=args.symbol, raw_kline_root=Path(args.raw_kline_root),
         start_at=market_start, end_at=interval.end_at,
     )
+    verified_timeline, daily_markets = _build_verified_phase_daily_slices(
+        market, calendar, warmup
+    )
     provider, cache_provenance = _select_feature_cache(
         args.feature_cache_root, required_start=market_start,
         required_end=interval.end_at, verify_full_file=True,
@@ -1017,7 +1046,7 @@ def load_three_day_phase_evidence(
         candidate_manifest_hash=candidate_manifest.manifest_hash,
         candidate_universe_hash=candidate_manifest.candidate_universe_hash,
         ordered_candidate_definition_hashes=candidate_manifest.ordered_definition_hashes,
-        market_data_hash=market_snapshot_hash(market),
+        market_data_hash=verified_timeline.market_data_hash,
         feature_cache_hash=getattr(provider, "feature_cache_hash", None),
         feature_config_hash=feature_provider_config_hash(provider),
         feature_cache_schema_version=str(getattr(provider, "feature_cache_schema_version", "none-v1")),
@@ -1034,14 +1063,11 @@ def load_three_day_phase_evidence(
     if ledger_path.exists() and not args.resume:
         raise ValueError(f"evidence ledger exists; use --resume: {ledger_path}")
     ledger = AppendOnlyEvidenceLedger(ledger_path, DAILY_EVIDENCE_KEY_FIELDS)
-    rows = []
-    for day, component in zip(calendar, assignments):
-        rows.extend(run_daily_strategy_evidence(
-            manifest=candidate_manifest, phase=phase,
-            outcome_start_at=day, component_fingerprint=component,
-            market=market, market_feature_provider=provider,
-            run_identity=identity, ledger=ledger,
-        ))
+    rows = _run_verified_phase_daily_evidence(
+        manifest=candidate_manifest, phase=phase, calendar=calendar,
+        assignments=assignments, daily_markets=daily_markets,
+        provider=provider, identity=identity, ledger=ledger,
+    )
     ledger_hash = hashlib.sha256(ledger_path.read_bytes()).hexdigest()
     close = getattr(provider, "close", None)
     if callable(close):

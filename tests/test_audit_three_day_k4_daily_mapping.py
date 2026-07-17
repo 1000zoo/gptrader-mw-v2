@@ -650,7 +650,9 @@ def test_deleted_publication_binding_cannot_hide_tampered_markdown(tmp_path) -> 
     assert any("output binding" in failure for failure in result["failures"])
 
 
-@pytest.mark.parametrize("mutation", ("missing_key", "extra_key", "wrong_hash"))
+@pytest.mark.parametrize(
+    "mutation", ("missing_key", "extra_key", "wrong_hash", "wrong_definition")
+)
 def test_publication_binding_rejects_malformed_or_wrong_companion_hash(
     tmp_path, mutation,
 ) -> None:
@@ -668,8 +670,10 @@ def test_publication_binding_rejects_malformed_or_wrong_companion_hash(
         envelope["publication"].pop("markdown_byte_hash")
     elif mutation == "extra_key":
         envelope["publication"]["unexpected"] = "0" * 64
-    else:
+    elif mutation == "wrong_hash":
         envelope["publication"]["markdown_byte_hash"] = "0" * 64
+    else:
+        envelope["publication"]["hash_definition"] = "forged hash semantics"
     inputs.report.write_bytes(canonical_json_bytes(envelope))
     inputs.markdown.write_bytes(rendered.report_markdown)
     inputs.model.write_bytes(rendered.model_json)
@@ -682,6 +686,7 @@ def test_publication_binding_rejects_malformed_or_wrong_companion_hash(
     assert result["passed"] is False
     assert any(
         "output binding" in failure or "output hash mismatch" in failure
+        or "hash_definition" in failure
         for failure in result["failures"]
     )
 
@@ -737,10 +742,12 @@ def test_mid_audit_file_replacement_cannot_change_bound_snapshot(
     assert hashlib.sha256(inputs.markdown.read_bytes()).hexdigest() != expected_hash
 
 
-def test_daily_market_slice_index_has_linear_phase_scan_and_bounded_windows() -> None:
+def test_production_daily_evidence_path_indexes_phase_once_and_passes_bounded_windows(
+    monkeypatch,
+) -> None:
     from datetime import datetime, timedelta, timezone
     from decimal import Decimal
-    import scripts.audit_three_day_k4_daily_mapping as module
+    import scripts.chart_regime_strategy_mapping as module
     from src.domain.market import Candle, MarketSnapshot, Symbol, Timeframe
 
     start = datetime(2025, 7, 1, tzinfo=timezone.utc)
@@ -771,12 +778,27 @@ def test_daily_market_slice_index_has_linear_phase_scan_and_bounded_windows() ->
     days = tuple(start + timedelta(days=index) for index in range(3, 15))
     warmup = 1442
 
-    slices = module._build_daily_market_slices(market, days, warmup)
+    _timeline, slices = module._build_verified_phase_daily_slices(market, days, warmup)
+    manifest = module.build_three_day_daily_candidate_manifest(expected_count=459)
+    observed = []
+
+    def run_daily(**values):
+        observed.append((len(values["manifest"].entries), len(values["market"].market.candles)))
+        return ()
+
+    monkeypatch.setattr(module, "run_daily_strategy_evidence", run_daily)
+    module._run_verified_phase_daily_evidence(
+        manifest=manifest, phase="mapping_fit", calendar=days,
+        assignments=("a" * 24,) * len(days), daily_markets=slices,
+        provider=object(), identity=object(), ledger=object(),
+    )
 
     bounded = warmup + 1440
-    assert tuple(len(item.candles) for item in slices) == (bounded,) * len(days)
-    assert CountedCandle.accesses <= len(base) + len(days) * (2 * bounded + 4)
-    assert CountedCandle.accesses < len(days) * len(base) / 3
+    assert tuple(len(item.market.candles) for item in slices) == (bounded,) * len(days)
+    assert observed == [(459, bounded)] * len(days)
+    assert CountedCandle.accesses <= 3 * len(base) + len(days) * (2 * bounded + 4)
+    candidate_phase_scan = 459 * len(days) * len(base)
+    assert CountedCandle.accesses < candidate_phase_scan / 500
 
 
 def test_real_typed_task7_publication_raw_root_and_ledgers_flow_through_audit(

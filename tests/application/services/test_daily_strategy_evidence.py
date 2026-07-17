@@ -46,6 +46,9 @@ from src.application.services.daily_strategy_evidence import (
     build_three_day_daily_candidate_manifest as build_pure_daily_manifest,
     run_daily_strategy_evidence as run_pure_daily_evidence,
 )
+from src.application.services.verified_market_timeline import (
+    VerifiedPhaseMarketTimeline,
+)
 from scripts.chart_regime_strategy_mapping import (
     build_three_day_daily_candidate_manifest,
     canonical_daily_evidence_replay_contract,
@@ -491,6 +494,87 @@ def test_pure_daily_run_uses_explicit_replay_contract(tmp_path):
         replay_contract=contract,
     )
     assert rows[0].availability_status == "available"
+
+
+def test_pure_daily_run_accepts_and_revalidates_verified_daily_slice(tmp_path):
+    candidate = replace(build_scheduler_candidates()[0], candle_limit=1)
+    manifest = build_three_day_daily_candidate_manifest(
+        candidate_groups=_all_groups(candidate), expected_count=1
+    )
+    start = _utc("2025-07-10")
+    source = _market(start - timedelta(minutes=1), 1441)
+    daily = VerifiedPhaseMarketTimeline.from_market(source).daily_slice(
+        start, warmup_minutes=1
+    )
+    contract = DailyEvidenceReplayContract(
+        replay=lambda *_args, **_kwargs: _zero_replay(candidate, manifest, start),
+        engine_name="scheduler_driven", engine_version=BACKTEST_ENGINE_VERSION,
+        cost_model={"venue": "binance_usd_m_futures", "fee_rate_per_side": str(FEE_RATE),
+                    "slippage_rate_per_side": str(SLIPPAGE_RATE), "funding_fee": "excluded"},
+        timeframe=Timeframe(1, "m"), timeframe_label="1m",
+        warmup_resolver=lambda _candidates, _provider: 1,
+    )
+
+    rows = run_pure_daily_evidence(
+        manifest=manifest, phase="Validation", outcome_start_at=start,
+        component_fingerprint="component-a", market=daily,
+        market_feature_provider=None, run_identity=_identity(manifest, source),
+        ledger=AppendOnlyEvidenceLedger(tmp_path / "typed.jsonl", DAILY_EVIDENCE_KEY_FIELDS),
+        replay_contract=contract,
+    )
+
+    assert rows[0].availability_status == "available"
+
+
+@pytest.mark.parametrize("forgery", ("source_hash", "prices", "bounds"))
+def test_pure_daily_run_rejects_forged_verified_market_slice(tmp_path, forgery):
+    candidate = replace(build_scheduler_candidates()[0], candle_limit=1)
+    manifest = build_three_day_daily_candidate_manifest(
+        candidate_groups=_all_groups(candidate), expected_count=1
+    )
+    start = _utc("2025-07-10")
+    source = _market(start - timedelta(minutes=1), 1441)
+    daily = VerifiedPhaseMarketTimeline.from_market(source).daily_slice(
+        start, warmup_minutes=1
+    )
+    if forgery == "source_hash":
+        object.__setattr__(daily.timeline, "market_data_hash", "0" * 64)
+        proof = list(daily.timeline._proof)
+        proof[2] = "0" * 64
+        object.__setattr__(daily.timeline, "_proof", tuple(proof))
+    elif forgery == "prices":
+        changed = MarketSnapshot(tuple(replace(
+            candle, open_price=Decimal("101"), high_price=Decimal("102"),
+            low_price=Decimal("100"), close_price=Decimal("101"),
+        ) for candle in daily.market.candles))
+        object.__setattr__(daily, "market", changed)
+        proof = list(daily._proof)
+        proof[2] = id(changed)
+        object.__setattr__(daily, "_proof", tuple(proof))
+    else:
+        object.__setattr__(daily, "context_start_at", start)
+        proof = list(daily._proof)
+        proof[5] = start
+        object.__setattr__(daily, "_proof", tuple(proof))
+    contract = DailyEvidenceReplayContract(
+        replay=lambda *_args, **_kwargs: _zero_replay(candidate, manifest, start),
+        engine_name="scheduler_driven", engine_version=BACKTEST_ENGINE_VERSION,
+        cost_model={"venue": "binance_usd_m_futures", "fee_rate_per_side": str(FEE_RATE),
+                    "slippage_rate_per_side": str(SLIPPAGE_RATE), "funding_fee": "excluded"},
+        timeframe=Timeframe(1, "m"), timeframe_label="1m",
+        warmup_resolver=lambda _candidates, _provider: 1,
+    )
+
+    with pytest.raises(ValueError, match="verified|proof|slice|hash|bound"):
+        run_pure_daily_evidence(
+            manifest=manifest, phase="Validation", outcome_start_at=start,
+            component_fingerprint="component-a", market=daily,
+            market_feature_provider=None, run_identity=_identity(manifest, source),
+            ledger=AppendOnlyEvidenceLedger(
+                tmp_path / f"forged-{forgery}.jsonl", DAILY_EVIDENCE_KEY_FIELDS
+            ),
+            replay_contract=contract,
+        )
 
 
 def test_run_identity_rejects_manifest_requirement_or_provenance_drift_before_replay(tmp_path):

@@ -21,6 +21,10 @@ from src.domain.regime import DailyStrategyEvidence
 from src.domain.regime.three_day_chart_features import THREE_DAY_CHART_FEATURE_SCHEMA_VERSION
 from src.domain.regime.three_day_daily_profile import decimal_arithmetic_context
 from src.domain.regime.three_day_daily_profile import PROFILE_ID
+from src.application.services.verified_market_timeline import (
+    VerifiedDailyMarketSlice,
+    market_snapshot_hash,
+)
 
 
 EXPECTED_THREE_DAY_DAILY_CANDIDATE_COUNT = 459
@@ -203,19 +207,6 @@ class DailyEvidenceRunIdentity:
     @property
     def digest(self) -> str:
         return candidate_definition_hash(self.canonical_payload())
-
-
-def market_snapshot_hash(market: MarketSnapshot) -> str:
-    digest = hashlib.sha256()
-    for candle in market.candles:
-        payload = (
-            candle.opened_at.isoformat(), candle.closed_at.isoformat(),
-            str(candle.open_price), str(candle.high_price), str(candle.low_price),
-            str(candle.close_price), str(candle.volume),
-        )
-        digest.update(_canonical_json(payload).encode("utf-8"))
-        digest.update(b"\n")
-    return digest.hexdigest()
 
 
 def build_three_day_daily_candidate_manifest(
@@ -453,31 +444,19 @@ def run_daily_strategy_evidence(
     phase: str,
     outcome_start_at: datetime,
     component_fingerprint: str,
-    market: MarketSnapshot,
+    market: MarketSnapshot | VerifiedDailyMarketSlice,
     market_feature_provider: object | None,
     run_identity: DailyEvidenceRunIdentity,
     ledger: "AppendOnlyEvidenceLedger",
     replay_contract: DailyEvidenceReplayContract,
     symbol: Symbol | None = None,
     candidate_ids: Sequence[str] = (),
-    verified_source_market_data_hash: str | None = None,
 ) -> tuple[DailyStrategyEvidence, ...]:
     """Run isolated one-day canonical evidence, resuming only an exact identity."""
     if outcome_start_at.tzinfo is not timezone.utc or outcome_start_at.time() != datetime.min.time():
         raise ValueError("daily outcome start must be canonical midnight UTC")
     outcome_end_at = outcome_start_at + timedelta(days=1)
     replay = replay_contract.replay
-    selected_symbol = symbol or market.symbol
-    provider_snapshot = _provider_identity_snapshot(market_feature_provider)
-    _validate_static_run_context(
-        manifest=manifest, phase=phase, outcome_start_at=outcome_start_at,
-        outcome_end_at=outcome_end_at, market=market, provider_snapshot=provider_snapshot,
-        identity=run_identity, selected_symbol=selected_symbol, replay_contract=replay_contract,
-        verified_source_market_data_hash=verified_source_market_data_hash,
-    )
-    if ledger.key_fields != DAILY_EVIDENCE_KEY_FIELDS:
-        raise ValueError("daily evidence ledger uses an incompatible unique key")
-
     requested = tuple(candidate_ids)
     if len(set(requested)) != len(requested):
         raise ValueError("candidate selection must be unique")
@@ -487,6 +466,30 @@ def run_daily_strategy_evidence(
     selected = tuple(
         entry for entry in manifest.entries if not requested or entry.candidate_id in requested
     )
+    if isinstance(market, VerifiedDailyMarketSlice):
+        maximum_warmup = max(
+            replay_contract.warmup_resolver((entry.candidate,), market_feature_provider)
+            for entry in selected
+        )
+        replay_market = market.verify(
+            outcome_start_at=outcome_start_at,
+            minimum_context_start_at=outcome_start_at - timedelta(minutes=maximum_warmup),
+        )
+        source_market_hash = market.timeline.market_data_hash
+    else:
+        replay_market = market
+        source_market_hash = market_snapshot_hash(market)
+    selected_symbol = symbol or replay_market.symbol
+    provider_snapshot = _provider_identity_snapshot(market_feature_provider)
+    _validate_static_run_context(
+        manifest=manifest, phase=phase, outcome_start_at=outcome_start_at,
+        outcome_end_at=outcome_end_at, market=replay_market,
+        market_data_hash=source_market_hash, provider_snapshot=provider_snapshot,
+        identity=run_identity, selected_symbol=selected_symbol, replay_contract=replay_contract,
+    )
+    if ledger.key_fields != DAILY_EVIDENCE_KEY_FIELDS:
+        raise ValueError("daily evidence ledger uses an incompatible unique key")
+
     existing = ledger.load()
     if existing and existing[0].get("run_identity") != run_identity.digest:
         raise ValueError("run identity does not match existing daily evidence")
@@ -508,13 +511,13 @@ def run_daily_strategy_evidence(
             continue
         warmup = replay_contract.warmup_resolver((entry.candidate,), market_feature_provider)
         context_start_at = outcome_start_at - timedelta(minutes=warmup)
-        _validate_market_context(market, context_start_at, outcome_end_at)
+        _validate_market_context(replay_market, context_start_at, outcome_end_at)
         unavailable_reason = _feature_unavailability_reason(
-            entry, market, market_feature_provider, context_start_at, outcome_end_at
+            entry, replay_market, market_feature_provider, context_start_at, outcome_end_at
         )
         if unavailable_reason is None:
             replay_result = replay(
-                market,
+                replay_market,
                 start_at=outcome_start_at,
                 end_at=outcome_end_at,
                 context_start_at=context_start_at,
@@ -539,7 +542,7 @@ def run_daily_strategy_evidence(
             evidence = _available_evidence(
                 replay_result, entry=entry, run_identity=run_identity,
                 component_fingerprint=component_fingerprint,
-                outcome_start_at=outcome_start_at, market=market,
+                outcome_start_at=outcome_start_at, market=replay_market,
             )
         else:
             if _provider_identity_snapshot(market_feature_provider) != provider_snapshot:
@@ -667,7 +670,7 @@ def _validate_replay_provenance(replay, *, identity, provider_snapshot, replay_c
 
 def _validate_static_run_context(*, manifest, phase, outcome_start_at, outcome_end_at,
                                  market, provider_snapshot, identity, selected_symbol,
-                                 replay_contract, verified_source_market_data_hash=None):
+                                 replay_contract, market_data_hash):
     if identity.engine_version != replay_contract.engine_version:
         raise ValueError("run identity engine version is not canonical")
     if _thaw(identity.cost_model) != _thaw(replay_contract.cost_model):
@@ -682,15 +685,7 @@ def _validate_static_run_context(*, manifest, phase, outcome_start_at, outcome_e
         raise ValueError("candidate manifest hash does not match run identity")
     if manifest.ordered_definition_hashes != identity.ordered_candidate_definition_hashes:
         raise ValueError("candidate definition hashes do not match run identity")
-    observed_market_hash = (
-        market_snapshot_hash(market)
-        if verified_source_market_data_hash is None
-        else verified_source_market_data_hash
-    )
-    if (
-        _SHA256.fullmatch(str(observed_market_hash)) is None
-        or observed_market_hash != identity.market_data_hash
-    ):
+    if _SHA256.fullmatch(str(market_data_hash)) is None or market_data_hash != identity.market_data_hash:
         raise ValueError("market data hash does not match run identity")
     if selected_symbol != market.symbol or selected_symbol.pair != identity.symbol:
         raise ValueError("market symbol does not match run identity")

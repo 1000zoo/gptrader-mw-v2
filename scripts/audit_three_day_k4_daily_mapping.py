@@ -10,7 +10,6 @@ domain semantics as the researched system.
 from __future__ import annotations
 
 import argparse
-from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
@@ -520,33 +519,6 @@ def _load_verified_minute_market(
     return MarketSnapshot(tuple(candles))
 
 
-def _build_daily_market_slices(market, days: Sequence[datetime], warmup: int):
-    """Index a verified phase once and materialize only bounded daily replay windows."""
-    from datetime import timedelta
-    from src.domain.market import MarketSnapshot
-
-    if not isinstance(warmup, int) or isinstance(warmup, bool) or warmup < 0:
-        raise ValueError("daily market warmup must be a nonnegative integer")
-    candles = market.candles
-    opened_times = tuple(candle.opened_at for candle in candles)
-    slices = []
-    for day in days:
-        start = day - timedelta(minutes=warmup)
-        end = day + timedelta(days=1)
-        left = bisect_left(opened_times, start)
-        right = bisect_left(opened_times, end)
-        selected = candles[left:right]
-        expected = warmup + 24 * 60
-        if (
-            len(selected) != expected
-            or not selected or selected[0].opened_at != start
-            or selected[-1].closed_at != end
-        ):
-            raise ValueError("verified phase market cannot form an exact daily replay slice")
-        slices.append(MarketSnapshot(selected))
-    return tuple(slices)
-
-
 def _replay_phase_from_raw(
     *, phase: str, bundle: Mapping[str, object], report: Mapping[str, object],
     model_artifact: object, manifest: object, ledger_override: Path | None,
@@ -561,8 +533,10 @@ def _replay_phase_from_raw(
         )
         from scripts.scheduler_driven_scalping_backtest import required_warmup_candles
         from src.application.services.daily_strategy_evidence import (
-            DAILY_EVIDENCE_KEY_FIELDS, market_snapshot_hash,
-            run_daily_strategy_evidence,
+            DAILY_EVIDENCE_KEY_FIELDS, run_daily_strategy_evidence,
+        )
+        from src.application.services.verified_market_timeline import (
+            VerifiedPhaseMarketTimeline,
         )
         from src.domain.regime import ThreeDayDailyResearchProfile
 
@@ -588,6 +562,7 @@ def _replay_phase_from_raw(
             bundle.get("archive_descriptors", ()), raw_root=Path(str(raw_root)),
             start_at=market_start, end_at=market_end,
         )
+        verified_timeline = VerifiedPhaseMarketTimeline.from_market(market)
         provider, _ = _select_feature_cache(
             Path(str(cache_root)), required_start=market_start,
             required_end=market_end, verify_full_file=True,
@@ -598,9 +573,11 @@ def _replay_phase_from_raw(
         identity = _run_identity_from_payload(identity_payload)
         if identity.digest != bundle.get("run_identity_hash"):
             raise ValueError("phase run identity digest mismatch")
-        if market_snapshot_hash(market) != identity.market_data_hash:
+        if verified_timeline.market_data_hash != identity.market_data_hash:
             raise ValueError("verified phase market hash does not match run identity")
-        daily_markets = _build_daily_market_slices(market, days, warmup)
+        daily_markets = tuple(
+            verified_timeline.daily_slice(day, warmup_minutes=warmup) for day in days
+        )
         vector_start = min(days) - timedelta(days=3)
         vector_end = max(days) + timedelta(days=1)
         assignments = [
@@ -624,7 +601,6 @@ def _replay_phase_from_raw(
                 component_fingerprint=component, market=daily_market,
                 market_feature_provider=provider, run_identity=identity,
                 ledger=memory, replay_contract=replay_contract,
-                verified_source_market_data_hash=identity.market_data_hash,
             ))
         replay_payloads = [item.canonical_payload() for item in replayed]
         _same(
@@ -1270,6 +1246,9 @@ def audit_three_day_k4_daily_mapping(
     if has_publication and has_legacy:
         failures.append("report output binding is ambiguous")
     elif has_publication:
+        from scripts.chart_regime_strategy_mapping import (
+            THREE_DAY_PUBLICATION_HASH_DEFINITION,
+        )
         expected_publication_keys = {
             "hash_definition", "report_payload_hash", "model_byte_hash",
             "mapping_byte_hash", "markdown_byte_hash",
@@ -1277,6 +1256,8 @@ def audit_three_day_k4_daily_mapping(
         if not isinstance(publication, Mapping) or set(publication) != expected_publication_keys:
             failures.append("report publication output binding is invalid")
             publication = {}
+        if publication.get("hash_definition") != THREE_DAY_PUBLICATION_HASH_DEFINITION:
+            failures.append("report publication hash_definition is invalid")
         payload = {key: value for key, value in report.items() if key != "publication"}
         if publication.get("report_payload_hash") != _hash(payload):
             failures.append("report publication payload hash mismatch")
