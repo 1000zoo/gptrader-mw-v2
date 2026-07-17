@@ -1816,7 +1816,7 @@ def _canonical_daily_candidate_groups():
 
 
 def build_three_day_daily_candidate_manifest(
-    *, include_deferred: bool, candidate_groups=None, expected_count=459
+    *, include_deferred: bool = True, candidate_groups=None, expected_count=459
 ):
     if include_deferred is not True:
         raise ValueError("three-day candidate manifest requires explicit deferred opt-in")
