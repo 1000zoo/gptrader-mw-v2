@@ -796,7 +796,7 @@ def test_production_daily_evidence_path_indexes_phase_once_and_passes_bounded_wi
     bounded = warmup + 1440
     assert tuple(len(item.market.candles) for item in slices) == (bounded,) * len(days)
     assert observed == [(459, bounded)] * len(days)
-    assert CountedCandle.accesses <= 3 * len(base) + len(days) * (2 * bounded + 4)
+    assert CountedCandle.accesses <= 4 * len(base) + len(days) * (3 * bounded + 4)
     candidate_phase_scan = 459 * len(days) * len(base)
     assert CountedCandle.accesses < candidate_phase_scan / 500
 

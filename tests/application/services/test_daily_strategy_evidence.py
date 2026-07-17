@@ -540,7 +540,7 @@ def test_pure_daily_run_rejects_forged_verified_market_slice(tmp_path, forgery):
     if forgery == "source_hash":
         object.__setattr__(daily.timeline, "market_data_hash", "0" * 64)
         proof = list(daily.timeline._proof)
-        proof[2] = "0" * 64
+        proof[5] = "0" * 64
         object.__setattr__(daily.timeline, "_proof", tuple(proof))
     elif forgery == "prices":
         changed = MarketSnapshot(tuple(replace(
@@ -554,7 +554,7 @@ def test_pure_daily_run_rejects_forged_verified_market_slice(tmp_path, forgery):
     else:
         object.__setattr__(daily, "context_start_at", start)
         proof = list(daily._proof)
-        proof[5] = start
+        proof[8] = start
         object.__setattr__(daily, "_proof", tuple(proof))
     contract = DailyEvidenceReplayContract(
         replay=lambda *_args, **_kwargs: _zero_replay(candidate, manifest, start),

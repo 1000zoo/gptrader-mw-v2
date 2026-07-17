@@ -58,6 +58,57 @@ def test_verified_timeline_factory_rejects_malformed_phase_gap() -> None:
         VerifiedPhaseMarketTimeline.from_market(malformed)
 
 
+def test_verified_timeline_rejects_public_market_tuple_replacement_without_changing_hash() -> None:
+    start = datetime(2025, 7, 1, tzinfo=timezone.utc)
+    timeline = VerifiedPhaseMarketTimeline.from_market(_market(start, 4 * 24 * 60))
+    frozen_hash = timeline.market_data_hash
+    replacement = _market(start, 4 * 24 * 60, price="999")
+
+    object.__setattr__(timeline.market, "candles", replacement.candles)
+
+    with pytest.raises(ValueError, match="source|tuple|proof|verified"):
+        timeline.daily_slice(start + timedelta(days=3), warmup_minutes=60)
+    assert timeline.market_data_hash == frozen_hash
+
+
+@pytest.mark.parametrize("forgery", ("private_tuple", "index", "proof"))
+def test_verified_timeline_rejects_replaced_private_binding_index_or_proof(forgery) -> None:
+    start = datetime(2025, 7, 1, tzinfo=timezone.utc)
+    timeline = VerifiedPhaseMarketTimeline.from_market(_market(start, 4 * 24 * 60))
+    if forgery == "private_tuple":
+        object.__setattr__(timeline, "_source_candles", tuple(list(timeline._source_candles)))
+    elif forgery == "index":
+        object.__setattr__(timeline, "opened_times", tuple(list(timeline.opened_times)))
+    else:
+        object.__setattr__(timeline, "_proof", timeline._proof + ("forged",))
+
+    with pytest.raises(ValueError, match="source|tuple|proof|verified"):
+        timeline.daily_slice(start + timedelta(days=3), warmup_minutes=60)
+
+
+def test_verified_timeline_detects_nested_candle_value_mutation_in_bounded_slice() -> None:
+    start = datetime(2025, 7, 1, tzinfo=timezone.utc)
+    timeline = VerifiedPhaseMarketTimeline.from_market(_market(start, 4 * 24 * 60))
+    target = timeline.market.candles[-30]
+    object.__setattr__(target, "close_price", Decimal("100.5"))
+
+    with pytest.raises(ValueError, match="signature|source|slice|verified"):
+        timeline.daily_slice(start + timedelta(days=3), warmup_minutes=60)
+
+
+def test_verified_daily_slice_rejects_replaced_public_candle_tuple() -> None:
+    start = datetime(2025, 7, 1, tzinfo=timezone.utc)
+    timeline = VerifiedPhaseMarketTimeline.from_market(_market(start, 4 * 24 * 60))
+    daily = timeline.daily_slice(start + timedelta(days=3), warmup_minutes=60)
+    object.__setattr__(daily.market, "candles", tuple(list(daily.market.candles)))
+
+    with pytest.raises(ValueError, match="source|tuple|proof|verified"):
+        daily.verify(
+            outcome_start_at=start + timedelta(days=3),
+            minimum_context_start_at=start + timedelta(days=3, minutes=-60),
+        )
+
+
 @pytest.mark.parametrize("forgery", ("source_hash", "prices", "bounds", "slice_hash"))
 def test_verified_daily_slice_rejects_forged_source_prices_hash_or_bounds(forgery) -> None:
     start = datetime(2025, 7, 1, tzinfo=timezone.utc)
