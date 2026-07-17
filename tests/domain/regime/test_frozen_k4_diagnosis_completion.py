@@ -56,9 +56,9 @@ def _manifest_kwargs():
         "completion_scope": COMPLETION_SCOPE,
         "replay_parent_match_verified": True,
         "thresholds": {
-            "recurrent_top1_threshold": RECURRENT_TOP1_THRESHOLD,
-            "single_feature_threshold": SINGLE_FEATURE_THRESHOLD,
-            "volatility_family_threshold": VOLATILITY_FAMILY_THRESHOLD,
+            "recurrent_feature_top1_ratio": RECURRENT_TOP1_THRESHOLD,
+            "single_feature_contribution_ratio": SINGLE_FEATURE_THRESHOLD,
+            "volatility_family_contribution_ratio": VOLATILITY_FAMILY_THRESHOLD,
         },
         "file_sha256": {
             name: SHA_A for name in COMPLETION_ARTIFACT_FILENAMES
@@ -111,28 +111,53 @@ def test_valid_manifest_has_deterministic_complete_canonical_payload():
         "primary_replacement_allowed": False,
     }
     assert "analysis_scope" not in payload
+    for name in (
+        "implementation_file_sha256",
+        "thresholds",
+        "file_sha256",
+        "file_bytes",
+    ):
+        assert type(payload[name]) is dict
+        payload[name].clear()
+        assert manifest.canonical_payload()[name]
 
 
 def test_manifest_defensively_copies_and_freezes_all_mappings():
     kwargs = _manifest_kwargs()
     manifest = FrozenK4DiagnosisCompletionManifest(**kwargs)
-    kwargs["thresholds"]["single_feature_threshold"] = 0.99
-    kwargs["file_bytes"][next(iter(COMPLETION_ARTIFACT_FILENAMES))] = 99
+    original_maps = {
+        name: dict(kwargs[name])
+        for name in (
+            "implementation_file_sha256",
+            "thresholds",
+            "file_sha256",
+            "file_bytes",
+        )
+    }
+    for name in original_maps:
+        kwargs[name].clear()
 
-    for value in (
-        manifest.implementation_file_sha256,
-        manifest.thresholds,
-        manifest.file_sha256,
-        manifest.file_bytes,
-    ):
+    for name, expected in original_maps.items():
+        value = getattr(manifest, name)
         assert isinstance(value, MappingProxyType)
+        assert dict(value) == expected
+        assert tuple(value) == tuple(sorted(expected))
         with pytest.raises(TypeError):
             value["new"] = "value"
-    assert tuple(manifest.implementation_file_sha256) == tuple(
-        sorted(COMPLETION_IMPLEMENTATION_FILES)
-    )
     with pytest.raises(FrozenInstanceError):
         manifest.status = "changed"
+
+
+@pytest.mark.parametrize(
+    "registry_schema_version", [None, 1, "", " ", " schema-v1", "schema-v1 "]
+)
+def test_manifest_rejects_noncanonical_registry_schema_version(
+    registry_schema_version,
+):
+    kwargs = _manifest_kwargs()
+    kwargs["registry_schema_version"] = registry_schema_version
+    with pytest.raises(ValueError, match="registry_schema_version"):
+        FrozenK4DiagnosisCompletionManifest(**kwargs)
 
 
 @pytest.mark.parametrize(
@@ -187,14 +212,14 @@ def test_manifest_rejects_wrong_implementation_file_map(mutation):
     [
         {},
         {
-            "recurrent_top1_threshold": 0.50,
-            "single_feature_threshold": 0.51,
-            "volatility_family_threshold": 0.70,
+            "recurrent_feature_top1_ratio": 0.50,
+            "single_feature_contribution_ratio": 0.51,
+            "volatility_family_contribution_ratio": 0.70,
         },
         {
-            "recurrent_top1_threshold": 0.50,
-            "single_feature_threshold": 0.50,
-            "volatility_family_threshold": 0.70,
+            "recurrent_feature_top1_ratio": 0.50,
+            "single_feature_contribution_ratio": 0.50,
+            "volatility_family_contribution_ratio": 0.70,
             "extra": 1.0,
         },
     ],

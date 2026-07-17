@@ -36,9 +36,9 @@ COMPLETION_ARTIFACT_FILENAMES = frozenset(
 
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 _THRESHOLDS = {
-    "recurrent_top1_threshold": RECURRENT_TOP1_THRESHOLD,
-    "single_feature_threshold": SINGLE_FEATURE_THRESHOLD,
-    "volatility_family_threshold": VOLATILITY_FAMILY_THRESHOLD,
+    "recurrent_feature_top1_ratio": RECURRENT_TOP1_THRESHOLD,
+    "single_feature_contribution_ratio": SINGLE_FEATURE_THRESHOLD,
+    "volatility_family_contribution_ratio": VOLATILITY_FAMILY_THRESHOLD,
 }
 
 
