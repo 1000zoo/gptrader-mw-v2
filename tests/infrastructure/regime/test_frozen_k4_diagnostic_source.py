@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
+import inspect
 import json
 from pathlib import Path
 import shutil
@@ -24,6 +25,7 @@ from src.infrastructure.regime.frozen_k4_diagnostic_source import (
     _restore_primary_fit,
     _three_day_vector_hash,
     _validate_attempt,
+    _load_frozen_k4_diagnostic_inputs,
     load_frozen_k4_diagnostic_source,
 )
 from src.infrastructure.exchange.binance.research_data.historical_feature_loader import archive_url
@@ -86,7 +88,7 @@ def mini(tmp_path: Path) -> MiniFixture:
     payload["fit_input_vector_hash"] = "0" * 64
     model = _write_payload(tmp_path, payload)
     with pytest.raises(ValueError, match="vector hash") as error:
-        load_frozen_k4_diagnostic_source(model, tmp_path / "raw", _source_profile=profile)
+        _load_frozen_k4_diagnostic_inputs(model, tmp_path / "raw", profile)
     actual = str(error.value).rsplit(" ", 1)[-1]
     payload["fit_input_vector_hash"] = actual
     model = _write_payload(tmp_path, payload)
@@ -137,16 +139,32 @@ def test_published_attempt_matches_exact_1641_anchor_production_profile() -> Non
     assert fit.feature_names == tuple(payload["feature_names"])
 
 
-def test_real_miniature_archive_loads_4320_window_in_float64_registry_order(mini) -> None:
-    source = load_frozen_k4_diagnostic_source(
-        mini.model, mini.raw_root, _source_profile=mini.profile
+def test_public_loader_has_no_profile_bypass_and_always_selects_production(monkeypatch) -> None:
+    import src.infrastructure.regime.frozen_k4_diagnostic_source as module
+
+    assert tuple(inspect.signature(load_frozen_k4_diagnostic_source).parameters) == (
+        "attempt_path", "raw_root"
     )
+    selected = []
+    def stop(_attempt, _root, profile):
+        selected.append(profile)
+        raise RuntimeError("selected")
+    monkeypatch.setattr(module, "_load_frozen_k4_diagnostic_inputs", stop)
+    with pytest.raises(RuntimeError, match="selected"):
+        load_frozen_k4_diagnostic_source(MODEL, Path("unused"))
+    assert selected == [_PRODUCTION_PROFILE]
+    with pytest.raises(TypeError):
+        load_frozen_k4_diagnostic_source(MODEL, Path("unused"), _source_profile=_PRODUCTION_PROFILE)
+
+
+def test_real_miniature_archive_loads_4320_window_in_float64_registry_order(mini) -> None:
+    source = _load_frozen_k4_diagnostic_inputs(mini.model, mini.raw_root, mini.profile)
     assert len(source.vectors) == 1
     assert (source.vectors[0].anchor_at - source.vectors[0].window_start_at) == timedelta(minutes=4320)
     assert tuple(source.vectors[0].values) == tuple(spec.name for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1)
     assert np.asarray(tuple(source.vectors[0].values.values())).dtype == np.float64
     assert _three_day_vector_hash(source.vectors) == source.attempt_payload["fit_input_vector_hash"]
-    assert source.identity.feature_vectors_sha256 == source.attempt_payload["fit_input_vector_hash"]
+    assert source.identity_hashes["feature_vectors_sha256"] == source.attempt_payload["fit_input_vector_hash"]
 
 
 def test_rehashed_attempt_cannot_bypass_vector_binding(mini, tmp_path: Path) -> None:
@@ -154,12 +172,12 @@ def test_rehashed_attempt_cannot_bypass_vector_binding(mini, tmp_path: Path) -> 
     payload["fit_input_vector_hash"] = "f" * 64
     model = _write_payload(tmp_path, payload)
     with pytest.raises(ValueError, match="vector hash"):
-        load_frozen_k4_diagnostic_source(model, mini.raw_root, _source_profile=mini.profile)
+        _load_frozen_k4_diagnostic_inputs(model, mini.raw_root, mini.profile)
 
 
 @pytest.mark.parametrize("field", ("value", "timestamp", "order"))
 def test_publisher_vector_hash_binds_values_timestamps_and_order(mini, field: str) -> None:
-    source = load_frozen_k4_diagnostic_source(mini.model, mini.raw_root, _source_profile=mini.profile)
+    source = _load_frozen_k4_diagnostic_inputs(mini.model, mini.raw_root, mini.profile)
     vector = source.vectors[0]
     payload = {
         "symbol": vector.symbol,
@@ -181,7 +199,7 @@ def test_publisher_vector_hash_binds_values_timestamps_and_order(mini, field: st
 
 
 def test_owns_a_detached_deeply_immutable_attempt_payload(mini) -> None:
-    source = load_frozen_k4_diagnostic_source(mini.model, mini.raw_root, _source_profile=mini.profile)
+    source = _load_frozen_k4_diagnostic_inputs(mini.model, mini.raw_root, mini.profile)
     assert isinstance(source.attempt_payload, MappingProxyType)
     assert isinstance(source.attempt_payload["model_parameters"], MappingProxyType)
     disk_payload = _payload()
@@ -206,7 +224,7 @@ def test_miniature_archive_cannot_escape_raw_root_via_symlink(mini, tmp_path: Pa
     except OSError as exc:
         pytest.skip(f"platform cannot create file symlink: {exc}")
     with pytest.raises(ValueError, match="root|escape|symlink"):
-        load_frozen_k4_diagnostic_source(mini.model, mini.raw_root, _source_profile=mini.profile)
+        _load_frozen_k4_diagnostic_inputs(mini.model, mini.raw_root, mini.profile)
 
 
 @pytest.mark.parametrize(
@@ -226,7 +244,35 @@ def test_rejects_adversarial_nested_attempt_schema(mini, tmp_path, mutation, mes
     mutation(payload)
     model = _write_payload(tmp_path, payload)
     with pytest.raises(ValueError, match=message):
-        load_frozen_k4_diagnostic_source(model, mini.raw_root, _source_profile=mini.profile)
+        _load_frozen_k4_diagnostic_inputs(model, mini.raw_root, mini.profile)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda g: g.update(maximum_distance_exceedance_rate_threshold=1.0),
+        lambda g: g.update(maximum_low_confidence_rate_threshold=0.01),
+        lambda g: g.update(finite_model_parameters=False),
+        lambda g: g.update(finite_scaler=False),
+        lambda g: g.update(covariance_floor_threshold=1e-5),
+        lambda g: g.update(feature_registry_version_expected="other"),
+        lambda g: g.update(feature_registry_exact=False),
+        lambda g: g.update(convergence_required=False),
+        lambda g: g.update(weight_sum_expected=0.9),
+        lambda g: g.update(weight_sum_tolerance=1e-4),
+        lambda g: g.update(gmm_probability_threshold=0.5),
+        lambda g: g.update(feature_family_cap_maximum_count=6),
+        lambda g: g.update(distance_threshold=g["distance_threshold"] + 1.0),
+        lambda g: g.update(nondegenerate_confidence=False),
+    ],
+)
+def test_rejects_rehashed_contradictory_publisher_gate_groups(mini, tmp_path, mutation) -> None:
+    payload = json.loads(mini.model.read_bytes())
+    mutation(payload["model_gates"])
+    # Keep the published failed-name list stale to prove gates are independently recomputed.
+    model = _write_payload(tmp_path, payload)
+    with pytest.raises(ValueError, match="gate|threshold|relationship|registry|finite"):
+        _load_frozen_k4_diagnostic_inputs(model, mini.raw_root, mini.profile)
 
 
 @pytest.mark.parametrize("mode", ("mutated", "extra_member", "path_traversal"))
@@ -243,7 +289,7 @@ def test_rejects_archive_content_or_member_set(mini, tmp_path: Path, mode: str) 
         _rebind_archive(payload, destination)
         mini = MiniFixture(_write_payload(tmp_path, payload), mini.raw_root, destination, mini.profile)
     with pytest.raises(ValueError, match="sha256|bytes|member|ZIP|archive"):
-        load_frozen_k4_diagnostic_source(mini.model, mini.raw_root, _source_profile=mini.profile)
+        _load_frozen_k4_diagnostic_inputs(mini.model, mini.raw_root, mini.profile)
 
 
 def test_rejects_one_minute_continuity_gap_after_archive_receipt_is_rebound(mini, tmp_path) -> None:
@@ -257,7 +303,7 @@ def test_rejects_one_minute_continuity_gap_after_archive_receipt_is_rebound(mini
     _rebind_archive(payload, mini.archive)
     model = _write_payload(tmp_path, payload)
     with pytest.raises(ValueError, match="continuity"):
-        load_frozen_k4_diagnostic_source(model, mini.raw_root, _source_profile=mini.profile)
+        _load_frozen_k4_diagnostic_inputs(model, mini.raw_root, mini.profile)
 
 
 @pytest.mark.parametrize(

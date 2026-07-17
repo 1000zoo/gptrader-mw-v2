@@ -14,6 +14,8 @@ import re
 from types import MappingProxyType
 from urllib.parse import urlsplit
 
+from scipy.stats import chi2
+
 from src.domain.regime.cluster_diagnostic import ClusterDiagnosticFit
 from src.domain.regime.frozen_k4_failure_diagnostics import FrozenK4InputIdentity
 from src.domain.regime.model import RegimeModelConfig
@@ -248,6 +250,19 @@ class FrozenK4DiagnosticSource:
         object.__setattr__(self, "vectors", tuple(self.vectors))
 
 
+@dataclass(frozen=True)
+class _LoadedK4DiagnosticInputs:
+    attempt_payload: Mapping[str, object]
+    primary_fit: ClusterDiagnosticFit
+    vectors: tuple[ThreeDayChartFeatureVector, ...]
+    identity_hashes: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "attempt_payload", _deep_freeze(self.attempt_payload))
+        object.__setattr__(self, "vectors", tuple(self.vectors))
+        object.__setattr__(self, "identity_hashes", MappingProxyType(dict(self.identity_hashes)))
+
+
 def _is_number(value: object) -> bool:
     return type(value) in (int, float) and math.isfinite(value)
 
@@ -443,19 +458,107 @@ def _restore_primary_fit(payload: Mapping[str, object]) -> ClusterDiagnosticFit:
         iterations=parameters["iterations"],
         lower_bound=parameters["lower_bound"],
     )
-    gates = payload["model_gates"]
+    _validate_complete_model_gates(payload["model_gates"], fit)
+    return fit
+
+
+def _validate_complete_model_gates(
+    gates: Mapping[str, object], fit: ClusterDiagnosticFit,
+) -> None:
+    expected_constants = {
+        "minimum_adjusted_rand_index_threshold": 0.8,
+        "minimum_normalized_mutual_information_threshold": 0.8,
+        "maximum_matched_centroid_distance_threshold": 0.5,
+        "maximum_prevalence_drift_threshold": 0.2,
+        "maximum_low_confidence_rate_threshold": 0.25,
+        "maximum_distance_exceedance_rate_threshold": 0.02,
+        "weight_sum_expected": 1.0,
+        "weight_sum_tolerance": 1e-8,
+        "covariance_floor_threshold": fit.config.regularization,
+        "component_count_expected": 4,
+        "gmm_probability_threshold": 0.65,
+        "gmm_margin_threshold": 0.10,
+        "feature_family_cap_maximum_count": 5,
+        "feature_family_cap_maximum_share": 0.5,
+        "distance_threshold_policy": "maximum_chi_square_995_squared_mahalanobis",
+        "feature_registry_version_expected": "three-day-chart-feature-registry-v1",
+    }
+    if any(gates[name] != expected for name, expected in expected_constants.items()):
+        raise ValueError("model gate constant or threshold is incompatible")
+    required_true = (
+        "convergence_required", "converged", "finite_scaler_required",
+        "finite_model_parameters_required", "positive_weights_required",
+        "all_components_represented_required", "all_components_represented",
+        "all_chronological_blocks_represented_required",
+        "all_chronological_blocks_represented", "feature_registry_exact",
+        "feature_family_cap_passed", "all_components_represented_threshold",
+        "all_chronological_blocks_represented_threshold",
+    )
+    if any(gates[name] is not True for name in required_true):
+        raise ValueError("model gate required flags or frozen representation results are incompatible")
+
+    finite_scaler = all(
+        math.isfinite(value)
+        for values in (fit.lower_bounds, fit.upper_bounds, fit.medians, fit.scales)
+        for value in values
+    )
+    finite_model = all(
+        math.isfinite(value)
+        for values in (*fit.means, fit.weights, *fit.covariances)
+        for value in values
+    )
+    family_counts = {
+        family: sum(
+            spec.family == family and spec.name in fit.feature_names
+            for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1
+        )
+        for family in {spec.family for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1}
+    }
+    observed_count = max(family_counts.values())
+    observed_share = observed_count / len(fit.feature_names)
+    expected_distance = float(chi2.ppf(0.995, df=len(fit.feature_names)))
+    derived_distance_result = (
+        gates["distance_exceedance_rate"]
+        <= gates["maximum_distance_exceedance_rate_threshold"]
+    )
+    derived_confidence = (
+        gates["low_confidence_rate"] <= gates["maximum_low_confidence_rate_threshold"]
+    )
     if (
-        gates["converged"] is not fit.converged
+        gates["finite_scaler"] is not finite_scaler
+        or gates["finite_model_parameters"] is not finite_model
+        or gates["converged"] is not fit.converged
         or gates["iterations"] != fit.iterations
         or gates["lower_bound"] != fit.lower_bound
-        or gates["component_count"] != fit.config.cluster_count
-        or gates["component_count_expected"] != fit.config.cluster_count
+        or gates["component_count"] != len(fit.fingerprints)
         or gates["minimum_weight"] != min(fit.weights)
-        or gates["minimum_covariance"] != min(min(row) for row in fit.covariances)
         or gates["weight_sum"] != math.fsum(fit.weights)
+        or not math.isclose(
+            gates["weight_sum"], gates["weight_sum_expected"],
+            rel_tol=gates["weight_sum_tolerance"], abs_tol=gates["weight_sum_tolerance"],
+        )
+        or gates["minimum_covariance"] != min(min(row) for row in fit.covariances)
+        or gates["minimum_covariance"] < gates["covariance_floor_threshold"]
+        or gates["feature_family_observed_maximum_count"] != observed_count
+        or gates["feature_family_observed_maximum_share"] != observed_share
+        or gates["feature_family_cap_passed"] is not (
+            observed_count <= gates["feature_family_cap_maximum_count"]
+            and observed_share <= gates["feature_family_cap_maximum_share"]
+        )
+        or not math.isclose(gates["distance_threshold"], expected_distance, rel_tol=1e-12, abs_tol=1e-12)
+        or gates["distance_result"] is not derived_distance_result
+        or gates["nondegenerate_confidence"] is not derived_confidence
     ):
-        raise ValueError("model gates and primary fit relationship is incompatible")
-    return fit
+        raise ValueError("model gate derived relationship does not match fit, registry, or thresholds")
+    for name in (
+        "minimum_adjusted_rand_index", "minimum_normalized_mutual_information",
+        "maximum_prevalence_drift", "low_confidence_rate", "distance_exceedance_rate",
+        "minimum_observed_dominant_probability", "minimum_observed_probability_margin",
+    ):
+        if not 0 <= gates[name] <= 1:
+            raise ValueError("model gate rate or probability is outside its valid range")
+    if gates["maximum_matched_centroid_distance"] < 0:
+        raise ValueError("model gate centroid distance cannot be negative")
 
 
 def _registry_payload() -> list[dict[str, object]]:
@@ -471,11 +574,10 @@ def _registry_payload() -> list[dict[str, object]]:
     ]
 
 
-def load_frozen_k4_diagnostic_source(
-    attempt_path: Path, raw_root: Path, *,
-    _source_profile: _FrozenK4SourceProfile = _PRODUCTION_PROFILE,
-) -> FrozenK4DiagnosticSource:
-    if not isinstance(_source_profile, _FrozenK4SourceProfile):
+def _load_frozen_k4_diagnostic_inputs(
+    attempt_path: Path, raw_root: Path, profile: _FrozenK4SourceProfile,
+) -> _LoadedK4DiagnosticInputs:
+    if not isinstance(profile, _FrozenK4SourceProfile):
         raise ValueError("source profile must use the strict frozen profile contract")
     attempt_path = Path(attempt_path)
     raw = attempt_path.read_bytes()
@@ -483,13 +585,13 @@ def load_frozen_k4_diagnostic_source(
         decoded = json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValueError("failed-model attempt JSON is invalid") from exc
-    payload = _validate_attempt(decoded, _source_profile)
+    payload = _validate_attempt(decoded, profile)
     fit = _restore_primary_fit(payload)
     provenance = tuple(payload["source_provenance"])
     vectors, loaded_provenance = load_three_day_feature_history(
-        symbol=_source_profile.symbol, start=_source_profile.raw_start_at,
-        end=_source_profile.fit_end_at, raw_root=Path(raw_root),
-        expected_anchor_count=_source_profile.expected_anchor_count,
+        symbol=profile.symbol, start=profile.raw_start_at,
+        end=profile.fit_end_at, raw_root=Path(raw_root),
+        expected_anchor_count=profile.expected_anchor_count,
         downloader=_LocalProvenanceDownloader(provenance, Path(raw_root)),
     )
     if tuple(map(dict, loaded_provenance)) != tuple(map(dict, provenance)):
@@ -502,27 +604,39 @@ def load_frozen_k4_diagnostic_source(
     dependency_metadata = {
         name: importlib.metadata.version(name) for name in ("numpy", "scipy", "scikit-learn")
     }
-    identity = FrozenK4InputIdentity(
-        failed_model_attempt_sha256=payload["attempt_hash"],
-        model_file_sha256=hashlib.sha256(raw).hexdigest(),
-        primary_parameters_sha256=_hash({
+    identity_hashes = {
+        "failed_model_attempt_sha256": payload["attempt_hash"],
+        "model_file_sha256": hashlib.sha256(raw).hexdigest(),
+        "primary_parameters_sha256": _hash({
             key: parameters[key] for key in (
                 "component_fingerprints", "converged", "covariances", "iterations",
                 "lower_bound", "means", "weights"
             )
         }),
-        scaler_sha256=_hash({"medians": parameters["medians"], "scales": parameters["scales"]}),
-        clipping_bounds_sha256=_hash({"lower_bounds": parameters["lower_bounds"], "upper_bounds": parameters["upper_bounds"]}),
-        feature_schema_sha256=_hash({"schema_version": fit.schema_version, "feature_names": list(fit.feature_names), "registry": _registry_payload()}),
-        source_provenance_sha256=_hash(list(map(dict, loaded_provenance))),
-        source_anchor_manifest_sha256=_hash(anchors),
-        feature_vectors_sha256=verified_vector_hash,
-        dependency_metadata_sha256=_hash(dependency_metadata),
+        "scaler_sha256": _hash({"medians": parameters["medians"], "scales": parameters["scales"]}),
+        "clipping_bounds_sha256": _hash({"lower_bounds": parameters["lower_bounds"], "upper_bounds": parameters["upper_bounds"]}),
+        "feature_schema_sha256": _hash({"schema_version": fit.schema_version, "feature_names": list(fit.feature_names), "registry": _registry_payload()}),
+        "source_provenance_sha256": _hash(list(map(dict, loaded_provenance))),
+        "source_anchor_manifest_sha256": _hash(anchors),
+        "feature_vectors_sha256": verified_vector_hash,
+        "dependency_metadata_sha256": _hash(dependency_metadata),
+    }
+    return _LoadedK4DiagnosticInputs(_deep_freeze(payload), fit, vectors, identity_hashes)
+
+
+def load_frozen_k4_diagnostic_source(
+    attempt_path: Path, raw_root: Path,
+) -> FrozenK4DiagnosticSource:
+    loaded = _load_frozen_k4_diagnostic_inputs(attempt_path, raw_root, _PRODUCTION_PROFILE)
+    identity = FrozenK4InputIdentity(
+        **loaded.identity_hashes,
         split_at="2023-04-01T00:00:00Z",
         half_a_range=("2021-01-01T00:00:00Z", "2023-04-01T00:00:00Z"),
         half_b_range=("2023-04-01T00:00:00Z", "2025-06-30T00:00:00Z"),
     )
-    return FrozenK4DiagnosticSource(_deep_freeze(payload), fit, vectors, identity)
+    return FrozenK4DiagnosticSource(
+        loaded.attempt_payload, loaded.primary_fit, loaded.vectors, identity
+    )
 
 
 __all__ = ["FrozenK4DiagnosticSource", "load_frozen_k4_diagnostic_source"]
