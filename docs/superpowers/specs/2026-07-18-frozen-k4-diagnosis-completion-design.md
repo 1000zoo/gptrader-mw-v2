@@ -30,9 +30,16 @@ strategy-related calculation. The output remains diagnostic-only.
 
 The existing frozen replay remains unchanged. New immutable result contracts
 and pure aggregations are added to the post-reproduction decomposition service.
-The existing renderer writes normalized CSV outputs, extends the reproduction
-JSON and Markdown report, and includes every new file in the deterministic
-manifest and hash verification.
+The renderer writes normalized CSV outputs, an extended reproduction JSON and
+Markdown report, and a new deterministic manifest into a new immutable run
+directory.
+
+The already published diagnosis directory and every byte under it are immutable
+inputs. They must not be modified, replaced, or supplemented. The extension has
+a new `diagnostic_schema_version`; its deterministic `run_id` is derived from
+the extension's canonical identity payload and therefore resolves to a distinct
+directory. The new manifest records the prior run ID and manifest hash as parent
+provenance without copying or rewriting the prior run.
 
 The decomposition receives the same 1,641 ordered feature vectors, frozen
 primary fit, reproduced half fits, fixed matches, assignments, and OOD rows as
@@ -52,7 +59,9 @@ The component variance retains the existing `1e-6` floor. The sum of feature
 contributions must reproduce each stored squared Mahalanobis distance within the
 existing numerical tolerance.
 
-For every retained feature, record:
+This analysis has explicit scope `primary-component-0-ood-exceedances`, and
+every output row records `primary_component_index=0`. For every retained
+feature, record:
 
 - contribution sum;
 - ratio of the feature sum to the contribution sum across all 24 samples;
@@ -103,7 +112,7 @@ family outputs record the schema version and registry hash. Family output also
 records family contribution sum, ratio, applicable concentration threshold, and
 concentration result. Feature output records feature name and registry family.
 
-## Offset empirical analysis
+## Full-sample and offset empirical analysis
 
 ### Selection
 
@@ -139,6 +148,14 @@ For each valid half/component group, record selected count and its share of all
 selected rows in that half. For each offset, record its maximum drift pair and
 the pair's top five feature contributions.
 
+Before computing offset comparisons, apply this identical empirical-centroid
+procedure to all 1,641 rows without subsampling. Name the resulting reference
+metric `full_sample_empirical_centroid_distance`. It uses the same frozen
+primary coordinate projection, fixed half assignments, fixed Hungarian match,
+grouping, arithmetic mean, Euclidean distance, and feature-contribution formula
+as the offset metric. This full-sample empirical result is the primary reference
+for subsample stability comparisons.
+
 ### OOD aggregation
 
 For each offset and every frozen primary component, aggregate the already stored
@@ -150,11 +167,18 @@ larger denominator, then lower component index.
 
 ### Full-sample consistency
 
-The immutable full-sample references are:
+The directly comparable immutable full-sample empirical references are:
 
-- the existing maximum fitted-parameter drift primary component and pair;
+- the maximum `full_sample_empirical_centroid_distance` component and pair;
 - the existing maximum OOD component;
-- the existing top five fitted drift features for the maximum pair.
+- the top five full-sample empirical drift features for the maximum empirical
+  pair.
+
+The existing fitted-parameter maximum drift pair and its top features remain in
+the report as a separately named diagnostic. They are not used as the direct
+offset stability comparator. The report may state whether the full-sample
+empirical and fitted-parameter conclusions agree, but it must not conflate the
+two metrics.
 
 Every offset records:
 
@@ -172,19 +196,24 @@ descriptive only and cannot pass or fail a model gate.
 
 ## Outputs
 
-Add these normalized deterministic files to the existing successful diagnosis
-directory and manifest:
+Publish these normalized deterministic files under the new schema-versioned run
+directory and include them in its new manifest:
 
-- `frozen_k4_ood_feature_summary.csv`;
-- `frozen_k4_ood_family_summary.csv`;
+- `frozen_k4_component_0_ood_feature_summary.csv`;
+- `frozen_k4_component_0_ood_family_summary.csv`;
 - `frozen_k4_offset_empirical_diagnostics.csv`;
 - `frozen_k4_offset_feature_contributions.csv`.
 
-The reproduction JSON gains structured OOD concentration and offset-consistency
-sections. The Markdown report replaces the incomplete Component 0 and offset
-answers with the computed top features, family totals, three concentration
-flags, offset maxima, and agreement counts. Existing sample-level and diagnostic
-files remain available and retain their meaning.
+The new reproduction JSON gains structured OOD concentration,
+full-sample-empirical, and offset-consistency sections. The new Markdown report
+contains the completed Component 0 and offset answers with the computed top
+features, family totals, three concentration flags, full-sample empirical
+reference, offset maxima, and agreement counts. It does not replace or edit the
+prior JSON or Markdown. Existing sample-level and diagnostic files remain
+available in the parent run and retain their exact bytes and meaning.
+
+Every Component 0 OOD CSV and JSON object records `analysis_scope` and
+`primary_component_index=0` in addition to the component-specific filename.
 
 All rows use deterministic ordering, finite numeric validation, explicit nulls
 where a rate or centroid is undefined, canonical float serialization already
@@ -196,6 +225,10 @@ Fail closed before publishing if any of the following occurs:
 
 - Component 0 does not reproduce exactly 24 exceedances out of 409 assigned
   samples;
+- the prior run directory or manifest differs before and after extension
+  publication;
+- the extension schema version or deterministic run ID collides with the prior
+  run;
 - feature contributions do not sum to the stored sample distance;
 - a retained feature is missing from or inconsistent with the registry;
 - the canonical registry hash changes within one run;
@@ -224,6 +257,8 @@ Unit tests use adversarial small fixtures and cover:
 - offset selection for every 3-day and 7-day offset;
 - reuse of existing assignments and matches;
 - primary-coordinate empirical centroid and feature-distance arithmetic;
+- identical arithmetic for `full_sample_empirical_centroid_distance` and
+  `offset_empirical_centroid_distance`;
 - zero-sample and one-sample groups;
 - component OOD numerator, denominator, rate, and deterministic tie-breaking;
 - ordered top-five and set-only agreement flags;
@@ -242,6 +277,11 @@ Final verification independently recomputes from published CSV/JSON rows:
 - every offset sample accounting, empirical maximum drift, maximum OOD
   component, and top-five comparison;
 - every report claim and output hash.
+
+Verification also hashes the complete prior run directory before and after the
+extension command and requires byte-for-byte immutability. Two clean extension
+runs must resolve to the same new run ID and produce byte-identical new output
+trees.
 
 The existing frozen K4 diagnosis test suite must remain green. The completed
 diagnosis is accepted only when the full targeted and regression suites pass and
