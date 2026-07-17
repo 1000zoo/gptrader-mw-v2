@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import csv
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import importlib.metadata
+import io
 import json
 import math
+import os
 from pathlib import Path
+import platform
 import re
+import tempfile
 from types import MappingProxyType
 from urllib.parse import urlsplit
+import zipfile
 
 from scipy.stats import chi2
+import numpy as np
 
 from src.domain.regime.cluster_diagnostic import ClusterDiagnosticFit
 from src.domain.regime.frozen_k4_failure_diagnostics import FrozenK4InputIdentity
@@ -29,7 +36,6 @@ from src.infrastructure.exchange.binance.research_data.historical_feature_loader
     DownloadResult,
     archive_url,
     iter_archive_requests,
-    validate_archive_member_directory,
 )
 from src.infrastructure.exchange.binance.research_data.three_day_feature_history import (
     load_three_day_feature_history,
@@ -47,6 +53,8 @@ _FORBIDDEN_SECTIONS = frozenset(
     {"Mapping", "Strategy Mapping", "Validation", "Evidence", "candidate", "Test"}
 )
 _CUTOFF = datetime(2025, 6, 30, tzinfo=timezone.utc)
+_PRODUCTION_ATTEMPT_HASH = "83e25e21a2bccb5cf14572da000718deae7f3e068c45b2898a26e78cef67101f"
+_PRODUCTION_FILE_SHA256 = "e19ff1b2ec685f60b05d9aa98d088ea3883b62f0a394cf9fbdc2b84264ec23a5"
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 _PROVENANCE_FIELDS = frozenset({
     "period", "url", "member_identity", "bytes", "sha256", "expected_sha256",
@@ -174,6 +182,59 @@ def _three_day_vector_hash(vectors: tuple[ThreeDayChartFeatureVector, ...]) -> s
     })
 
 
+def _individual_vector_hash(vector: ThreeDayChartFeatureVector) -> str:
+    return _hash({
+        "schema_version": vector.schema_version,
+        "symbol": vector.symbol,
+        "anchor_at": vector.anchor_at.isoformat(),
+        "window_start_at": vector.window_start_at.isoformat(),
+        "values": list(vector.values.items()),
+    })
+
+
+def _numeric_library_metadata() -> dict[str, object]:
+    try:
+        configuration = np.__config__.show(mode="dicts")
+        dependencies = configuration.get("Build Dependencies", {})
+    except (AttributeError, TypeError):
+        dependencies = {}
+    result: dict[str, object] = {}
+    for name in ("blas", "lapack"):
+        value = dependencies.get(name)
+        if not isinstance(value, dict):
+            result[name] = "<unavailable>"
+            continue
+        result[name] = {
+            key: value.get(key, "<absent>")
+            for key in ("name", "found", "version", "openblas configuration")
+        }
+    return result
+
+
+def _canonical_dependency_metadata() -> dict[str, object]:
+    absent = "<absent>"
+    return {
+        "python": {
+            "version": platform.python_version(),
+            "implementation": platform.python_implementation(),
+        },
+        "packages": {
+            name: importlib.metadata.version(name)
+            for name in ("numpy", "scipy", "scikit-learn")
+        },
+        "numeric_libraries": _numeric_library_metadata(),
+        "platform": {
+            "architecture": platform.architecture()[0] or absent,
+            "machine": platform.machine() or absent,
+            "processor": platform.processor() or absent,
+        },
+        "thread_environment": {
+            name: os.environ.get(name, absent)
+            for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+        },
+    }
+
+
 def _deep_freeze(value: object) -> object:
     if isinstance(value, Mapping):
         return MappingProxyType({str(key): _deep_freeze(item) for key, item in value.items()})
@@ -194,10 +255,48 @@ def _parse_time(value: object, field: str) -> datetime:
     return parsed
 
 
+def _resolve_contained_archive(raw_root: Path, destination: Path) -> Path:
+    resolved_root = Path(raw_root).resolve()
+    resolved_destination = Path(destination).resolve()
+    try:
+        resolved_destination.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ValueError("local archive destination escapes the resolved raw root") from exc
+    if Path(destination).is_symlink():
+        raise ValueError("local archive symlink indirection is forbidden")
+    return resolved_destination
+
+
+def _read_verified_archive(path: Path) -> bytes:
+    before = path.stat()
+    with path.open("rb") as stream:
+        content = stream.read()
+    after = path.stat()
+    identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+    if identity_before != identity_after or len(content) != before.st_size:
+        raise ValueError("local archive file identity changed during verified read")
+    return content
+
+
+def _sole_zip_member(content: bytes, expected_archive_filename: str) -> str:
+    expected = expected_archive_filename.removesuffix(".zip") + ".csv"
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            members = [item.filename for item in archive.infolist() if not item.is_dir()]
+    except zipfile.BadZipFile as exc:
+        raise ValueError("invalid ZIP archive bytes") from exc
+    if members != [expected]:
+        raise ValueError(f"expected sole CSV member {expected}, found {members}")
+    return expected
+
+
 class _LocalProvenanceDownloader:
     def __init__(self, rows: tuple[Mapping[str, object], ...], raw_root: Path) -> None:
         self._rows = {str(row["url"]): row for row in rows}
         self._raw_root = Path(raw_root).resolve()
+        self._snapshots: dict[Path, bytes] = {}
+        self._snapshot_directory = tempfile.TemporaryDirectory(prefix="frozen-k4-")
 
     def download(
         self, url: str, destination: Path, *, source: str | None = None,
@@ -207,15 +306,8 @@ class _LocalProvenanceDownloader:
         row = self._rows.get(url)
         if row is None:
             raise ValueError("archive URL is not present in frozen source provenance")
-        destination = Path(destination)
-        resolved_destination = destination.resolve()
-        try:
-            resolved_destination.relative_to(self._raw_root)
-        except ValueError as exc:
-            raise ValueError("local archive destination escapes the resolved raw root") from exc
-        if destination.is_symlink():
-            raise ValueError("local archive symlink indirection is forbidden")
-        destination = resolved_destination
+        original_destination = Path(destination)
+        destination = _resolve_contained_archive(self._raw_root, original_destination)
         basename = Path(urlsplit(url).path).name
         if not basename or basename != destination.name:
             raise ValueError("archive URL basename does not match local archive destination")
@@ -223,18 +315,44 @@ class _LocalProvenanceDownloader:
             raise ValueError("frozen diagnostic source permits only kline archives")
         if not destination.is_file():
             raise FileNotFoundError(f"required local archive is missing: {destination}")
-        size = destination.stat().st_size
+        content = _read_verified_archive(destination)
+        size = len(content)
         if size != row["bytes"]:
             raise ValueError(f"archive bytes mismatch for {basename}")
-        digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+        digest = hashlib.sha256(content).hexdigest()
         if digest != row["sha256"] or digest != row["expected_sha256"]:
             raise ValueError(f"archive sha256 mismatch for {basename}")
-        member = validate_archive_member_directory(
-            destination, expected_archive_filename=basename
-        )
+        member = _sole_zip_member(content, basename)
         if member != row["member_identity"]:
             raise ValueError(f"archive member identity mismatch for {basename}")
-        return DownloadResult("cached", destination, digest, size, digest, member)
+        snapshot = Path(self._snapshot_directory.name) / basename
+        snapshot.write_bytes(content)
+        if hashlib.sha256(snapshot.read_bytes()).hexdigest() != digest:
+            raise ValueError("private archive snapshot hash mismatch")
+        resolved_snapshot = snapshot.resolve()
+        self._snapshots[resolved_snapshot] = content
+        return DownloadResult("cached", resolved_snapshot, digest, size, digest, member)
+
+    def iter_rows(self, path: Path):
+        resolved = Path(path).resolve()
+        try:
+            content = self._snapshots.pop(resolved)
+        except KeyError as exc:
+            raise ValueError("archive was not verified into an immutable snapshot") from exc
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            member = archive.infolist()[0]
+            with archive.open(member) as raw, io.TextIOWrapper(raw, encoding="utf-8-sig", newline="") as text:
+                rows = csv.reader(text)
+                first = next(rows, None)
+                if first is None:
+                    return
+                try:
+                    int(first[0])
+                except (ValueError, IndexError):
+                    pass
+                else:
+                    yield first
+                yield from rows
 
 
 @dataclass(frozen=True)
@@ -243,11 +361,13 @@ class FrozenK4DiagnosticSource:
     primary_fit: ClusterDiagnosticFit
     vectors: tuple[ThreeDayChartFeatureVector, ...]
     identity: FrozenK4InputIdentity
+    dependency_metadata: Mapping[str, object]
 
     def __post_init__(self) -> None:
         if not isinstance(self.attempt_payload, MappingProxyType):
             object.__setattr__(self, "attempt_payload", _deep_freeze(self.attempt_payload))
         object.__setattr__(self, "vectors", tuple(self.vectors))
+        object.__setattr__(self, "dependency_metadata", _deep_freeze(self.dependency_metadata))
 
 
 @dataclass(frozen=True)
@@ -256,11 +376,13 @@ class _LoadedK4DiagnosticInputs:
     primary_fit: ClusterDiagnosticFit
     vectors: tuple[ThreeDayChartFeatureVector, ...]
     identity_hashes: Mapping[str, str]
+    dependency_metadata: Mapping[str, object]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "attempt_payload", _deep_freeze(self.attempt_payload))
         object.__setattr__(self, "vectors", tuple(self.vectors))
         object.__setattr__(self, "identity_hashes", MappingProxyType(dict(self.identity_hashes)))
+        object.__setattr__(self, "dependency_metadata", _deep_freeze(self.dependency_metadata))
 
 
 def _is_number(value: object) -> bool:
@@ -576,58 +698,85 @@ def _registry_payload() -> list[dict[str, object]]:
 
 def _load_frozen_k4_diagnostic_inputs(
     attempt_path: Path, raw_root: Path, profile: _FrozenK4SourceProfile,
+    *, trusted_file_sha256: str, trusted_attempt_hash: str,
 ) -> _LoadedK4DiagnosticInputs:
     if not isinstance(profile, _FrozenK4SourceProfile):
         raise ValueError("source profile must use the strict frozen profile contract")
     attempt_path = Path(attempt_path)
     raw = attempt_path.read_bytes()
+    actual_file_sha256 = hashlib.sha256(raw).hexdigest()
+    if actual_file_sha256 != _require_hash(trusted_file_sha256, "trusted model file SHA-256"):
+        raise ValueError("model file SHA-256 does not match the trusted published pin")
     try:
         decoded = json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise ValueError("failed-model attempt JSON is invalid") from exc
     payload = _validate_attempt(decoded, profile)
+    if payload["attempt_hash"] != _require_hash(trusted_attempt_hash, "trusted attempt hash"):
+        raise ValueError("attempt hash does not match the trusted published pin")
     fit = _restore_primary_fit(payload)
     provenance = tuple(payload["source_provenance"])
+    downloader = _LocalProvenanceDownloader(provenance, Path(raw_root))
     vectors, loaded_provenance = load_three_day_feature_history(
         symbol=profile.symbol, start=profile.raw_start_at,
         end=profile.fit_end_at, raw_root=Path(raw_root),
         expected_anchor_count=profile.expected_anchor_count,
-        downloader=_LocalProvenanceDownloader(provenance, Path(raw_root)),
+        downloader=downloader,
+        row_reader=downloader.iter_rows,
     )
     if tuple(map(dict, loaded_provenance)) != tuple(map(dict, provenance)):
         raise ValueError("loaded archive provenance differs from the frozen attempt")
     verified_vector_hash = _three_day_vector_hash(vectors)
     if verified_vector_hash != payload["fit_input_vector_hash"]:
         raise ValueError(f"fit input vector hash mismatch; reconstructed {verified_vector_hash}")
-    anchors = [vector.anchor_at.isoformat() for vector in vectors]
+    anchor_manifest = [
+        {
+            "anchor_at": vector.anchor_at.isoformat(),
+            "window_start_at": vector.window_start_at.isoformat(),
+            "vector_sha256": _individual_vector_hash(vector),
+        }
+        for vector in vectors
+    ]
     parameters = payload["model_parameters"]
-    dependency_metadata = {
-        name: importlib.metadata.version(name) for name in ("numpy", "scipy", "scikit-learn")
+    dependency_metadata = _canonical_dependency_metadata()
+    scaler_payload = {
+        "feature_names": list(fit.feature_names),
+        "scaler": {"medians": list(fit.medians), "scales": list(fit.scales)},
+        "clipping": {
+            "lower_bounds": list(fit.lower_bounds),
+            "upper_bounds": list(fit.upper_bounds),
+        },
     }
     identity_hashes = {
         "failed_model_attempt_sha256": payload["attempt_hash"],
-        "model_file_sha256": hashlib.sha256(raw).hexdigest(),
+        "model_file_sha256": actual_file_sha256,
         "primary_parameters_sha256": _hash({
             key: parameters[key] for key in (
                 "component_fingerprints", "converged", "covariances", "iterations",
                 "lower_bound", "means", "weights"
             )
         }),
-        "scaler_sha256": _hash({"medians": parameters["medians"], "scales": parameters["scales"]}),
+        "scaler_sha256": _hash(scaler_payload),
         "clipping_bounds_sha256": _hash({"lower_bounds": parameters["lower_bounds"], "upper_bounds": parameters["upper_bounds"]}),
         "feature_schema_sha256": _hash({"schema_version": fit.schema_version, "feature_names": list(fit.feature_names), "registry": _registry_payload()}),
         "source_provenance_sha256": _hash(list(map(dict, loaded_provenance))),
-        "source_anchor_manifest_sha256": _hash(anchors),
+        "source_anchor_manifest_sha256": _hash(anchor_manifest),
         "feature_vectors_sha256": verified_vector_hash,
         "dependency_metadata_sha256": _hash(dependency_metadata),
     }
-    return _LoadedK4DiagnosticInputs(_deep_freeze(payload), fit, vectors, identity_hashes)
+    return _LoadedK4DiagnosticInputs(
+        _deep_freeze(payload), fit, vectors, identity_hashes, dependency_metadata
+    )
 
 
 def load_frozen_k4_diagnostic_source(
     attempt_path: Path, raw_root: Path,
 ) -> FrozenK4DiagnosticSource:
-    loaded = _load_frozen_k4_diagnostic_inputs(attempt_path, raw_root, _PRODUCTION_PROFILE)
+    loaded = _load_frozen_k4_diagnostic_inputs(
+        attempt_path, raw_root, _PRODUCTION_PROFILE,
+        trusted_file_sha256=_PRODUCTION_FILE_SHA256,
+        trusted_attempt_hash=_PRODUCTION_ATTEMPT_HASH,
+    )
     identity = FrozenK4InputIdentity(
         **loaded.identity_hashes,
         split_at="2023-04-01T00:00:00Z",
@@ -635,7 +784,8 @@ def load_frozen_k4_diagnostic_source(
         half_b_range=("2023-04-01T00:00:00Z", "2025-06-30T00:00:00Z"),
     )
     return FrozenK4DiagnosticSource(
-        loaded.attempt_payload, loaded.primary_fit, loaded.vectors, identity
+        loaded.attempt_payload, loaded.primary_fit, loaded.vectors, identity,
+        loaded.dependency_metadata,
     )
 
 
