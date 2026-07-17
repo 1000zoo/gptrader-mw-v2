@@ -180,7 +180,7 @@ class OffsetOODRow:
             and (
                 not isinstance(self.rate, float)
                 or not math.isfinite(self.rate)
-                or not math.isclose(self.rate, expected, rel_tol=1e-15, abs_tol=1e-15)
+                or self.rate != expected
             )
         ):
             raise ValueError("OOD rate does not reconcile with counts")
@@ -1515,13 +1515,19 @@ class FrozenK4DiagnosisCompletion:
         conclusion_keys = tuple((row.spacing_days, row.offset) for row in self.offset_conclusions)
         if empirical_keys != expected_keys or conclusion_keys != expected_keys:
             raise ValueError("completion must contain exactly the ten ordered offset keys")
-        if tuple(row.global_index for row in self.sample_receipts) != tuple(
-            range(len(self.sample_receipts))
-        ):
+        if len(self.sample_receipts) != 1641 or tuple(
+            row.global_index for row in self.sample_receipts
+        ) != tuple(range(1641)):
             raise ValueError("sample receipt global indices must be contiguous")
         anchors = tuple(row.anchor_at for row in self.sample_receipts)
         if tuple(sorted(set(anchors))) != anchors:
             raise ValueError("sample receipt anchors must be strictly chronological")
+        if (
+            sum(row.half_label == "A" for row in self.sample_receipts) != 820
+            or sum(row.half_label == "B" for row in self.sample_receipts) != 821
+        ):
+            raise ValueError("frozen A/B half receipt counts must be exactly 820/821")
+        origin = self.sample_receipts[0].anchor_at
         component_fingerprints: dict[int, str] = {}
         for row in self.full_sample_ood:
             if row.sample_scope != _FULL_SAMPLE_SCOPE:
@@ -1532,6 +1538,8 @@ class FrozenK4DiagnosisCompletion:
             if prior != row.primary_component_fingerprint:
                 raise ValueError("primary component fingerprint is inconsistent")
         component_indices = tuple(sorted(component_fingerprints))
+        if component_indices != (0, 1, 2, 3):
+            raise ValueError("full OOD rows must cover exact frozen K=4 components")
         if tuple(row.primary_component_index for row in self.full_sample_ood) != component_indices:
             raise ValueError("full OOD rows must be unique and component ordered")
         if sum(row.denominator for row in self.full_sample_ood) != len(self.sample_receipts):
@@ -1586,6 +1594,99 @@ class FrozenK4DiagnosisCompletion:
             )
             if tuple((row.offset, row.primary_component_index) for row in rows) != expected_ood_keys:
                 raise ValueError("offset OOD rows are missing, duplicate, or unordered")
+            for scope in scopes:
+                selected_receipts = tuple(
+                    receipt
+                    for receipt in self.sample_receipts
+                    if receipt.global_index % spacing == scope.offset
+                )
+                if scope.selected_sample_count != len(selected_receipts):
+                    raise ValueError("offset empirical count disagrees with receipt ledger")
+                full_identities = {
+                    (
+                        row.half_label,
+                        row.primary_component_index,
+                        row.half_component_index,
+                    ): (
+                        row.primary_component_fingerprint,
+                        row.half_component_fingerprint,
+                    )
+                    for row in self.full_sample_empirical.centroid_rows
+                }
+                scoped_identities = {
+                    (
+                        row.half_label,
+                        row.primary_component_index,
+                        row.half_component_index,
+                    )
+                    for row in scope.centroid_rows
+                }
+                if scoped_identities != set(full_identities):
+                    raise ValueError("offset empirical rows do not cover canonical full pairs")
+                for centroid in scope.centroid_rows:
+                    identity = (
+                        centroid.half_label,
+                        centroid.primary_component_index,
+                        centroid.half_component_index,
+                    )
+                    selected_half = tuple(
+                        receipt
+                        for receipt in selected_receipts
+                        if receipt.half_label == centroid.half_label
+                    )
+                    expected_count = sum(
+                        receipt.half_component_index == centroid.half_component_index
+                        and receipt.matched_primary_component_index
+                        == centroid.primary_component_index
+                        for receipt in selected_half
+                    )
+                    expected_share = expected_count / len(selected_half) if selected_half else 0.0
+                    if (
+                        centroid.offset_origin_anchor != origin
+                        or centroid.spacing_days != spacing
+                        or centroid.offset != scope.offset
+                        or centroid.sample_count != expected_count
+                        or not math.isclose(
+                            centroid.sample_share,
+                            expected_share,
+                            rel_tol=1e-15,
+                            abs_tol=1e-15,
+                        )
+                        or (
+                            centroid.primary_component_fingerprint,
+                            centroid.half_component_fingerprint,
+                        )
+                        != full_identities[identity]
+                    ):
+                        raise ValueError(
+                            "offset empirical origin, counts, shares, or fingerprints disagree with receipt ledger"
+                        )
+                scope_ood = tuple(
+                    row for row in rows if row.offset == scope.offset
+                )
+                for ood in scope_ood:
+                    selected_component = tuple(
+                        receipt
+                        for receipt in selected_receipts
+                        if receipt.primary_component_index == ood.primary_component_index
+                    )
+                    expected_numerator = sum(
+                        receipt.ood_exceeds for receipt in selected_component
+                    )
+                    expected_denominator = len(selected_component)
+                    expected_rate = (
+                        None
+                        if expected_denominator == 0
+                        else expected_numerator / expected_denominator
+                    )
+                    if (
+                        ood.primary_component_fingerprint
+                        != component_fingerprints[ood.primary_component_index]
+                        or ood.numerator != expected_numerator
+                        or ood.denominator != expected_denominator
+                        or ood.rate != expected_rate
+                    ):
+                        raise ValueError("offset OOD row disagrees with receipt ledger")
             for component in component_indices:
                 full = next(row for row in self.full_sample_ood if row.primary_component_index == component)
                 partitions = tuple(row for row in rows if row.primary_component_index == component)
@@ -1631,14 +1732,12 @@ class FrozenK4DiagnosisCompletion:
                 ood_winner.primary_component_fingerprint,
                 scope.top_five_drift_features,
                 (
-                    scope.maximum_drift_half_label,
                     scope.maximum_drift_primary_component_index,
-                    scope.maximum_drift_half_component_index,
+                    scope.maximum_drift_primary_component_fingerprint,
                 )
                 == (
-                    self.full_sample_empirical.maximum_drift_half_label,
                     self.full_sample_empirical.maximum_drift_primary_component_index,
-                    self.full_sample_empirical.maximum_drift_half_component_index,
+                    self.full_sample_empirical.maximum_drift_primary_component_fingerprint,
                 ),
                 ood_winner.primary_component_index == full_ood_winner.primary_component_index,
                 scope.top_five_drift_features == self.full_sample_empirical.top_five_drift_features,
@@ -1704,10 +1803,25 @@ def complete_frozen_k4_diagnosis(
     """Complete descriptive frozen-K4 diagnostics without fitting or rematching."""
     if not isinstance(decomposition, FrozenK4Decomposition) or decomposition.diagnostic_only is not True:
         raise ValueError("completion requires a frozen diagnostic decomposition")
+    if (
+        not isinstance(vectors, tuple)
+        or len(vectors) != 1641
+        or len(replay.primary_assignments) != 1641
+        or len(replay.primary_ood_rows) != 1641
+    ):
+        raise ValueError("frozen completion requires exactly 1,641 vectors, assignments, and OOD rows")
+    if (
+        tuple(getattr(half.receipt, "half_label", None) for half in replay.half_replays)
+        != ("A", "B")
+        or tuple(getattr(half.receipt, "anchor_count", None) for half in replay.half_replays)
+        != (820, 821)
+        or tuple(len(half.assignments) for half in replay.half_replays) != (820, 821)
+    ):
+        raise ValueError("frozen half receipt counts must be exact A=820 and B=821")
     full_empirical = build_full_sample_empirical_reference(replay, primary_fit, vectors)
     fingerprints = getattr(primary_fit, "fingerprints", None)
-    if not isinstance(fingerprints, tuple) or not fingerprints:
-        raise ValueError("primary fingerprints must be an immutable tuple")
+    if not isinstance(fingerprints, tuple) or len(fingerprints) != 4:
+        raise ValueError("primary fingerprints must identify exact frozen K=4")
     component_zero = summarize_component_zero_ood(
         decomposition,
         retained_feature_names=primary_fit.feature_names,
@@ -1780,6 +1894,14 @@ def complete_frozen_k4_diagnosis(
     }
     if replay_component_zero_exceedances != decomposition_component_zero_exceedances:
         raise ValueError("Component 0 OOD samples disagree between replay and decomposition")
+    receipt_by_anchor = {receipt.anchor_at: receipt for receipt in receipts}
+    if any(
+        receipt_by_anchor[row.anchor_at].squared_mahalanobis != row.squared_mahalanobis
+        or receipt_by_anchor[row.anchor_at].ood_threshold != row.threshold
+        for row in decomposition.ood_samples
+        if row.component_index == 0
+    ):
+        raise ValueError("Component 0 OOD distance or threshold disagrees with existing replay row")
     full_ood_winner = _maximum_ood(full_ood)
     primary_scaled = _primary_scaled_matrix(primary_fit, vectors)
     offset_empirical: list[EmpiricalScopeSummary] = []
@@ -1817,14 +1939,12 @@ def complete_frozen_k4_diagnosis(
                     ood_winner.primary_component_fingerprint,
                     scope.top_five_drift_features,
                     (
-                        scope.maximum_drift_half_label,
                         scope.maximum_drift_primary_component_index,
-                        scope.maximum_drift_half_component_index,
+                        scope.maximum_drift_primary_component_fingerprint,
                     )
                     == (
-                        full_empirical.maximum_drift_half_label,
                         full_empirical.maximum_drift_primary_component_index,
-                        full_empirical.maximum_drift_half_component_index,
+                        full_empirical.maximum_drift_primary_component_fingerprint,
                     ),
                     ood_winner.primary_component_index == full_ood_winner.primary_component_index,
                     scope.top_five_drift_features == full_empirical.top_five_drift_features,

@@ -29,6 +29,7 @@ from src.application.services.frozen_k4_diagnosis_completion import (
     _canonical_registry_sha256,
     _meets_threshold,
     _global_offset_indices,
+    _maximum_ood,
     build_full_sample_empirical_reference,
     complete_frozen_k4_diagnosis,
     summarize_component_zero_ood,
@@ -534,15 +535,24 @@ def _empirical_fixture() -> tuple[FrozenK4Replay, SimpleNamespace, tuple[SimpleN
 def _completion_fixture() -> tuple[
     FrozenK4Replay, SimpleNamespace, tuple[SimpleNamespace, ...], FrozenK4Decomposition
 ]:
-    _, primary_fit, _ = _empirical_fixture()
+    _, base_fit, _ = _empirical_fixture()
+    primary_fit = SimpleNamespace(
+        **(
+            vars(base_fit)
+            | {
+                "fingerprints": tuple(str(index) * 24 for index in range(1, 5)),
+                "means": tuple((float(index),) * 6 for index in range(4)),
+            }
+        )
+    )
     vectors = tuple(_empirical_vector(index, (0.0,) * 6) for index in range(1641))
-    primary_assignments = (0,) * 409 + (1,) * (1641 - 409)
+    primary_assignments = (0,) * 409 + (1,) * 410 + (2,) * 411 + (3,) * 411
 
     def half(label: str, start: int, count: int, prefix: str) -> FrozenK4HalfReplay:
         half_fit = SimpleNamespace(
             feature_names=EMPIRICAL_NAMES,
-            fingerprints=(prefix * 24, chr(ord(prefix) + 1) * 24),
-            means=((0.0,) * 6, (0.0,) * 6),
+            fingerprints=tuple(chr(ord(prefix) + index) * 24 for index in range(4)),
+            means=tuple((0.0,) * 6 for _ in range(4)),
             diagnostic_only=True,
             primary_replacement_allowed=False,
         )
@@ -556,7 +566,7 @@ def _completion_fixture() -> tuple[
                 matching_cost=0.0,
                 euclidean_distance=0.0,
             )
-            for index in range(2)
+            for index in range(4)
         )
         end = start + count
         return FrozenK4HalfReplay(
@@ -588,7 +598,7 @@ def _completion_fixture() -> tuple[
         input_identity=SimpleNamespace(),
         dependency_metadata={},
         status=SimpleNamespace(status="reproduced"),
-        half_replays=(half("A", 0, 820, "3"), half("B", 820, 821, "5")),
+        half_replays=(half("A", 0, 820, "5"), half("B", 820, 821, "a")),
         primary_assignments=primary_assignments,
         primary_ood_rows=tuple(
             SimpleNamespace(
@@ -634,13 +644,14 @@ def test_complete_diagnosis_builds_fixed_receipts_and_all_global_offsets() -> No
     assert all(isinstance(row, FixedSampleReceipt) for row in result.sample_receipts)
     assert tuple(row.global_index for row in result.sample_receipts) == tuple(range(1641))
     assert len(result.offset_empirical) == 10
-    assert len(result.offset_ood) == 20
+    assert len(result.offset_ood) == 40
     assert len(result.offset_conclusions) == 10
     assert {(row.spacing_days, row.offset) for row in result.offset_conclusions} == {
         *((3, offset) for offset in range(3)),
         *((7, offset) for offset in range(7)),
     }
     assert sum(row.denominator for row in result.full_sample_ood) == 1641
+    assert len(result.full_sample_ood) == 4
     for spacing in (3, 7):
         assert sum(
             scope.selected_sample_count
@@ -662,6 +673,36 @@ def test_offset_ood_maximum_uses_rate_then_counts_and_empty_components_are_null(
     conclusion = next(row for row in result.offset_conclusions if (row.spacing_days, row.offset) == (3, 1))
     assert isinstance(conclusion, OffsetConclusion)
     assert conclusion.maximum_ood_primary_component_index == 0
+    with pytest.raises(ValueError, match="rate"):
+        OffsetOODRow(
+            "offset_subsample",
+            3,
+            0,
+            0,
+            "1" * 24,
+            1,
+            3,
+            math.nextafter(1 / 3, 1.0),
+        )
+
+
+def test_ood_maximum_ties_use_literal_rate_numerator_denominator_then_index() -> None:
+    def row(component: int, numerator: int, denominator: int) -> OffsetOODRow:
+        return OffsetOODRow(
+            "full_sample",
+            None,
+            None,
+            component,
+            str(component + 1) * 24,
+            numerator,
+            denominator,
+            numerator / denominator,
+        )
+
+    assert _maximum_ood((row(0, 4, 10), row(1, 1, 2))).primary_component_index == 1
+    assert _maximum_ood((row(0, 1, 2), row(1, 2, 4))).primary_component_index == 1
+    assert _maximum_ood((row(0, 0, 5), row(1, 0, 7))).primary_component_index == 1
+    assert _maximum_ood((row(1, 0, 7), row(0, 0, 7))).primary_component_index == 0
 
 
 def test_completion_contract_rejects_forged_rate_receipt_flag_and_conclusion_flag() -> None:
@@ -720,8 +761,145 @@ def test_offset_drift_flags_compare_with_full_empirical_not_fitted_pair_distance
         key=lambda pair: (-pair.euclidean_distance, pair.half_label, pair.primary_component_index),
     )
     assert fitted_winner.primary_component_index == 0
-    assert result.full_sample_empirical.maximum_drift_primary_component_index == 1
+    assert result.full_sample_empirical.maximum_drift_primary_component_index == 3
     assert all(row.drift_component_matches_full_sample for row in result.offset_conclusions)
+
+
+def test_completion_rejects_valid_looking_non_frozen_500_sample_input() -> None:
+    replay, primary_fit, vectors, decomposition = _completion_fixture()
+    with pytest.raises(ValueError, match="1,641"):
+        complete_frozen_k4_diagnosis(replay, primary_fit, vectors[:500], decomposition)
+
+
+def test_completion_rejects_offset_ood_counts_swapped_while_spacing_totals_stay_equal() -> None:
+    replay, primary_fit, vectors, decomposition = _completion_fixture()
+    result = complete_frozen_k4_diagnosis(replay, primary_fit, vectors, decomposition)
+    rows = list(result.offset_ood)
+    first = next(index for index, row in enumerate(rows) if (row.spacing_days, row.offset, row.primary_component_index) == (3, 0, 0))
+    second = next(index for index, row in enumerate(rows) if (row.spacing_days, row.offset, row.primary_component_index) == (3, 1, 0))
+    a, b = rows[first], rows[second]
+    rows[first] = replace(a, numerator=b.numerator, denominator=b.denominator, rate=b.rate)
+    rows[second] = replace(b, numerator=a.numerator, denominator=a.denominator, rate=a.rate)
+    with pytest.raises(ValueError, match="ledger"):
+        replace(result, offset_ood=tuple(rows))
+
+
+def test_completion_rejects_forged_offset_origin_and_receipt_half_count() -> None:
+    replay, primary_fit, vectors, decomposition = _completion_fixture()
+    result = complete_frozen_k4_diagnosis(replay, primary_fit, vectors, decomposition)
+    scope = result.offset_empirical[0]
+    forged_rows = tuple(
+        replace(row, offset_origin_anchor="2021-01-02T00:00:00Z")
+        for row in scope.centroid_rows
+    )
+    forged_scope = replace(scope, centroid_rows=forged_rows)
+    with pytest.raises(ValueError, match="origin"):
+        replace(result, offset_empirical=(forged_scope,) + result.offset_empirical[1:])
+
+    source = next(
+        row
+        for row in result.sample_receipts
+        if row.half_label == "A" and row.half_component_index == 2
+    )
+    b_pair = next(
+        row
+        for row in result.sample_receipts
+        if row.half_label == "B" and row.half_component_index == source.half_component_index
+    )
+    forged_receipt = replace(
+        source,
+        half_label="B",
+        half_component_fingerprint=b_pair.half_component_fingerprint,
+        matched_primary_component_index=b_pair.matched_primary_component_index,
+        matched_primary_component_fingerprint=b_pair.matched_primary_component_fingerprint,
+    )
+    forged_receipts = tuple(
+        forged_receipt if row.global_index == source.global_index else row
+        for row in result.sample_receipts
+    )
+    with pytest.raises(ValueError, match="half receipt counts"):
+        replace(result, sample_receipts=forged_receipts)
+
+
+def test_drift_match_uses_primary_identity_even_when_winning_half_changes() -> None:
+    replay, primary_fit, vectors, decomposition = _completion_fixture()
+    modified_fit = _namespace_replace(
+        primary_fit,
+        means=primary_fit.means[:3] + ((0.0,) * 6,),
+    )
+    result = complete_frozen_k4_diagnosis(replay, modified_fit, vectors, decomposition)
+    assert result.full_sample_empirical.maximum_drift_half_label == "A"
+    assert result.full_sample_empirical.maximum_drift_primary_component_index == 2
+    conclusion = next(
+        row for row in result.offset_conclusions if (row.spacing_days, row.offset) == (3, 1)
+    )
+    assert conclusion.maximum_drift_half_label == "B"
+    assert conclusion.maximum_drift_primary_component_index == 2
+    assert conclusion.drift_component_matches_full_sample is True
+
+
+def test_completion_rejects_offset_fingerprint_forged_consistently_within_scope() -> None:
+    replay, primary_fit, vectors, decomposition = _completion_fixture()
+    result = complete_frozen_k4_diagnosis(replay, primary_fit, vectors, decomposition)
+    scope = result.offset_empirical[0]
+    forged_fingerprint = "f" * 24
+    centroids = tuple(
+        replace(row, primary_component_fingerprint=forged_fingerprint)
+        if row.primary_component_index == 0
+        else row
+        for row in scope.centroid_rows
+    )
+    features = tuple(
+        replace(row, primary_component_fingerprint=forged_fingerprint)
+        if row.primary_component_index == 0
+        else row
+        for row in scope.feature_rows
+    )
+    forged_scope = replace(scope, centroid_rows=centroids, feature_rows=features)
+    with pytest.raises(ValueError, match="fingerprints"):
+        replace(result, offset_empirical=(forged_scope,) + result.offset_empirical[1:])
+
+
+def test_conclusion_can_record_true_false_false_true_flags_independently() -> None:
+    replay, primary_fit, vectors, decomposition = _completion_fixture()
+    modified_vectors = tuple(
+        _empirical_vector(
+            index,
+            (0.0, -0.5 if index % 7 == 3 else 0.5, 0.0, 0.0, 0.0, 0.0),
+        )
+        if component == 3 and index % 7 in (3, 4)
+        else vector
+        for index, (vector, component) in enumerate(zip(vectors, replay.primary_assignments))
+    )
+    promoted = {
+        index
+        for index, component in enumerate(replay.primary_assignments)
+        if component == 1 and index % 7 == 3
+    }
+    promoted = set(sorted(promoted)[:4])
+    ood_rows = tuple(
+        _namespace_replace(
+            row,
+            squared_mahalanobis=1.0,
+            exceeds=True,
+        )
+        if index in promoted
+        else row
+        for index, row in enumerate(replay.primary_ood_rows)
+    )
+    modified_replay = replace(replay, primary_ood_rows=ood_rows)
+    result = complete_frozen_k4_diagnosis(
+        modified_replay, primary_fit, modified_vectors, decomposition
+    )
+    conclusion = next(
+        row for row in result.offset_conclusions if (row.spacing_days, row.offset) == (7, 3)
+    )
+    assert (
+        conclusion.drift_component_matches_full_sample,
+        conclusion.ood_component_matches_full_sample,
+        conclusion.ordered_top5_matches_full_sample,
+        conclusion.top5_set_matches_full_sample,
+    ) == (True, False, False, True)
 
 
 def test_full_sample_empirical_reference_uses_frozen_half_membership_and_primary_coordinates(
