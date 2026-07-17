@@ -2900,3 +2900,32 @@ def test_three_day_k4_rejects_provenance_before_diagnostic_fit() -> None:
             code_provenance_hash="a" * 64,
             diagnostic=SpyDiagnostic(),
         )
+
+
+def test_three_day_research_manifest_does_not_mutate_deferred_registry() -> None:
+    from scripts.chart_regime_strategy_mapping import (
+        build_three_day_daily_candidate_manifest,
+    )
+    from scripts.deferred_strategy_registry import REGISTRY_PATH
+
+    before = REGISTRY_PATH.read_bytes()
+
+    manifest = build_three_day_daily_candidate_manifest(expected_count=459)
+
+    assert len(manifest.entries) == 459
+    assert REGISTRY_PATH.read_bytes() == before
+
+
+def test_three_day_research_artifacts_are_not_implicitly_loaded_by_local_runtime(
+    tmp_path,
+) -> None:
+    from src.runtime import RuntimeSettings, create_local_runtime
+
+    runtime = create_local_runtime(
+        RuntimeSettings(database_url=str(tmp_path / "runtime.sqlite3"))
+    )
+
+    assert runtime.settings.regime_selection_enabled is False
+    assert runtime.regime_selection_scheduler is None
+    assert runtime.regime_model_artifact is None
+    assert runtime.regime_mapping_artifact is None

@@ -114,3 +114,50 @@ def test_run_scheduler_logs_error_and_continues_next_tick() -> None:
     assert sleeps == [30]
     assert any("error=temporary exchange failure" in line for line in lines)
     assert any("status=skipped" in line for line in lines)
+
+
+def test_live_scheduler_runtime_default_keeps_regime_selection_disabled() -> None:
+    from src.runtime import RuntimeSettings
+
+    settings = RuntimeSettings.from_env({})
+
+    assert settings.regime_selection_enabled is False
+    assert settings.regime_model_artifact_path is None
+    assert settings.regime_mapping_artifact_path is None
+
+
+def test_live_runtime_explicit_regime_composition_remains_legacy_four_hour_selector(
+    tmp_path,
+) -> None:
+    from dataclasses import replace
+
+    from src.infrastructure.regime import JsonRegimeArtifactRepository
+    from src.runtime import RuntimeSettings, create_local_runtime
+    from src.application.usecases.regime import SelectStrategyUseCase
+    from tests.infrastructure.regime.test_json_regime_artifact_repository import (
+        _mapping,
+        _model,
+    )
+
+    original_model = _model()
+    model = replace(
+        original_model,
+        distance_thresholds=(0.0,) + original_model.distance_thresholds[1:],
+    )
+    mapping = _mapping(model)
+    artifacts = JsonRegimeArtifactRepository(tmp_path)
+    artifacts.save_model(model)
+    artifacts.save_mapping(mapping)
+    runtime = create_local_runtime(RuntimeSettings(
+        database_url=str(tmp_path / "state.sqlite3"),
+        regime_selection_enabled=True,
+        regime_model_artifact_path=str(tmp_path / "model.json"),
+        regime_mapping_artifact_path=str(tmp_path / "mapping.json"),
+        regime_candidate_definition_hash=mapping.candidate_definition_hash,
+        regime_candidate_universe_hash=mapping.candidate_universe_hash,
+        regime_data_provenance_hash=mapping.data_provenance_hash,
+    ))
+
+    usecase = runtime.regime_selection_scheduler._usecase
+    assert isinstance(usecase, SelectStrategyUseCase)
+    assert type(usecase).__module__.endswith("select_strategy_usecase")
