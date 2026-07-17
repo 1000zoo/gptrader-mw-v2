@@ -821,6 +821,18 @@ def test_completion_rejects_forged_offset_origin_and_receipt_half_count() -> Non
         replace(result, sample_receipts=forged_receipts)
 
 
+def test_completion_rejects_consistently_forged_full_empirical_origin() -> None:
+    replay, primary_fit, vectors, decomposition = _completion_fixture()
+    result = complete_frozen_k4_diagnosis(replay, primary_fit, vectors, decomposition)
+    forged_rows = tuple(
+        replace(row, offset_origin_anchor="2021-01-02T00:00:00Z")
+        for row in result.full_sample_empirical.centroid_rows
+    )
+    forged_full = replace(result.full_sample_empirical, centroid_rows=forged_rows)
+    with pytest.raises(ValueError, match="full empirical origin"):
+        replace(result, full_sample_empirical=forged_full)
+
+
 def test_drift_match_uses_primary_identity_even_when_winning_half_changes() -> None:
     replay, primary_fit, vectors, decomposition = _completion_fixture()
     modified_fit = _namespace_replace(

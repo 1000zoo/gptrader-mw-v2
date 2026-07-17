@@ -1528,6 +1528,11 @@ class FrozenK4DiagnosisCompletion:
         ):
             raise ValueError("frozen A/B half receipt counts must be exactly 820/821")
         origin = self.sample_receipts[0].anchor_at
+        if any(
+            row.offset_origin_anchor != origin
+            for row in self.full_sample_empirical.centroid_rows
+        ):
+            raise ValueError("full empirical origin disagrees with first sample receipt anchor")
         component_fingerprints: dict[int, str] = {}
         for row in self.full_sample_ood:
             if row.sample_scope != _FULL_SAMPLE_SCOPE:
