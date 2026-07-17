@@ -304,6 +304,166 @@ def test_six_test_comparisons_use_shared_inputs_and_explicit_adopted_failure() -
     assert all(item[1]["cost_config"] == {"fee": "same"} for item in calls)
 
 
+def test_main_routes_explicit_three_day_profile_before_weekly_loaders(monkeypatch) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    args = SimpleNamespace(profile="three-day-daily-k4-v1")
+    calls = []
+    monkeypatch.setattr(module, "parse_walk_forward_args", lambda argv=None: args)
+    monkeypatch.setattr(
+        module, "run_three_day_profile_main",
+        lambda supplied: calls.append(("three-day", supplied)) or 0,
+    )
+    monkeypatch.setattr(
+        module, "load_walk_forward_inputs",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("weekly loader reached")),
+    )
+
+    assert module.main([]) == 0
+    assert calls == [("three-day", args)]
+
+
+def test_concrete_dependency_factory_keeps_validation_and_test_lazy(monkeypatch, tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    calls = []
+    args = SimpleNamespace(
+        symbol="BTCUSDT", raw_kline_root=tmp_path, feature_cache_root=None,
+        evidence_rows_path=tmp_path / "evidence.jsonl", resume=True,
+        output_json=tmp_path / "r.json", output_markdown=tmp_path / "r.md",
+        output_model=tmp_path / "model.json", output_mapping=tmp_path / "mapping.json",
+        dry_run=False, manifest_only=False,
+    )
+    monkeypatch.setattr(
+        module, "verify_three_day_experiment_sources",
+        lambda a: calls.append("verify") or {"candidate_manifest": object()},
+    )
+    monkeypatch.setattr(module, "load_three_day_validation_evidence", lambda *a, **k: calls.append("validation"))
+    monkeypatch.setattr(module, "load_three_day_test_inputs", lambda *a, **k: calls.append("test"))
+
+    dependencies = module.build_three_day_experiment_dependencies(args)
+
+    assert calls == []
+    dependencies.verify_sources()
+    assert calls == ["verify"]
+
+
+def test_three_day_model_gate_failure_publishes_cash_without_test(monkeypatch) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    calls = []
+    outcome = module.ThreeDayK4FitOutcome("failed-model-cash", None, ("gate",))
+    dependencies = module.ThreeDayExperimentDependencies(
+        verify_sources=lambda: calls.append("verify") or {},
+        fit_and_freeze_model=lambda sources: (_ for _ in ()).throw(module.ThreeDayModelGateFailure(outcome)),
+        freeze_candidates=lambda: calls.append("manifest"),
+        load_mapping_evidence=lambda **kwargs: calls.append("mapping"),
+        build_strict_mapping=lambda **kwargs: calls.append("build"),
+        load_validation_evidence=lambda **kwargs: calls.append("validation"),
+        report_validation_sensitivity=lambda **kwargs: calls.append("sensitivity"),
+        rebuild_final_strict_mapping=lambda **kwargs: calls.append("final"),
+        select_global_fixed_baseline=lambda **kwargs: calls.append("baseline"),
+        load_test=lambda freeze: calls.append("test"),
+        run_test_comparisons=lambda **kwargs: calls.append("comparisons"),
+        publish=lambda **kwargs: calls.append("publish"),
+    )
+    args = SimpleNamespace(dry_run=False, manifest_only=False)
+    monkeypatch.setattr(module, "build_three_day_experiment_dependencies", lambda supplied: dependencies)
+    monkeypatch.setattr(module, "_publish_model_failure", lambda supplied, failure: calls.append("cash-report"))
+
+    assert module.run_three_day_profile_main(args) == 1
+    assert calls == ["verify", "cash-report"]
+
+
+def test_three_day_main_composes_concrete_stages_and_publishes_last(monkeypatch, tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    calls = []
+    manifest = object()
+    args = SimpleNamespace(
+        profile="three-day-daily-k4-v1", symbol="BTCUSDT",
+        raw_kline_root=tmp_path, feature_cache_root=None,
+        evidence_rows_path=tmp_path / "evidence.jsonl", resume=True,
+        output_json=tmp_path / "report.json", output_markdown=tmp_path / "report.md",
+        output_model=tmp_path / "model.json", output_mapping=tmp_path / "mapping.json",
+        dry_run=False, manifest_only=False,
+    )
+    monkeypatch.setattr(module, "parse_walk_forward_args", lambda argv=None: args)
+    monkeypatch.setattr(
+        module, "verify_three_day_experiment_sources",
+        lambda supplied: calls.append("verify") or {"candidate_manifest": manifest},
+    )
+    monkeypatch.setattr(
+        module, "load_and_fit_fold_local_three_day_k4_model",
+        lambda **kwargs: calls.append("cluster-fit") or module.ThreeDayK4FitOutcome(
+            "model-fit", {"artifact_hash": "a" * 64}
+        ),
+    )
+    monkeypatch.setattr(
+        module, "load_three_day_mapping_evidence",
+        lambda *args, **kwargs: calls.append("mapping-evidence") or {"ledger_hash": "b" * 64},
+    )
+    monkeypatch.setattr(
+        module, "build_three_day_strict_mapping",
+        lambda **kwargs: calls.append("initial-mapping") or {"artifact_hash": "c" * 64},
+    )
+    monkeypatch.setattr(
+        module, "load_three_day_validation_evidence",
+        lambda *args, **kwargs: calls.append("validation-evidence") or {"ledger_hash": "d" * 64},
+    )
+    monkeypatch.setattr(
+        module, "report_three_day_validation_sensitivity",
+        lambda **kwargs: calls.append("sensitivity") or {"strict": {}},
+    )
+    monkeypatch.setattr(
+        module, "rebuild_three_day_final_mapping",
+        lambda **kwargs: calls.append("final-mapping") or {"artifact_hash": "e" * 64},
+    )
+    monkeypatch.setattr(
+        module, "select_three_day_global_baseline",
+        lambda **kwargs: calls.append("global-baseline") or {"decision": "cash"},
+    )
+    def load_test(*args, **kwargs):
+        assert "global-baseline" in calls
+        calls.append("test-load")
+        return object()
+    monkeypatch.setattr(module, "load_three_day_test_inputs", load_test)
+    monkeypatch.setattr(
+        module, "run_concrete_three_day_test_comparisons",
+        lambda **kwargs: calls.append("comparisons") or {"cash": {}},
+    )
+    def publish(supplied, **kwargs):
+        assert calls[-1] == "comparisons"
+        calls.append("publish")
+        supplied.output_json.write_bytes(b"{}")
+        return {}
+    monkeypatch.setattr(module, "publish_three_day_outputs", publish)
+
+    assert module.main([]) == 0
+    assert calls == [
+        "verify", "cluster-fit", "mapping-evidence", "initial-mapping",
+        "validation-evidence", "sensitivity", "final-mapping", "global-baseline",
+        "test-load", "comparisons", "publish",
+    ]
+
+
+def test_adoption_assessment_is_inconclusive_when_required_baseline_failed() -> None:
+    from scripts.chart_regime_strategy_mapping import assess_three_day_adoption
+
+    result = assess_three_day_adoption({
+        "cash": {"status": "completed", "return_ratio": "0"},
+        "current_adopted_fixed": {"status": "failed_baseline"},
+        "pre_test_global_best_fixed": {"status": "completed", "return_ratio": "0.01"},
+        "k4_dynamic_active_strategy_opposite_exit": {
+            "status": "completed", "return_ratio": "0.05", "max_drawdown_ratio": "0.02",
+        },
+    })
+
+    assert result["status"] == "inconclusive"
+    assert result["adopted"] is False
+    assert "required_baseline_failed" in result["reasons"]
+
+
 def test_all_eight_walk_forward_fold_dates_are_accepted() -> None:
     args = parse_walk_forward_args([
         "--symbol", "BTCUSDT",

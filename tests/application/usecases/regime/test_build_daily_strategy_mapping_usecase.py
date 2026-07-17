@@ -20,8 +20,34 @@ from src.application.usecases.regime.build_daily_strategy_mapping_usecase import
     maximum_drawdown,
     positive_profit_concentration_shares,
     rejection_reasons,
+    select_global_fixed_daily_candidate,
     worst_seven_calendar_day_return,
 )
+
+
+def test_global_fixed_selector_ignores_components_and_uses_shared_winner_order() -> None:
+    days = mapping_calendar()[:90]
+    manifest = (("candidate-a", sha("candidate-a")), ("candidate-b", sha("candidate-b")))
+    rows = tuple(
+        evidence(
+            day=day,
+            component=COMPONENTS[index % 4],
+            candidate=candidate,
+            candidate_hash=sha(candidate),
+            daily_return=Decimal("0.001") if candidate == "candidate-a" else Decimal("0.002"),
+        )
+        for index, day in enumerate(days)
+        for candidate in ("candidate-a", "candidate-b")
+    )
+
+    result = select_global_fixed_daily_candidate(
+        candidate_manifest=manifest, evidence_rows=rows
+    )
+
+    assert result.decision == "strategy"
+    assert result.candidate_id == "candidate-b"
+    assert result.candidate_hash == sha("candidate-b")
+    assert all(item.component_fingerprint == "global" for item in result.assessments)
 from src.domain.regime import (
     DailyCandidateAssessment,
     DailyStrategyEvidence,

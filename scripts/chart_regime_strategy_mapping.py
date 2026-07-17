@@ -54,6 +54,7 @@ from scripts.scheduler_driven_scalping_backtest import (
     microstructure_alpha_candidates,
     multi_frequency_candidates,
     run_scheduler_driven_backtest,
+    run_scheduler_driven_daily_regime_backtest,
     run_scheduler_driven_regime_backtest,
     required_warmup_candles,
     validate_unique_candidate_ids,
@@ -63,6 +64,11 @@ from scripts.scheduler_driven_scalping_backtest import (
 from src.application.usecases.regime.build_strategy_mapping_usecase import (
     BuildStrategyMappingCommand,
     BuildStrategyMappingUseCase,
+)
+from src.application.usecases.regime.build_daily_strategy_mapping_usecase import (
+    BuildDailyStrategyMappingCommand,
+    BuildDailyStrategyMappingUseCase,
+    select_global_fixed_daily_candidate,
 )
 from src.application.usecases.regime.select_regime_model_usecase import (
     RegimeModelEvidence,
@@ -90,12 +96,17 @@ from src.infrastructure.exchange.binance.research_data.three_day_feature_history
 )
 from src.application.services.chart_feature_extractor import ChartFeatureExtractor
 from src.application.services.daily_strategy_evidence import (
+    AppendOnlyEvidenceLedger,
+    DAILY_EVIDENCE_CODE_VERSION,
+    DAILY_EVIDENCE_KEY_FIELDS,
+    DAILY_EVIDENCE_SCHEMA_VERSION,
     DailyCandidateCatalog,
     DailyEvidenceReplayContract,
     DailyEvidenceRunIdentity,
     candidate_feature_requirements,
     build_three_day_daily_candidate_manifest as _build_daily_candidate_manifest,
     run_daily_strategy_evidence as _run_daily_strategy_evidence,
+    market_snapshot_hash,
 )
 from src.domain.market import Candle, Timeframe
 from src.domain.market_feature import MarketFeatureSet, MarketFeatureValue
@@ -115,6 +126,7 @@ from src.domain.regime import (
     ThreeDayChartFeatureVector,
     ThreeDayDailyResearchProfile,
     STRICT_RISK_POLICY,
+    daily_mapping_artifact_hash,
 )
 
 
@@ -408,6 +420,62 @@ def run_six_three_day_test_comparisons(
     return results
 
 
+def assess_three_day_adoption(comparisons: Mapping[str, object]) -> dict[str, object]:
+    """Describe untouched-Test credibility without mutating any adopted state."""
+    reasons = []
+    required = (
+        "cash", "current_adopted_fixed", "pre_test_global_best_fixed",
+        "k4_dynamic_active_strategy_opposite_exit",
+    )
+    rows = {name: comparisons.get(name) for name in required}
+    if any(not isinstance(rows[name], Mapping) for name in required):
+        reasons.append("required_comparison_missing")
+    if any(
+        isinstance(rows[name], Mapping) and rows[name].get("status") in {"failed", "failed_baseline"}
+        for name in ("current_adopted_fixed", "pre_test_global_best_fixed")
+    ):
+        reasons.append("required_baseline_failed")
+
+    def metric(row, name):
+        if not isinstance(row, Mapping):
+            return None
+        value = row.get(name)
+        nested = row.get("continuous_metrics")
+        if value is None and isinstance(nested, Mapping):
+            value = nested.get(name)
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, TypeError):
+            return None
+        return parsed if parsed.is_finite() else None
+
+    primary = rows["k4_dynamic_active_strategy_opposite_exit"]
+    primary_return = metric(primary, "return_ratio")
+    baseline_returns = tuple(metric(rows[name], "return_ratio") for name in required[:3])
+    drawdown = metric(primary, "max_drawdown_ratio")
+    if drawdown is None:
+        drawdown = metric(primary, "portfolio_max_drawdown_ratio")
+    if primary_return is None or any(value is None for value in baseline_returns):
+        reasons.append("insufficient_return_evidence")
+    else:
+        if primary_return <= 0:
+            reasons.append("dynamic_primary_not_positive")
+        if any(primary_return <= value for value in baseline_returns if value is not None):
+            reasons.append("no_credible_improvement_over_required_baselines")
+    if drawdown is None:
+        reasons.append("insufficient_drawdown_evidence")
+    elif drawdown > STRICT_RISK_POLICY.maximum_drawdown_ratio:
+        reasons.append("unacceptable_drawdown")
+    credible = not reasons
+    return {
+        "status": "unadopted" if credible else "inconclusive",
+        "adopted": False,
+        "credible_improvement": credible,
+        "reasons": reasons or ["descriptive_only_no_automatic_adoption"],
+        "runtime_mutated": False,
+    }
+
+
 def write_three_day_publication_atomic(
     *,
     report_json: bytes,
@@ -454,10 +522,467 @@ class ThreeDayExperimentDependencies:
             raise ValueError("three-day experiment dependencies must be callable")
 
 
+@dataclass(frozen=True)
+class ThreeDayPhaseEvidence:
+    phase: str
+    rows: tuple[object, ...]
+    calendar: tuple[datetime, ...]
+    assignments: tuple[str, ...]
+    run_identity: DailyEvidenceRunIdentity
+    ledger_path: Path
+    ledger_hash: str
+
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "phase": self.phase,
+            "run_identity": self.run_identity.canonical_payload(),
+            "run_identity_hash": self.run_identity.digest,
+            "ledger_path": self.ledger_path.as_posix(),
+            "ledger_hash": self.ledger_hash,
+            "row_count": len(self.rows),
+            "calendar_count": len(self.calendar),
+            "assignment_hash": _canonical_hash(list(self.assignments)),
+        }
+
+
+class ThreeDayModelGateFailure(RuntimeError):
+    def __init__(self, outcome: ThreeDayK4FitOutcome):
+        super().__init__("three-day K4 model gates failed")
+        self.outcome = outcome
+
+
+def verify_three_day_experiment_sources(args: argparse.Namespace) -> dict[str, object]:
+    if args.symbol != "BTCUSDT":
+        raise ValueError("three-day profile supports BTCUSDT only")
+    manifest = build_three_day_daily_candidate_manifest(expected_count=459)
+    if len(manifest.entries) != 459:
+        raise ValueError("three-day candidate manifest must contain exactly 459 candidates")
+    if args.evidence_rows_path is None and not (args.dry_run or args.manifest_only):
+        raise ValueError("normal three-day execution requires --evidence-rows-path")
+    return {
+        "profile": ThreeDayDailyResearchProfile().canonical_payload(),
+        "candidate_manifest": manifest,
+        "candidate_count": len(manifest.entries),
+        "candidate_manifest_hash": manifest.manifest_hash,
+        "raw_kline_root": Path(args.raw_kline_root).as_posix(),
+        "feature_cache_root": None if args.feature_cache_root is None else Path(args.feature_cache_root).as_posix(),
+    }
+
+
+def _phase_ledger_path(base: Path, phase: str) -> Path:
+    label = phase.replace("_", "-")
+    return base.with_name(f"{base.stem}-{label}{base.suffix or '.jsonl'}")
+
+
+def _load_exact_minute_market(
+    *, symbol: str, raw_kline_root: Path, start_at: datetime, end_at: datetime
+) -> tuple[MarketSnapshot, list[dict[str, object]]]:
+    candles = []
+    archives = []
+    expected = start_at
+    for month in _month_starts(start_at, end_at):
+        url = _archive_url(symbol, month)
+        path = raw_kline_root / symbol / Path(url).name
+        sha256, expected_sha256, checksum_url = _ensure_archive(path, url)
+        archives.append({
+            "path": path.as_posix(), "source_url": url, "sha256": sha256,
+            "expected_sha256": expected_sha256, "checksum_url": checksum_url,
+            "size": path.stat().st_size,
+        })
+        for candle in _archive_candles(path, symbol, start_at=start_at, end_at=end_at):
+            if candle.opened_at != expected:
+                raise ValueError("three-day phase OHLCV contains a gap, duplicate, or reversal")
+            expected = candle.closed_at
+            candles.append(candle)
+    if expected != end_at:
+        raise ValueError("three-day phase OHLCV coverage is incomplete")
+    return MarketSnapshot(tuple(candles)), archives
+
+
+def load_three_day_phase_evidence(
+    args: argparse.Namespace,
+    *,
+    phase: str,
+    model: ThreeDayK4ModelArtifact,
+    candidate_manifest: object,
+) -> ThreeDayPhaseEvidence:
+    profile = ThreeDayDailyResearchProfile()
+    interval = getattr(profile.fold, phase)
+    vectors, vector_provenance = load_three_day_feature_history(
+        symbol=args.symbol,
+        start=interval.start_at - timedelta(days=3),
+        end=interval.end_at,
+        raw_root=Path(args.raw_kline_root),
+        expected_anchor_count=(interval.end_at - interval.start_at).days,
+    )
+    assignments = tuple(model.assign(vector).fingerprint for vector in vectors)
+    calendar = tuple(vector.anchor_at for vector in vectors)
+    candidates = tuple(entry.candidate for entry in candidate_manifest.entries)
+    warmup = required_warmup_candles(candidates, None)
+    market_start = interval.start_at - timedelta(minutes=warmup)
+    market, archives = _load_exact_minute_market(
+        symbol=args.symbol, raw_kline_root=Path(args.raw_kline_root),
+        start_at=market_start, end_at=interval.end_at,
+    )
+    provider, cache_provenance = _select_feature_cache(
+        args.feature_cache_root, required_start=market_start,
+        required_end=interval.end_at, verify_full_file=True,
+    )
+    provider_provenance = getattr(provider, "feature_provenance", cache_provenance)
+    provider_coverage = getattr(provider, "feature_source_coverage", {})
+    unavailable = getattr(provider, "feature_unavailable_counts", {})
+    identity = DailyEvidenceRunIdentity(
+        profile_id=profile.profile_id,
+        feature_schema_version=vectors[0].schema_version,
+        phase=phase,
+        phase_start_at=interval.start_at,
+        phase_end_at=interval.end_at,
+        model_artifact_hash=model.artifact_hash,
+        candidate_manifest_hash=candidate_manifest.manifest_hash,
+        candidate_universe_hash=candidate_manifest.candidate_universe_hash,
+        ordered_candidate_definition_hashes=candidate_manifest.ordered_definition_hashes,
+        market_data_hash=market_snapshot_hash(market),
+        feature_cache_hash=getattr(provider, "feature_cache_hash", None),
+        feature_config_hash=feature_provider_config_hash(provider),
+        feature_cache_schema_version=str(getattr(provider, "feature_schema_version", "none-v1")),
+        feature_provenance_hash=_canonical_hash(provider_provenance),
+        feature_source_coverage_hash=_canonical_hash(provider_coverage),
+        feature_unavailable_counts_hash=_canonical_hash(unavailable),
+        engine_version=BACKTEST_ENGINE_VERSION,
+        cost_model=canonical_daily_evidence_replay_contract().cost_model,
+        symbol=args.symbol, timeframe="1m", initial_equity=Decimal("10000"),
+        code_version=DAILY_EVIDENCE_CODE_VERSION,
+        evidence_schema_version=DAILY_EVIDENCE_SCHEMA_VERSION,
+    )
+    ledger_path = _phase_ledger_path(Path(args.evidence_rows_path), phase)
+    if ledger_path.exists() and not args.resume:
+        raise ValueError(f"evidence ledger exists; use --resume: {ledger_path}")
+    ledger = AppendOnlyEvidenceLedger(ledger_path, DAILY_EVIDENCE_KEY_FIELDS)
+    rows = []
+    for day, component in zip(calendar, assignments):
+        rows.extend(run_daily_strategy_evidence(
+            manifest=candidate_manifest, phase=phase,
+            outcome_start_at=day, component_fingerprint=component,
+            market=market, market_feature_provider=provider,
+            run_identity=identity, ledger=ledger,
+        ))
+    ledger_hash = hashlib.sha256(ledger_path.read_bytes()).hexdigest()
+    close = getattr(provider, "close", None)
+    if callable(close):
+        close()
+    return ThreeDayPhaseEvidence(
+        phase, tuple(rows), calendar, assignments, identity, ledger_path, ledger_hash
+    )
+
+
+def load_three_day_mapping_evidence(args, *, model, candidate_manifest):
+    return load_three_day_phase_evidence(
+        args, phase="mapping_fit", model=model, candidate_manifest=candidate_manifest
+    )
+
+
+def load_three_day_validation_evidence(args, *, model, candidate_manifest):
+    return load_three_day_phase_evidence(
+        args, phase="validation", model=model, candidate_manifest=candidate_manifest
+    )
+
+
+def _mapping_command(model, manifest, *bundles: ThreeDayPhaseEvidence):
+    return BuildDailyStrategyMappingCommand(
+        model_artifact_hash=model.artifact_hash,
+        candidate_manifest=manifest.ordered_definition_hashes,
+        calendar=tuple(day for bundle in bundles for day in bundle.calendar),
+        component_assignments=tuple(value for bundle in bundles for value in bundle.assignments),
+        evidence_rows=tuple(row for bundle in bundles for row in bundle.rows),
+    )
+
+
+def build_three_day_strict_mapping(*, model, candidate_manifest, evidence, risk_policy):
+    if risk_policy != STRICT_RISK_POLICY:
+        raise ValueError("canonical mapping build requires strict policy")
+    return BuildDailyStrategyMappingUseCase().execute(
+        _mapping_command(model, candidate_manifest, evidence)
+    ).artifact
+
+
+def rebuild_three_day_final_mapping(
+    *, model, candidate_manifest, mapping_evidence, validation_evidence, risk_policy
+):
+    if risk_policy != STRICT_RISK_POLICY:
+        raise ValueError("final mapping rebuild requires strict policy")
+    return BuildDailyStrategyMappingUseCase().execute(
+        _mapping_command(model, candidate_manifest, mapping_evidence, validation_evidence)
+    ).artifact
+
+
+def report_three_day_validation_sensitivity(
+    *, frozen_mapping, validation_evidence, strict_policy, sensitivity_policies
+):
+    manifest = tuple(sorted(frozen_mapping.candidate_hashes.items()))
+    rows = validation_evidence.rows
+    policies = {"strict": strict_policy, **dict(sensitivity_policies)}
+    return {
+        name: select_global_fixed_daily_candidate(
+            candidate_manifest=manifest, evidence_rows=rows, risk_policy=policy
+        ).canonical_payload()
+        for name, policy in sorted(policies.items())
+    }
+
+
+def select_three_day_global_baseline(
+    *, candidate_manifest, mapping_evidence, validation_evidence, risk_policy
+):
+    return select_global_fixed_daily_candidate(
+        candidate_manifest=candidate_manifest.ordered_definition_hashes,
+        evidence_rows=mapping_evidence.rows + validation_evidence.rows,
+        risk_policy=risk_policy,
+    )
+
+
+def load_three_day_test_inputs(args, freeze: PreTestFreeze):
+    if not isinstance(freeze, PreTestFreeze):
+        raise RuntimeError("validated freeze is required for Test inputs")
+    profile = ThreeDayDailyResearchProfile()
+    interval = profile.fold.test
+    context_start = interval.start_at - timedelta(days=3)
+    market, archives = _load_exact_minute_market(
+        symbol=args.symbol, raw_kline_root=Path(args.raw_kline_root),
+        start_at=context_start, end_at=interval.end_at,
+    )
+    provider, cache = _select_feature_cache(
+        args.feature_cache_root, required_start=context_start,
+        required_end=interval.end_at, verify_full_file=True,
+    )
+    provenance = {
+        "archives": archives,
+        "archive_set_hash": _canonical_hash(archives),
+        "coverage": {
+            "start_at": context_start.isoformat(), "end_at": interval.end_at.isoformat(),
+            "gaps": [],
+        },
+        "feature_cache": cache,
+        "classification_context_days": 3,
+        "pre_test_freeze_hash": freeze.pre_test_freeze_hash,
+    }
+    return TestReplayInputs(market, provenance, provider)
+
+
+def _three_day_cash_result(**kwargs) -> dict[str, object]:
+    initial = kwargs["initial_equity"]
+    return {
+        "status": "completed", "candidate_id": "cash",
+        "initial_equity": str(initial), "final_equity": str(initial),
+        "return_ratio": "0", "max_drawdown_ratio": "0", "trade_count": 0,
+        "trades": [], "equity_curve": [],
+    }
+
+
+def _three_day_static_result(**kwargs):
+    inputs = kwargs["test_inputs"]
+    interval = ThreeDayDailyResearchProfile().fold.test
+    return run_scheduler_driven_backtest(
+        inputs.market,
+        context_start_at=interval.start_at - timedelta(days=3),
+        start_at=interval.start_at, end_at=interval.end_at,
+        candidate=kwargs["candidate"], market_feature_provider=inputs.market_feature_provider,
+        initial_equity=kwargs["initial_equity"], include_trade_details=True,
+        force_close_at_end=True, include_deferred=True,
+    )
+
+
+def _three_day_dynamic_result(**kwargs):
+    inputs = kwargs["test_inputs"]
+    interval = ThreeDayDailyResearchProfile().fold.test
+    return run_scheduler_driven_daily_regime_backtest(
+        inputs.market, start_at=interval.start_at, end_at=interval.end_at,
+        candidates=kwargs["candidates"], model_artifact=kwargs["model"],
+        mapping_artifact=kwargs["mapping"],
+        position_exit_policy=kwargs["position_exit_policy"],
+        candidate_manifest=kwargs["candidate_manifest"],
+        market_feature_provider=inputs.market_feature_provider,
+        initial_equity=kwargs["initial_equity"], include_deferred=True,
+        force_close_at_end=True,
+    )
+
+
+def _three_day_manual_result(**kwargs):
+    return _three_day_static_result(**kwargs, candidate=_manual_router_candidate())
+
+
+def run_concrete_three_day_test_comparisons(
+    *, test_inputs, model, mapping, global_fixed_baseline, risk_policy,
+    candidate_manifest,
+):
+    if risk_policy != STRICT_RISK_POLICY:
+        raise ValueError("untouched Test requires strict policy")
+    candidates = tuple(entry.candidate for entry in candidate_manifest.entries)
+    by_id = {candidate.candidate_id: candidate for candidate in candidates}
+    global_candidate = (
+        None if global_fixed_baseline.decision == "cash"
+        else by_id[global_fixed_baseline.candidate_id]
+    )
+    return run_six_three_day_test_comparisons(
+        test_inputs=test_inputs, model=model, mapping=mapping,
+        candidate_manifest=candidate_manifest,
+        global_fixed_candidate=global_candidate, candidates=candidates,
+        resolve_current_adopted=default_candidate,
+        cash_runner=_three_day_cash_result, static_runner=_three_day_static_result,
+        dynamic_runner=_three_day_dynamic_result,
+        manual_router_runner=_three_day_manual_result,
+        cost_config=canonical_daily_evidence_replay_contract().cost_model,
+        initial_equity=Decimal("10000"),
+    )
+
+
+def _canonical_daily_mapping_bytes(mapping) -> bytes:
+    payload = dict(mapping.canonical_payload())
+    payload["artifact_hash"] = daily_mapping_artifact_hash(mapping)
+    return (json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
+
+
+def publish_three_day_outputs(args, *, report, model, mapping) -> dict[str, str]:
+    rendered = render_three_day_publication(
+        report=report, model_json=model.to_json().encode("utf-8"),
+        mapping_json=_canonical_daily_mapping_bytes(mapping),
+    )
+    write_three_day_publication_atomic(
+        report_json=rendered.report_json, report_markdown=rendered.report_markdown,
+        model_json=rendered.model_json, mapping_json=rendered.mapping_json,
+        output_json=args.output_json, output_markdown=args.output_markdown,
+        output_model=args.output_model, output_mapping=args.output_mapping,
+    )
+    return {
+        "report_file_hash": rendered.report_file_hash,
+        "model_file_hash": hashlib.sha256(rendered.model_json).hexdigest(),
+        "mapping_file_hash": hashlib.sha256(rendered.mapping_json).hexdigest(),
+        "markdown_file_hash": hashlib.sha256(rendered.report_markdown).hexdigest(),
+    }
+
+
+def build_three_day_experiment_dependencies(args) -> ThreeDayExperimentDependencies:
+    sources: dict[str, object] = {}
+    manifest_holder: dict[str, object] = {}
+
+    def verify():
+        result = verify_three_day_experiment_sources(args)
+        sources.update(result)
+        manifest_holder["value"] = result["candidate_manifest"]
+        return result
+
+    def fit(verified):
+        outcome = load_and_fit_fold_local_three_day_k4_model(
+            raw_root=Path(args.raw_kline_root),
+            code_provenance_hash=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        )
+        if outcome.artifact is None:
+            raise ThreeDayModelGateFailure(outcome)
+        return outcome.artifact
+
+    def manifest():
+        if "value" not in manifest_holder:
+            raise RuntimeError("sources must be verified before candidate freeze")
+        return manifest_holder["value"]
+
+    def publish(**kwargs):
+        return publish_three_day_outputs(args, **kwargs)
+
+    return ThreeDayExperimentDependencies(
+        verify_sources=verify,
+        fit_and_freeze_model=fit,
+        freeze_candidates=manifest,
+        load_mapping_evidence=lambda **kw: load_three_day_mapping_evidence(args, **kw),
+        build_strict_mapping=build_three_day_strict_mapping,
+        load_validation_evidence=lambda **kw: load_three_day_validation_evidence(args, **kw),
+        report_validation_sensitivity=report_three_day_validation_sensitivity,
+        rebuild_final_strict_mapping=rebuild_three_day_final_mapping,
+        select_global_fixed_baseline=select_three_day_global_baseline,
+        load_test=lambda freeze: load_three_day_test_inputs(args, freeze),
+        run_test_comparisons=lambda **kw: run_concrete_three_day_test_comparisons(
+            **kw, candidate_manifest=manifest_holder["value"]
+        ),
+        publish=publish,
+    )
+
+
+def _publish_model_failure(args, failure: ThreeDayModelGateFailure) -> None:
+    reason = list(failure.outcome.rejection_reasons) or ["fixed-k4-model-gates"]
+    report = {
+        "schema_version": "three-day-daily-k4-report-v1",
+        "status": "failed-model-cash", "rejection_reasons": reason,
+        "test_comparisons": {},
+        "leakage_audit": {"test_loader_called": False, "adoption_status": "inconclusive"},
+    }
+    model = (json.dumps({"kind": "cash_only", "reason": reason}, sort_keys=True) + "\n").encode()
+    mapping = (json.dumps({"kind": "cash_only", "reason": reason}, sort_keys=True) + "\n").encode()
+    rendered = render_three_day_publication(report=report, model_json=model, mapping_json=mapping)
+    write_three_day_publication_atomic(
+        report_json=rendered.report_json, report_markdown=rendered.report_markdown,
+        model_json=model, mapping_json=mapping,
+        output_json=args.output_json, output_markdown=args.output_markdown,
+        output_model=args.output_model, output_mapping=args.output_mapping,
+    )
+
+
+def run_three_day_profile_main(args) -> int:
+    if args.dry_run or args.manifest_only:
+        plan = verify_three_day_experiment_sources(args)
+        print(json.dumps({
+            "profile": THREE_DAY_PROFILE_ID,
+            "candidate_count": plan["candidate_count"],
+            "candidate_manifest_hash": plan["candidate_manifest_hash"],
+            "mode": "manifest" if args.manifest_only else "dry-run",
+        }, sort_keys=True))
+        return 0
+    try:
+        report = run_three_day_daily_k4_experiment(
+            dependencies=build_three_day_experiment_dependencies(args)
+        )
+    except ThreeDayModelGateFailure as failure:
+        _publish_model_failure(args, failure)
+        return 1
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"three-day experiment failed: {error}")
+        return 1
+    print(json.dumps({
+        "output_json": str(args.output_json),
+        "output_markdown": str(args.output_markdown),
+        "output_model": str(args.output_model),
+        "output_mapping": str(args.output_mapping),
+        "pre_test_freeze_hash": report["pre_test_freeze_hash"],
+        "report_file_hash": hashlib.sha256(Path(args.output_json).read_bytes()).hexdigest(),
+    }, sort_keys=True))
+    return 0
+
+
 def _freeze_boundary_payload(value: object) -> Mapping[str, object]:
     canonical = getattr(value, "canonical_payload", None)
     if callable(canonical):
         payload = canonical()
+    elif all(
+        hasattr(value, name)
+        for name in (
+            "entries", "candidate_ids", "ordered_definition_hashes",
+            "candidate_universe_hash", "manifest_hash",
+        )
+    ):
+        payload = {
+            "candidate_count": len(value.entries),
+            "candidate_ids": list(value.candidate_ids),
+            "ordered_definition_hashes": [list(item) for item in value.ordered_definition_hashes],
+            "candidate_universe_hash": value.candidate_universe_hash,
+            "manifest_hash": value.manifest_hash,
+            "entries": [
+                {
+                    "candidate_id": entry.candidate_id,
+                    "definition_hash": entry.definition_hash,
+                    "canonical_candidate_payload": dict(entry.canonical_candidate_payload),
+                    "required_feature_alternatives": entry.required_feature_alternatives,
+                    "deferred_groups": entry.deferred_groups,
+                    "deferred_pattern_provenance": entry.deferred_pattern_provenance,
+                }
+                for entry in value.entries
+            ],
+        }
     elif isinstance(value, Mapping):
         payload = value
     else:
@@ -601,6 +1126,7 @@ def run_three_day_daily_k4_experiment(
         "global_fixed_baseline": _freeze_boundary_payload(global_baseline),
         "validation_sensitivity": sensitivity,
         "test_comparisons": comparisons,
+        "adoption_assessment": assess_three_day_adoption(comparisons),
         "leakage_audit": {
             "test_loaded_after_freeze": True,
             "test_policy": "strict",
@@ -3862,7 +4388,7 @@ def parse_walk_forward_args(argv: Sequence[str] | None = None) -> argparse.Names
     parser.add_argument("--output-model", type=Path)
     parser.add_argument("--output-mapping", type=Path)
     args = parser.parse_args(argv)
-    if args.profile == THREE_DAY_PROFILE_ID:
+    if getattr(args, "profile", None) == THREE_DAY_PROFILE_ID:
         weekly_only = (
             tuple(args.candidate_group), args.include_deferred,
             args.test_claim_status != "untouched", args.test_claim_reason,
@@ -3912,6 +4438,8 @@ def parse_walk_forward_args(argv: Sequence[str] | None = None) -> argparse.Names
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_walk_forward_args(argv)
+    if getattr(args, "profile", None) == THREE_DAY_PROFILE_ID:
+        return run_three_day_profile_main(args)
     supplied = [getattr(args, name) for name in ("cluster_fit_start", "cluster_fit_end", "mapping_fit_start", "mapping_fit_end", "validation_start", "validation_end", "test_start", "test_end")]
     if any(value is None for value in supplied):
         fold = BTCUSDT_FIRST_FOLD

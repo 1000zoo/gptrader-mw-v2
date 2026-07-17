@@ -219,6 +219,42 @@ def test_restore_failure_preserves_backup_and_annotates_publication_error(tmp_pa
     assert len(backups) == 1 and backups[0].read_bytes() == b"old-markdown"
 
 
+def test_atomic_publication_fsyncs_parent_directory(tmp_path, monkeypatch):
+    import scripts.chart_regime_balance_diagnostic as shared
+
+    calls = []
+    monkeypatch.setattr(shared, "_fsync_directory", lambda path: calls.append(Path(path)))
+    shared.write_bytes_atomic((
+        (tmp_path / "a.json", b"a"),
+        (tmp_path / "b.md", b"b"),
+    ))
+
+    assert calls
+    assert set(calls) == {tmp_path}
+
+
+def test_cleanup_failure_is_reported_without_hiding_publication_failure(tmp_path, monkeypatch):
+    import scripts.chart_regime_balance_diagnostic as shared
+
+    first, second = tmp_path / "a.json", tmp_path / "b.md"
+    original_replace = shared.Path.replace
+    def replace(path, target):
+        if path.suffix == ".tmp" and Path(target) == second:
+            raise OSError("publish boom")
+        return original_replace(path, target)
+    def cleanup(path):
+        if path.suffix == ".tmp":
+            raise OSError("cleanup boom")
+        path.unlink(missing_ok=True)
+    monkeypatch.setattr(shared.Path, "replace", replace)
+    monkeypatch.setattr(shared, "_cleanup_path", cleanup)
+
+    with pytest.raises(OSError, match="publish boom") as raised:
+        shared.write_bytes_atomic(((first, b"a"), (second, b"b")))
+
+    assert any("cleanup boom" in note for note in getattr(raised.value, "__notes__", ()))
+
+
 def test_cleanup_failure_does_not_mask_publication_error(tmp_path, monkeypatch):
     import scripts.chart_regime_balance_diagnostic as shared
 

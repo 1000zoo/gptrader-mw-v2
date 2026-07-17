@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import math
 import re
@@ -31,6 +31,7 @@ from src.domain.regime.three_day_daily_profile import (
     PROFILE_ID,
     RANDOM_SEED,
     STRICT_RISK_POLICY,
+    DailyRiskPolicy,
     ThreeDayDailyWalkForwardFold,
     decimal_arithmetic_context,
 )
@@ -68,6 +69,38 @@ class BuildDailyStrategyMappingCommand:
 @dataclass(frozen=True)
 class BuildDailyStrategyMappingResult:
     artifact: DailyStrategyMappingArtifact
+
+
+@dataclass(frozen=True)
+class GlobalFixedBaselineResult:
+    decision: str
+    candidate_id: str | None
+    candidate_hash: str | None
+    assessments: tuple[DailyCandidateAssessment, ...]
+
+    def canonical_payload(self) -> dict[str, object]:
+        return {
+            "decision": self.decision,
+            "candidate_id": self.candidate_id,
+            "candidate_hash": self.candidate_hash,
+            "assessments": [
+                {
+                    "candidate_id": item.candidate_id,
+                    "candidate_hash": item.candidate_hash,
+                    "episode_count": item.episode_count,
+                    "calendar_month_count": item.calendar_month_count,
+                    "closed_trade_count": item.closed_trade_count,
+                    "corrected_lower_bound_ratio": str(item.corrected_lower_bound_ratio),
+                    "return_without_best_episode_ratio": str(item.return_without_best_episode_ratio),
+                    "expected_shortfall_10_ratio": str(item.expected_shortfall_10_ratio),
+                    "maximum_drawdown_ratio": str(item.maximum_drawdown_ratio),
+                    "median_daily_return_ratio": str(item.median_daily_return_ratio),
+                    "eligible": item.eligible,
+                    "rejection_reasons": list(item.rejection_reasons),
+                }
+                for item in self.assessments
+            ],
+        }
 
 
 class BuildDailyStrategyMappingUseCase:
@@ -247,6 +280,139 @@ class BuildDailyStrategyMappingUseCase:
             mapping_fit=fold.mapping_fit,
         )
         return BuildDailyStrategyMappingResult(artifact)
+
+
+def select_global_fixed_daily_candidate(
+    *,
+    candidate_manifest: Sequence[tuple[str, str]],
+    evidence_rows: Sequence[DailyStrategyEvidence],
+    risk_policy: DailyRiskPolicy = STRICT_RISK_POLICY,
+) -> GlobalFixedBaselineResult:
+    """Assess one fixed candidate over all supplied days without regime labels."""
+
+    if not isinstance(risk_policy, DailyRiskPolicy):
+        raise ValueError("global fixed baseline requires a daily risk policy")
+    candidate_ids, candidate_hashes = _validate_manifest(candidate_manifest)
+    rows = tuple(evidence_rows)
+    if not rows:
+        raise ValueError("global fixed baseline requires evidence")
+    calendar = tuple(sorted({row.outcome_start_at for row in rows}))
+    if any(
+        day.tzinfo is not timezone.utc or day.time() != datetime.min.time()
+        for day in calendar
+    ):
+        raise ValueError("global fixed baseline calendar must use UTC midnights")
+    by_key: dict[tuple[str, datetime], DailyStrategyEvidence] = {}
+    cost_hash = engine_hash = model_hash = None
+    data_hashes: dict[datetime, str] = {}
+    for row in rows:
+        if not isinstance(row, DailyStrategyEvidence):
+            raise ValueError("global fixed evidence rows are invalid")
+        key = (row.candidate_id, row.outcome_start_at)
+        if key in by_key or row.candidate_id not in candidate_hashes:
+            raise ValueError("global fixed evidence grid is duplicate or outside the manifest")
+        if row.candidate_hash != candidate_hashes[row.candidate_id]:
+            raise ValueError("global fixed evidence candidate hash drift")
+        for value, previous, field in (
+            (row.cost_config_hash, cost_hash, "cost"),
+            (row.engine_config_hash, engine_hash, "engine"),
+            (row.model_artifact_hash, model_hash, "model"),
+        ):
+            if previous is not None and value != previous:
+                raise ValueError(f"global fixed evidence {field} hash drift")
+        cost_hash = cost_hash or row.cost_config_hash
+        engine_hash = engine_hash or row.engine_config_hash
+        model_hash = model_hash or row.model_artifact_hash
+        if row.outcome_start_at in data_hashes and data_hashes[row.outcome_start_at] != row.data_hash:
+            raise ValueError("global fixed evidence data hash drift")
+        data_hashes[row.outcome_start_at] = row.data_hash
+        by_key[key] = row
+    expected = {(candidate, day) for candidate in candidate_ids for day in calendar}
+    if set(by_key) != expected:
+        raise ValueError("global fixed evidence must cover every candidate and day")
+
+    aligned_by_candidate: dict[str, tuple[Decimal | None, ...]] = {}
+    aligned_calendar = tuple(
+        calendar[0] + timedelta(days=index)
+        for index in range((calendar[-1] - calendar[0]).days + 1)
+    )
+    prelim: dict[str, tuple[tuple[DailyStrategyEvidence, ...], Counter[str], int, int]] = {}
+    coverage = []
+    for candidate in candidate_ids:
+        candidate_rows = tuple(by_key[(candidate, day)] for day in calendar)
+        available = tuple(row for row in candidate_rows if row.availability_status == "available")
+        unavailable = Counter(
+            row.availability_reason for row in candidate_rows if row.availability_status == "unavailable"
+        )
+        months = len({(row.outcome_start_at.year, row.outcome_start_at.month) for row in available})
+        trades = sum(row.closed_trade_count for row in available)
+        row_by_day = {row.outcome_start_at: row for row in candidate_rows}
+        aligned = tuple(
+            (
+                row_by_day[day].net_return_ratio
+                if day in row_by_day and row_by_day[day].availability_status == "available"
+                else None
+            )
+            for day in aligned_calendar
+        )
+        aligned_by_candidate[candidate] = aligned
+        prelim[candidate] = (available, unavailable, months, trades)
+        if len(available) >= MIN_EPISODES and months >= MIN_CALENDAR_MONTHS:
+            coverage.append(candidate)
+    lower_bounds = {candidate: Decimal(0) for candidate in candidate_ids}
+    if coverage:
+        lower_bounds.update(
+            _aligned_component_corrected_lower_bounds(
+                {candidate: aligned_by_candidate[candidate] for candidate in coverage},
+                ("global",) * len(aligned_calendar),
+                "global",
+            )
+        )
+
+    assessments = []
+    for candidate in candidate_ids:
+        available, unavailable, months, trades = prelim[candidate]
+        returns = tuple(row.net_return_ratio for row in available)
+        aligned = aligned_by_candidate[candidate]
+        metrics = _metrics(available, returns, aligned)
+        reasons = rejection_reasons(
+            episode_count=len(returns), calendar_month_count=months,
+            closed_trade_count=trades,
+            net_compounded_return=metrics["net_compounded_return"],
+            corrected_lower_bound=lower_bounds[candidate],
+            worst_seven_day_return=metrics["worst_seven_day_return"],
+            expected_shortfall=metrics["expected_shortfall"], drawdown=metrics["drawdown"],
+            return_without_best=metrics["return_without_best"],
+            top_episode_share=metrics["top_episode_share"],
+            top_five_trade_share=metrics["top_five_trade_share"],
+            has_positive_episode_profit=bool(metrics["has_positive_episode_profit"]),
+            has_positive_trade_profit=bool(metrics["has_positive_trade_profit"]),
+            has_complete_seven_day_block=bool(metrics["has_complete_seven_day_block"]),
+            risk_policy=risk_policy,
+        )
+        assessments.append(DailyCandidateAssessment(
+            component_fingerprint="global", candidate_id=candidate,
+            candidate_hash=candidate_hashes[candidate], assigned_day_count=len(calendar),
+            episode_count=len(returns), unavailable_day_count=sum(unavailable.values()),
+            unavailable_reason_counts=tuple(sorted(unavailable.items())),
+            calendar_month_count=months, closed_trade_count=trades,
+            mean_daily_return_ratio=metrics["mean"], median_daily_return_ratio=metrics["median"],
+            corrected_lower_bound_ratio=lower_bounds[candidate],
+            worst_seven_day_return_ratio=metrics["worst_seven_day_return"],
+            expected_shortfall_10_ratio=metrics["expected_shortfall"],
+            maximum_drawdown_ratio=metrics["drawdown"],
+            return_without_best_episode_ratio=metrics["return_without_best"],
+            top_episode_profit_share=metrics["top_episode_share"],
+            top_five_trade_profit_share=metrics["top_five_trade_share"],
+            eligible=not reasons, rejection_reasons=reasons,
+        ))
+    eligible = tuple(item for item in assessments if item.eligible)
+    if not eligible:
+        return GlobalFixedBaselineResult("cash", None, None, tuple(assessments))
+    winner = min(eligible, key=_winner_order_key)
+    return GlobalFixedBaselineResult(
+        "strategy", winner.candidate_id, winner.candidate_hash, tuple(assessments)
+    )
 
 
 def _circular_moving_block_indices(
@@ -485,7 +651,10 @@ def rejection_reasons(
     has_positive_episode_profit: bool,
     has_positive_trade_profit: bool,
     has_complete_seven_day_block: bool,
+    risk_policy: DailyRiskPolicy = STRICT_RISK_POLICY,
 ) -> tuple[str, ...]:
+    if not isinstance(risk_policy, DailyRiskPolicy):
+        raise ValueError("rejection gates require a daily risk policy")
     failed = {
         "insufficient_daily_episodes": episode_count < MIN_EPISODES,
         "insufficient_calendar_months": calendar_month_count < MIN_CALENDAR_MONTHS,
@@ -495,18 +664,18 @@ def rejection_reasons(
         "statistically_not_better_than_cash": corrected_lower_bound <= 0,
         "insufficient_complete_seven_day_blocks": not has_complete_seven_day_block,
         "worst_seven_day_return_below_limit": worst_seven_day_return
-        < STRICT_RISK_POLICY.minimum_worst_seven_day_return_ratio,
+        < risk_policy.minimum_worst_seven_day_return_ratio,
         "expected_shortfall_below_limit": expected_shortfall
-        < STRICT_RISK_POLICY.minimum_expected_shortfall_10_ratio,
+        < risk_policy.minimum_expected_shortfall_10_ratio,
         "maximum_drawdown_above_limit": drawdown
-        > STRICT_RISK_POLICY.maximum_drawdown_ratio,
+        > risk_policy.maximum_drawdown_ratio,
         "non_positive_return_without_best_episode": return_without_best <= 0,
         "no_positive_episode_profit": not has_positive_episode_profit,
         "top_episode_profit_share_above_limit": top_episode_share
-        > STRICT_RISK_POLICY.maximum_top_episode_profit_share,
+        > risk_policy.maximum_top_episode_profit_share,
         "no_positive_trade_profit": not has_positive_trade_profit,
         "top_five_trade_profit_share_above_limit": top_five_trade_share
-        > STRICT_RISK_POLICY.maximum_top_five_trade_profit_share,
+        > risk_policy.maximum_top_five_trade_profit_share,
     }
     return tuple(reason for reason in _REJECTION_ORDER if failed[reason])
 
@@ -588,12 +757,18 @@ def _validate_manifest(
 def _validate_calendar(calendar: Sequence[datetime]) -> tuple[datetime, ...]:
     supplied = tuple(calendar)
     fold = ThreeDayDailyWalkForwardFold.default()
-    count = (fold.mapping_fit.end_at - fold.mapping_fit.start_at).days
-    expected = tuple(
-        fold.mapping_fit.start_at + timedelta(days=index) for index in range(count)
+    mapping_count = (fold.mapping_fit.end_at - fold.mapping_fit.start_at).days
+    mapping = tuple(
+        fold.mapping_fit.start_at + timedelta(days=index) for index in range(mapping_count)
     )
-    if supplied != expected:
-        raise ValueError("calendar must be the ordered complete Mapping Fit calendar")
+    validation_count = (fold.validation.end_at - fold.validation.start_at).days
+    validation = tuple(
+        fold.validation.start_at + timedelta(days=index) for index in range(validation_count)
+    )
+    if supplied not in (mapping, mapping + validation):
+        raise ValueError(
+            "calendar must be the complete Mapping Fit calendar or ordered Mapping Fit plus Validation"
+        )
     return supplied
 
 
@@ -769,10 +944,12 @@ __all__ = [
     "BuildDailyStrategyMappingCommand",
     "BuildDailyStrategyMappingResult",
     "BuildDailyStrategyMappingUseCase",
+    "GlobalFixedBaselineResult",
     "compounded_return_without_best_episode",
     "expected_shortfall_10",
     "maximum_drawdown",
     "positive_profit_concentration_shares",
     "rejection_reasons",
+    "select_global_fixed_daily_candidate",
     "worst_seven_calendar_day_return",
 ]

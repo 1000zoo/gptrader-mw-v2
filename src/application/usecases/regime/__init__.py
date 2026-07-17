@@ -23,6 +23,8 @@ from src.application.usecases.regime.build_daily_strategy_mapping_usecase import
     BuildDailyStrategyMappingCommand,
     BuildDailyStrategyMappingResult,
     BuildDailyStrategyMappingUseCase,
+    GlobalFixedBaselineResult,
+    select_global_fixed_daily_candidate,
 )
 from src.application.usecases.regime.select_strategy_usecase import (
     SelectStrategyCommand,
@@ -58,6 +60,8 @@ __all__ = [
     "BuildDailyStrategyMappingCommand",
     "BuildDailyStrategyMappingResult",
     "BuildDailyStrategyMappingUseCase",
+    "GlobalFixedBaselineResult",
+    "select_global_fixed_daily_candidate",
     "SelectStrategyCommand",
     "SelectStrategyUseCase",
     "SelectionConfidenceThresholds",

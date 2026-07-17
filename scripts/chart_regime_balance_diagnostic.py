@@ -140,6 +140,12 @@ def _validate_distinct_destinations(*paths: Path) -> None:
     if len(set(identities)) != len(identities):
         raise ValueError("report destinations must be distinct")
     for path in destinations:
+        for component in (path, *path.parents):
+            component_is_junction = getattr(component, "is_junction", None)
+            if component.is_symlink() or (
+                callable(component_is_junction) and component_is_junction()
+            ):
+                raise ValueError("report destination cannot traverse a symlink or junction")
         is_junction = getattr(path, "is_junction", None)
         if (
             path.is_symlink()
@@ -549,6 +555,40 @@ def _best_effort_unlink(path: Path) -> None:
         pass
 
 
+def _cleanup_path(path: Path) -> None:
+    path.unlink(missing_ok=True)
+
+
+def _fsync_directory(path: Path) -> None:
+    """Flush directory metadata on platforms that permit directory handles."""
+    if os.name == "nt":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _validate_generated_paths(finals: Sequence[Path], generated: Sequence[Path]) -> None:
+    all_paths = tuple(finals) + tuple(generated)
+    identities = tuple(_destination_identity(path) for path in all_paths)
+    if len(identities) != len(set(identities)):
+        raise ValueError("temporary, backup, and destination paths must be distinct")
+    _validate_distinct_destinations(*all_paths)
+
+
+def _destination_snapshot(path: Path) -> tuple[object, ...]:
+    if not path.exists() and not path.is_symlink():
+        return (False,)
+    stat = path.lstat()
+    is_junction = getattr(path, "is_junction", None)
+    return (
+        True, stat.st_dev, stat.st_ino, stat.st_mode,
+        path.is_symlink(), callable(is_junction) and is_junction(),
+    )
+
+
 def _write_temp(final: Path, content: bytes) -> Path:
     final.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix=f".{final.name}.", suffix=".tmp", dir=final.parent)
@@ -588,28 +628,46 @@ def write_bytes_atomic(items: Sequence[tuple[Path, bytes]]) -> None:
         raise TypeError("transactional report content must contain at least two byte artifacts")
     finals = tuple(path for path, _ in supplied)
     _validate_distinct_destinations(*finals)
+    snapshots = {final: _destination_snapshot(final) for final in finals}
     temporaries: dict[Path, Path] = {}
     backups: dict[Path, Path] = {}
     originally_absent: set[Path] = set()
     published: set[Path] = set()
     publication_succeeded = False
+    primary_error: BaseException | None = None
     try:
         for final, content in supplied:
             temporaries[final] = _write_temp(final, content)
+        planned_backups = {
+            final: _unused_sibling(final, ".bak")
+            for final in finals
+            if final.exists()
+        }
+        _validate_generated_paths(
+            finals, tuple(temporaries.values()) + tuple(planned_backups.values())
+        )
+        for parent in {final.parent for final in finals}:
+            _fsync_directory(parent)
         for final in finals:
+            if _destination_snapshot(final) != snapshots[final]:
+                raise RuntimeError("report destination changed during publication")
             if final.exists():
-                backup = _unused_sibling(final, ".bak")
+                backup = planned_backups[final]
                 final.replace(backup)
                 backups[final] = backup
+                _fsync_directory(final.parent)
             else:
                 originally_absent.add(final)
         for final in finals:
             temporary = temporaries[final]
+            _validate_generated_paths(finals, tuple(temporaries.values()) + tuple(backups.values()))
             temporary.replace(final)
             temporaries.pop(final)
             published.add(final)
+            _fsync_directory(final.parent)
         publication_succeeded = True
     except BaseException as publication_error:
+        primary_error = publication_error
         rollback_errors = []
         for final in finals:
             try:
@@ -618,20 +676,38 @@ def write_bytes_atomic(items: Sequence[tuple[Path, bytes]]) -> None:
                 if final in backups:
                     backups[final].replace(final)
                     backups.pop(final)
+                    _fsync_directory(final.parent)
                 elif final in originally_absent:
                     final.unlink(missing_ok=True)
+                    _fsync_directory(final.parent)
             except BaseException as rollback_error:
                 rollback_errors.append(rollback_error)
         if rollback_errors:
             for error in rollback_errors:
                 publication_error.add_note(f"rollback error: {error}")
-        raise
     finally:
+        cleanup_errors = []
         for temporary in temporaries.values():
-            _best_effort_unlink(temporary)
+            try:
+                _cleanup_path(temporary)
+            except BaseException as error:
+                cleanup_errors.append(error)
         if publication_succeeded:
             for backup in backups.values():
-                _best_effort_unlink(backup)
+                try:
+                    _cleanup_path(backup)
+                except BaseException as error:
+                    cleanup_errors.append(error)
+        if cleanup_errors:
+            if primary_error is not None:
+                for error in cleanup_errors:
+                    primary_error.add_note(f"cleanup error: {error}")
+            else:
+                primary_error = cleanup_errors[0]
+                for error in cleanup_errors[1:]:
+                    primary_error.add_note(f"additional cleanup error: {error}")
+    if primary_error is not None:
+        raise primary_error.with_traceback(primary_error.__traceback__)
 
 
 def write_reports_atomic(payload: Mapping[str, object], *, json_path: Path, markdown_path: Path) -> None:
