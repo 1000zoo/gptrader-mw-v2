@@ -756,14 +756,9 @@ def _empirical_diagnostic_rows(completion: object) -> list[dict[str, object]]:
 def _empirical_feature_rows(completion: object) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for scope in (completion.full_sample_empirical, *completion.offset_empirical):
-        top = set(scope.top_five_drift_features)
         for row in scope.feature_rows:
             payload = _plain(row)
-            payload["is_top_five"] = row.feature_name in top and (
-                row.primary_component_index == scope.maximum_drift_primary_component_index
-                and row.half_component_index == scope.maximum_drift_half_component_index
-                and row.half_label == scope.maximum_drift_half_label
-            )
+            payload["is_top_five"] = row.rank <= 5
             rows.append(payload)
     return rows
 
