@@ -1,6 +1,6 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 import hashlib
 import json
@@ -42,6 +42,18 @@ from scripts.scheduler_driven_scalping_backtest import (
     feature_provider_config_hash,
 )
 from src.domain.market import Candle, MarketSnapshot, Symbol, Timeframe
+
+
+def _required_test_provenance(freeze) -> dict[str, object]:
+    payload = freeze.canonical_payload
+    return {
+        "pre_test_freeze_hash": freeze.pre_test_freeze_hash,
+        "model_artifact_hash": payload["model"].get("artifact_hash"),
+        "candidate_manifest_hash": payload["candidate_manifest"].get("manifest_hash"),
+        "candidate_universe_hash": payload["candidate_manifest"].get("candidate_universe_hash"),
+        "mapping_artifact_hash": payload["mapping"].get("artifact_hash"),
+        "profile_id": payload["profile"].get("profile_id"),
+    }
 
 
 def test_mapping_module_exposes_scheduler_driven_regime_replay() -> None:
@@ -162,7 +174,7 @@ def test_test_loader_requires_validated_freeze_and_records_first_read() -> None:
         profile={"profile_id": "three-day-daily-k4-v1"}, chronology={},
     )
     state = ThreeDayExperimentState(stage=ThreeDayExperimentStage.PRE_TEST_FROZEN)
-    sentinel = {"provenance": {"pre_test_freeze_hash": freeze.pre_test_freeze_hash}}
+    sentinel = {"provenance": _required_test_provenance(freeze)}
     assert load_test_after_freeze(state=state, freeze=freeze, loader=lambda: sentinel) is sentinel
     assert state.stage is ThreeDayExperimentStage.TEST_LOADED
     assert state.events[-1][0] == "first_test_read"
@@ -256,6 +268,36 @@ def test_test_loader_rejects_any_supplied_identity_that_disagrees_with_freeze(id
     assert state.events == []
 
 
+def test_test_loader_requires_every_non_null_frozen_identity() -> None:
+    from scripts.chart_regime_strategy_mapping import (
+        ThreeDayExperimentStage, ThreeDayExperimentState,
+        create_pre_test_freeze, load_test_after_freeze,
+    )
+    freeze = create_pre_test_freeze(
+        model={"artifact_hash": "a" * 64},
+        candidate_manifest={
+            "manifest_hash": "b" * 64,
+            "candidate_universe_hash": "c" * 64,
+        },
+        evidence={}, mapping={"artifact_hash": "d" * 64},
+        global_fixed_baseline={"decision": "cash"},
+        profile={"profile_id": "three-day-daily-k4-v1"}, chronology={},
+    )
+    state = ThreeDayExperimentState(stage=ThreeDayExperimentStage.PRE_TEST_FROZEN)
+
+    with pytest.raises(ValueError, match="model_artifact_hash"):
+        load_test_after_freeze(
+            state=state,
+            freeze=freeze,
+            loader=lambda: {"provenance": {
+                "pre_test_freeze_hash": freeze.pre_test_freeze_hash,
+            }},
+        )
+
+    assert state.stage is ThreeDayExperimentStage.PRE_TEST_FROZEN
+    assert state.events == []
+
+
 def test_pretest_freeze_recursively_rejects_test_material() -> None:
     from scripts.chart_regime_strategy_mapping import create_pre_test_freeze
 
@@ -325,7 +367,7 @@ def test_three_day_orchestrator_enforces_exact_pretest_order_and_strict_test_pol
         select_global_fixed_baseline=called("global_baseline", {"decision": "cash"}),
         load_test=lambda freeze: (
             calls.append(("load_test", (freeze,), {}))
-            or {"provenance": {"pre_test_freeze_hash": freeze.pre_test_freeze_hash}}
+            or {"provenance": _required_test_provenance(freeze)}
         ),
         run_test_comparisons=called("comparisons", {"cash": {"status": "ok"}}),
         publish=called("publish", None),
@@ -363,7 +405,7 @@ def test_identical_orchestration_runs_have_identical_canonical_reports() -> None
             rebuild_final_strict_mapping=lambda **kwargs: {"artifact_hash": "1" * 64},
             select_global_fixed_baseline=lambda **kwargs: {"decision": "cash"},
             load_test=lambda freeze: {
-                "provenance": {"pre_test_freeze_hash": freeze.pre_test_freeze_hash}
+                "provenance": _required_test_provenance(freeze)
             },
             run_test_comparisons=lambda **kwargs: {"cash": {"status": "completed"}},
             publish=lambda **kwargs: None,
@@ -618,9 +660,7 @@ def test_three_day_main_composes_concrete_stages_and_publishes_last(monkeypatch,
         assert "global-baseline" in calls
         calls.append("test-load")
         freeze = args[1]
-        return SimpleNamespace(data_provenance={
-            "pre_test_freeze_hash": freeze.pre_test_freeze_hash
-        })
+        return SimpleNamespace(data_provenance=_required_test_provenance(freeze))
     monkeypatch.setattr(module, "load_three_day_test_inputs", load_test)
     monkeypatch.setattr(
         module, "run_concrete_three_day_test_comparisons",
@@ -690,10 +730,12 @@ def test_comparison_audits_publish_independently_recomputable_concentration_and_
 
     concentration, active_effect = build_three_day_comparison_audits(comparisons)
 
-    positive_daily_pnl = [Decimal("10"), Decimal("1")]
-    expected_top_day_share = max(positive_daily_pnl) / sum(positive_daily_pnl)
-    positive_trade_pnl = [Decimal("6"), Decimal("4"), Decimal("2")]
-    expected_top_five_share = sum(sorted(positive_trade_pnl, reverse=True)[:5]) / sum(positive_trade_pnl)
+    from src.domain.regime import decimal_arithmetic_context
+    with decimal_arithmetic_context():
+        positive_daily_pnl = [Decimal("10"), Decimal("1")]
+        expected_top_day_share = max(positive_daily_pnl) / sum(positive_daily_pnl)
+        positive_trade_pnl = [Decimal("6"), Decimal("4"), Decimal("2")]
+        expected_top_five_share = sum(sorted(positive_trade_pnl, reverse=True)[:5]) / sum(positive_trade_pnl)
     assert Decimal(concentration["top_episode_profit_share"]) == expected_top_day_share
     assert Decimal(concentration["top_day_profit_share"]) == expected_top_day_share
     assert Decimal(concentration["top_five_trade_profit_share"]) == expected_top_five_share
@@ -705,6 +747,73 @@ def test_comparison_audits_publish_independently_recomputable_concentration_and_
     assert active_effect["active_strategy_opposite_exit_count"] == 2
     assert active_effect["entry_owner_active_strategy_opposite_exit_count"] == 0
     assert active_effect["active_strategy_opposite_exit_count_delta"] == 2
+
+
+def test_comparison_audit_bytes_ignore_ambient_decimal_precision() -> None:
+    from scripts.chart_regime_strategy_mapping import build_three_day_comparison_audits
+
+    comparisons = {
+        "k4_dynamic_active_strategy_opposite_exit": {
+            "return_ratio": "0.1234567890123456789",
+            "max_drawdown_ratio": "0.01234567890123456789",
+            "trades": [
+                {"exit_at": "2026-04-07T01:00:00Z", "net_pnl": "1", "exit_reason": "target"},
+                {"exit_at": "2026-04-08T01:00:00Z", "net_pnl": "2", "exit_reason": "target"},
+            ],
+        },
+        "k4_dynamic_entry_owner_exit": {
+            "return_ratio": "0.0234567890123456789",
+            "max_drawdown_ratio": "0.00234567890123456789",
+            "trades": [],
+        },
+    }
+    serialized = []
+    for precision in (6, 28, 50):
+        with localcontext() as context:
+            context.prec = precision
+            serialized.append(json.dumps(
+                build_three_day_comparison_audits(comparisons),
+                sort_keys=True,
+                separators=(",", ":"),
+            ))
+
+    assert serialized[0] == serialized[1] == serialized[2]
+
+
+def test_markdown_binds_weights_by_numeric_index_and_selected_candidate_trade_count() -> None:
+    from scripts.chart_regime_strategy_mapping import render_three_day_markdown
+
+    report = {
+        "model_artifact": {
+            "component_fingerprints": ["a", "z"],
+            "numeric_index_to_fingerprint": {"0": "z", "1": "a"},
+            "weights": [0.9, 0.1],
+            "model_gates": {"distance_threshold": 4.2},
+        },
+        "strict_mapping": {
+            "entries": [
+                {"component_fingerprint": "z", "strategy_candidate_id": "selected-z", "rejection_reasons": []},
+                {"component_fingerprint": "a", "strategy_candidate_id": "selected-a", "rejection_reasons": []},
+            ],
+            "candidate_assessments": [
+                {"component_fingerprint": "z", "candidate_id": "selected-z", "assigned_day_count": 8, "episode_count": 2, "closed_trade_count": 7, "eligible": True},
+                {"component_fingerprint": "z", "candidate_id": "not-selected-z", "assigned_day_count": 8, "episode_count": 2, "closed_trade_count": 99, "eligible": False},
+                {"component_fingerprint": "a", "candidate_id": "selected-a", "assigned_day_count": 5, "episode_count": 1, "closed_trade_count": 3, "eligible": True},
+            ],
+        },
+        "validation_sensitivity": {},
+        "test_comparisons": {},
+    }
+
+    markdown = render_three_day_markdown(report)
+
+    z_line = next(line for line in markdown.splitlines() if line.startswith("- `z`:"))
+    a_line = next(line for line in markdown.splitlines() if line.startswith("- `a`:"))
+    assert "weight=0.9" in z_line
+    assert "weight=0.1" in a_line
+    assert "selected=selected-z" in z_line
+    assert "closed_trades=7" in z_line
+    assert "closed_trades=106" not in z_line
 
 
 def test_phase_evidence_payload_embeds_rows_assignments_and_recomputable_hash() -> None:

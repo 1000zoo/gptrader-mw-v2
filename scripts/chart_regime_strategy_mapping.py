@@ -131,6 +131,7 @@ from src.domain.regime import (
     ThreeDayChartFeatureVector,
     ThreeDayDailyResearchProfile,
     STRICT_RISK_POLICY,
+    decimal_arithmetic_context,
     daily_mapping_artifact_hash,
 )
 
@@ -335,6 +336,8 @@ def load_test_after_freeze(
     }
     for key, expected in identity_expectations.items():
         supplied = provenance.get(key)
+        if expected is not None and supplied is None:
+            raise ValueError(f"Test loader provenance {key} is required by freeze")
         if supplied is not None and supplied != expected:
             raise ValueError(f"Test loader provenance {key} is incompatible with freeze")
     state.advance(
@@ -384,10 +387,19 @@ def render_three_day_markdown(report: Mapping[str, object]) -> str:
     model_gates = model.get("model_gates", {}) if isinstance(model, Mapping) else {}
     weights = model.get("weights", ()) if isinstance(model, Mapping) else ()
     fingerprints = model.get("component_fingerprints", ()) if isinstance(model, Mapping) else ()
+    numeric_index = (
+        model.get("numeric_index_to_fingerprint", {})
+        if isinstance(model, Mapping) else {}
+    )
     weight_by_component = {
         str(fingerprint): weights[index]
-        for index, fingerprint in enumerate(fingerprints)
-        if isinstance(weights, (tuple, list)) and index < len(weights)
+        for raw_index, fingerprint in numeric_index.items()
+        for index in (int(raw_index),)
+        if (
+            isinstance(numeric_index, Mapping)
+            and isinstance(weights, (tuple, list))
+            and 0 <= index < len(weights)
+        )
     }
     assessments = mapping.get("candidate_assessments", ()) if isinstance(mapping, Mapping) else ()
     assessments_by_component: dict[str, list[Mapping[str, object]]] = {}
@@ -420,18 +432,15 @@ def render_three_day_markdown(report: Mapping[str, object]) -> str:
         component = str(fingerprint)
         component_assessments = assessments_by_component.get(component, [])
         selected = entries_by_component.get(component, {})
+        selected_candidate_id = selected.get("strategy_candidate_id")
+        selected_assessment = next((
+            item for item in component_assessments
+            if item.get("candidate_id") == selected_candidate_id
+        ), {})
         validation = validation_rows.get(component, {})
-        assigned_days = max(
-            (int(item.get("assigned_day_count", 0)) for item in component_assessments),
-            default=0,
-        )
-        episodes = max(
-            (int(item.get("episode_count", 0)) for item in component_assessments),
-            default=0,
-        )
-        closed_trades = sum(
-            int(item.get("closed_trade_count", 0)) for item in component_assessments
-        )
+        assigned_days = int(selected_assessment.get("assigned_day_count", 0))
+        episodes = int(selected_assessment.get("episode_count", 0))
+        closed_trades = int(selected_assessment.get("closed_trade_count", 0))
         lines.append(
             f"- `{component}`: weight={weight_by_component.get(component, 'n/a')}; "
             f"distance_threshold={model_gates.get('distance_threshold', 'n/a') if isinstance(model_gates, Mapping) else 'n/a'}; "
@@ -603,6 +612,13 @@ def _comparison_metric(row: object, name: str) -> Decimal | None:
 
 
 def build_three_day_comparison_audits(
+    comparisons: Mapping[str, object]
+) -> tuple[dict[str, object], dict[str, object]]:
+    with decimal_arithmetic_context():
+        return _build_three_day_comparison_audits(comparisons)
+
+
+def _build_three_day_comparison_audits(
     comparisons: Mapping[str, object]
 ) -> tuple[dict[str, object], dict[str, object]]:
     primary = comparisons.get("k4_dynamic_active_strategy_opposite_exit", {})
