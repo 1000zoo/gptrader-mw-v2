@@ -31,10 +31,12 @@ class AuditInputs:
     markdown: Path
     model: Path
     mapping: Path
+    evidence_rows_path: Path | None = None
 
     def __post_init__(self) -> None:
         for field in self.__dataclass_fields__:
-            object.__setattr__(self, field, Path(getattr(self, field)))
+            value = getattr(self, field)
+            object.__setattr__(self, field, None if value is None else Path(value))
 
 
 def _canonical(value: object) -> object:
@@ -201,6 +203,93 @@ def _audit_model(
     return parsed
 
 
+def _progress(message: str) -> None:
+    print(f"audit: {message}", file=sys.stderr, flush=True)
+
+
+class _LocalVerifiedDownloader:
+    def __init__(self, descriptors: Sequence[Mapping[str, object]], raw_root: Path):
+        self._by_url = {str(item.get("url") or item.get("source_url")): item for item in descriptors}
+        self._raw_root = raw_root.resolve()
+
+    def download(self, url: str, destination: Path, *, source=None, max_bytes=None):
+        from src.infrastructure.exchange.binance.research_data.historical_feature_loader import (
+            DownloadResult, validate_archive,
+        )
+
+        descriptor = self._by_url.get(url)
+        if descriptor is None:
+            raise ValueError(f"archive is absent from frozen provenance: {url}")
+        path = Path(destination).resolve()
+        if self._raw_root not in path.parents or not path.is_file():
+            raise ValueError(f"verified local archive is missing: {path}")
+        raw = path.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        expected = descriptor.get("sha256")
+        if digest != expected or descriptor.get("expected_sha256", expected) != digest:
+            raise ValueError(f"verified local archive hash mismatch: {path.name}")
+        reported = descriptor.get("bytes", descriptor.get("byte_count"))
+        if reported != len(raw):
+            raise ValueError(f"verified local archive byte count mismatch: {path.name}")
+        member = validate_archive(path, source=source, expected_archive_filename=path.name)
+        return DownloadResult("cached", path, digest, len(raw), digest, member)
+
+
+def _load_cluster_fit_vectors(raw_root: Path, provenance=()):
+    from datetime import timedelta
+    from src.domain.regime import ThreeDayDailyResearchProfile
+    from src.infrastructure.exchange.binance.research_data.three_day_feature_history import (
+        load_three_day_feature_history,
+    )
+
+    interval = ThreeDayDailyResearchProfile().fold.cluster_fit
+    return load_three_day_feature_history(
+        symbol="BTCUSDT", start=interval.start_at - timedelta(days=3),
+        end=interval.end_at, raw_root=raw_root,
+        expected_anchor_count=(interval.end_at - interval.start_at).days,
+        downloader=_LocalVerifiedDownloader(provenance, raw_root),
+    )
+
+
+def _fit_cluster_model(vectors, provenance, code_hash: str):
+    from scripts.chart_regime_strategy_mapping import fit_fold_local_three_day_k4_model
+
+    return fit_fold_local_three_day_k4_model(
+        vectors, source_provenance=provenance, code_provenance_hash=code_hash
+    )
+
+
+def _reconstruct_cluster_fit(
+    report: Mapping[str, object], published_model: Mapping[str, object],
+    failures: list[str],
+):
+    sources = report.get("source_verification", {})
+    raw_root = sources.get("raw_kline_root") if isinstance(sources, Mapping) else None
+    if not raw_root:
+        failures.append("raw-refitted K4 requires verified raw_kline_root")
+        return None
+    try:
+        _progress("reconstructing Cluster Fit vectors and deterministic K4")
+        published_provenance = published_model.get("source_provenance", ())
+        vectors, provenance = _load_cluster_fit_vectors(
+            Path(str(raw_root)), published_provenance
+        )
+        chart_script = ROOT / "scripts" / "chart_regime_strategy_mapping.py"
+        code_hash = hashlib.sha256(chart_script.read_bytes()).hexdigest()
+        outcome = _fit_cluster_model(vectors, provenance, code_hash)
+        artifact = getattr(outcome, "artifact", None)
+        if artifact is None:
+            reasons = getattr(outcome, "rejection_reasons", ())
+            failures.append(f"raw-refitted K4 failed gates: {list(reasons)}")
+            return None
+        rebuilt = artifact.canonical_payload()
+        _same(rebuilt, published_model, failures, "raw-refitted K4 artifact")
+        return artifact
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        failures.append(f"raw-refitted K4 reconstruction failed: {error}")
+        return None
+
+
 def _audit_manifest(
     report: Mapping[str, object], factory: Callable[[], Mapping[str, object]], failures: list[str]
 ) -> Mapping[str, object]:
@@ -262,6 +351,265 @@ def _audit_trade(trade: Mapping[str, object], failures: list[str], prefix: str) 
     return values["net_pnl"]
 
 
+class _MemoryEvidenceLedger:
+    def __init__(self, key_fields: Sequence[str]):
+        self.key_fields = tuple(key_fields)
+        self.rows: list[dict[str, object]] = []
+        self._index: dict[tuple[object, ...], dict[str, object]] = {}
+
+    def load(self):
+        return self.rows
+
+    def append(self, row: Mapping[str, object]):
+        normalized = json.loads(canonical_json_bytes(dict(row), newline=False))
+        key = tuple(normalized[field] for field in self.key_fields)
+        existing = self._index.get(key)
+        if existing is not None:
+            if existing != normalized:
+                raise ValueError("conflicting in-memory evidence key")
+            return False
+        self.rows.append(normalized)
+        self._index[key] = normalized
+        return True
+
+
+def _phase_ledger_override(base: Path, phase: str) -> Path:
+    label = phase.replace("_", "-")
+    return base.with_name(f"{base.stem}-{label}{base.suffix or '.jsonl'}")
+
+
+def _load_actual_ledger_rows(
+    phase: str, bundle: Mapping[str, object], override: Path | None,
+    failures: list[str],
+) -> list[dict[str, object]]:
+    from src.application.services.daily_strategy_evidence import (
+        AppendOnlyEvidenceLedger, DAILY_EVIDENCE_KEY_FIELDS,
+    )
+
+    path = _phase_ledger_override(override, phase) if override is not None else Path(str(bundle.get("ledger_path", "")))
+    if not str(path) or str(path) == ".":
+        failures.append(f"{phase} evidence ledger path is missing")
+        return []
+    if not path.is_absolute():
+        path = ROOT / path
+    if not path.is_file():
+        failures.append(f"{phase} evidence ledger is missing: {path}")
+        return []
+    try:
+        actual_ledger_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+        if bundle.get("ledger_hash") != actual_ledger_hash:
+            failures.append(f"{phase} evidence ledger hash mismatch")
+        rows = list(AppendOnlyEvidenceLedger(path, DAILY_EVIDENCE_KEY_FIELDS).load())
+    except (OSError, TypeError, ValueError) as error:
+        failures.append(f"{phase} evidence ledger parse failed: {error}")
+        return []
+    return rows
+
+
+def _compare_phase_reconstruction(
+    phase: str, bundle: Mapping[str, object], ledger_rows: Sequence[Mapping[str, object]],
+    replay_rows: Sequence[Mapping[str, object]], assignments: Sequence[str],
+    failures: list[str],
+) -> None:
+    report_rows = bundle.get("daily_evidence_rows", [])
+    ledger_evidence = [
+        row.get("evidence") for row in sorted(
+            ledger_rows,
+            key=lambda item: (str(item.get("outcome_start_at")), str(item.get("candidate_id"))),
+        )
+        if row.get("phase") == phase
+    ]
+    replay_evidence = sorted(
+        replay_rows,
+        key=lambda item: (
+            str(item.get("outcome_interval", {}).get("start_at")),
+            str(item.get("candidate_id")),
+        ),
+    )
+    _same(ledger_evidence, report_rows, failures, f"{phase} ledger/report evidence")
+    _same(replay_evidence, report_rows, failures, f"{phase} raw scheduler-replayed evidence")
+    _same(list(assignments), bundle.get("component_assignments"), failures, f"{phase} replay assignments")
+
+
+def _run_identity_from_payload(payload: Mapping[str, object]):
+    from src.application.services.daily_strategy_evidence import DailyEvidenceRunIdentity
+
+    interval = payload["phase_interval"]
+    return DailyEvidenceRunIdentity(
+        profile_id=str(payload["profile_id"]),
+        feature_schema_version=str(payload["feature_schema_version"]),
+        phase=str(payload["phase"]),
+        phase_start_at=datetime.fromisoformat(str(interval["start_at"])),
+        phase_end_at=datetime.fromisoformat(str(interval["end_at"])),
+        model_artifact_hash=str(payload["model_artifact_hash"]),
+        candidate_manifest_hash=str(payload["candidate_manifest_hash"]),
+        candidate_universe_hash=str(payload["candidate_universe_hash"]),
+        ordered_candidate_definition_hashes=tuple(
+            (str(item[0]), str(item[1]))
+            for item in payload["ordered_candidate_definition_hashes"]
+        ),
+        market_data_hash=str(payload["market_data_hash"]),
+        feature_cache_hash=payload["feature_cache_hash"],
+        feature_config_hash=payload["feature_config_hash"],
+        feature_cache_schema_version=str(payload["feature_cache_schema_version"]),
+        feature_provenance_hash=str(payload["feature_provenance_hash"]),
+        feature_source_coverage_hash=str(payload["feature_source_coverage_hash"]),
+        feature_unavailable_counts_hash=str(payload["feature_unavailable_counts_hash"]),
+        engine_version=str(payload["engine_version"]), cost_model=payload["cost_model"],
+        symbol=str(payload["symbol"]), timeframe=str(payload["timeframe"]),
+        initial_equity=Decimal(str(payload["initial_equity"])),
+        code_version=str(payload["code_version"]),
+        evidence_schema_version=str(payload["evidence_schema_version"]),
+    )
+
+
+def _load_verified_minute_market(
+    descriptors: Sequence[Mapping[str, object]], *, raw_root: Path,
+    start_at: datetime, end_at: datetime,
+):
+    from scripts.chart_regime_strategy_mapping import _archive_candles
+    from src.domain.market import MarketSnapshot
+
+    root = raw_root.resolve()
+    candles = []
+    expected = start_at
+    if not descriptors:
+        raise ValueError("minute archive provenance is empty")
+    for descriptor in descriptors:
+        supplied = descriptor.get("path")
+        if supplied:
+            path = Path(str(supplied))
+            if not path.is_absolute():
+                path = ROOT / path
+        else:
+            url = descriptor.get("source_url") or descriptor.get("url")
+            path = raw_root / "BTCUSDT" / Path(str(url)).name
+        path = path.resolve()
+        if root not in path.parents or not path.is_file():
+            raise ValueError(f"verified minute archive is missing: {path}")
+        raw = path.read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        if digest != descriptor.get("sha256"):
+            raise ValueError(f"verified minute archive hash mismatch: {path.name}")
+        expected_hash = descriptor.get("expected_sha256")
+        if expected_hash is not None and expected_hash != digest:
+            raise ValueError(f"verified minute archive checksum mismatch: {path.name}")
+        reported = descriptor.get("byte_count", descriptor.get("bytes", descriptor.get("size")))
+        if reported != len(raw):
+            raise ValueError(f"verified minute archive byte count mismatch: {path.name}")
+        for candle in _archive_candles(
+            path, "BTCUSDT", start_at=start_at, end_at=end_at
+        ):
+            if candle.opened_at != expected:
+                raise ValueError("verified minute market contains a gap or overlap")
+            candles.append(candle)
+            expected = candle.closed_at
+    if expected != end_at:
+        raise ValueError("verified minute market does not cover the exact interval")
+    return MarketSnapshot(tuple(candles))
+
+
+def _replay_phase_from_raw(
+    *, phase: str, bundle: Mapping[str, object], report: Mapping[str, object],
+    model_artifact: object, manifest: object, ledger_override: Path | None,
+    failures: list[str],
+) -> list[Mapping[str, object]]:
+    provider = None
+    try:
+        from datetime import timedelta
+        from scripts.chart_regime_strategy_mapping import (
+            _select_feature_cache,
+            canonical_daily_evidence_replay_contract,
+        )
+        from scripts.scheduler_driven_scalping_backtest import required_warmup_candles
+        from src.application.services.daily_strategy_evidence import (
+            DAILY_EVIDENCE_KEY_FIELDS, run_daily_strategy_evidence,
+        )
+        from src.domain.regime import ThreeDayDailyResearchProfile
+
+        sources = report.get("source_verification", {})
+        raw_root = sources.get("raw_kline_root") if isinstance(sources, Mapping) else None
+        cache_root = sources.get("feature_cache_root") if isinstance(sources, Mapping) else None
+        if not raw_root or not cache_root:
+            raise ValueError("verified raw_kline_root and feature_cache_root are required")
+        profile = ThreeDayDailyResearchProfile()
+        interval = getattr(profile.fold, phase)
+        candidates = tuple(entry.candidate for entry in manifest.entries)
+        warmup = required_warmup_candles(candidates, None)
+        market_start = interval.start_at - timedelta(minutes=warmup)
+        market = _load_verified_minute_market(
+            bundle.get("archive_descriptors", ()), raw_root=Path(str(raw_root)),
+            start_at=market_start, end_at=interval.end_at,
+        )
+        provider, _ = _select_feature_cache(
+            Path(str(cache_root)), required_start=market_start,
+            required_end=interval.end_at, verify_full_file=True,
+        )
+        identity_payload = bundle.get("run_identity")
+        if not isinstance(identity_payload, Mapping):
+            raise ValueError("phase run identity is missing")
+        identity = _run_identity_from_payload(identity_payload)
+        if identity.digest != bundle.get("run_identity_hash"):
+            raise ValueError("phase run identity digest mismatch")
+        calendar_rows = bundle.get("calendar_rows", [])
+        days = [
+            datetime.fromisoformat(str(item["outcome_start_at"]).replace("Z", "+00:00"))
+            for item in calendar_rows
+        ]
+        assignments = [
+            model_artifact.assign(vector).fingerprint
+            for vector in _load_phase_vectors(
+                phase, Path(str(raw_root)), bundle.get("vector_provenance", ())
+            )[0]
+        ]
+        actual_ledger = _load_actual_ledger_rows(phase, bundle, ledger_override, failures)
+        memory = _MemoryEvidenceLedger(DAILY_EVIDENCE_KEY_FIELDS)
+        replay_contract = canonical_daily_evidence_replay_contract()
+        replayed = []
+        for index, (day, component) in enumerate(zip(days, assignments), start=1):
+            if index == 1 or index % 10 == 0 or index == len(days):
+                _progress(f"{phase}: replaying day {index}/{len(days)} across 459 candidates")
+            replayed.extend(run_daily_strategy_evidence(
+                manifest=manifest, phase=phase, outcome_start_at=day,
+                component_fingerprint=component, market=market,
+                market_feature_provider=provider, run_identity=identity,
+                ledger=memory, replay_contract=replay_contract,
+            ))
+        replay_payloads = [item.canonical_payload() for item in replayed]
+        _same(
+            sorted(actual_ledger, key=lambda item: tuple(str(item.get(field)) for field in DAILY_EVIDENCE_KEY_FIELDS)),
+            sorted(memory.rows, key=lambda item: tuple(str(item.get(field)) for field in DAILY_EVIDENCE_KEY_FIELDS)),
+            failures, f"{phase} full ledger/raw scheduler replay",
+        )
+        _compare_phase_reconstruction(
+            phase, bundle, actual_ledger, replay_payloads, assignments, failures
+        )
+        return replay_payloads
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError) as error:
+        failures.append(f"{phase} independent scheduler evidence replay failed: {error}")
+        return []
+    finally:
+        close = getattr(provider, "close", None)
+        if callable(close):
+            close()
+
+
+def _load_phase_vectors(phase: str, raw_root: Path, provenance=()):
+    from datetime import timedelta
+    from src.domain.regime import ThreeDayDailyResearchProfile
+    from src.infrastructure.exchange.binance.research_data.three_day_feature_history import (
+        load_three_day_feature_history,
+    )
+
+    interval = getattr(ThreeDayDailyResearchProfile().fold, phase)
+    return load_three_day_feature_history(
+        symbol="BTCUSDT", start=interval.start_at - timedelta(days=3),
+        end=interval.end_at, raw_root=raw_root,
+        expected_anchor_count=(interval.end_at - interval.start_at).days,
+        downloader=_LocalVerifiedDownloader(provenance, raw_root),
+    )
+
+
 def _audit_evidence(
     report: Mapping[str, object], model: Mapping[str, object], parsed_model: object | None,
     failures: list[str]
@@ -292,18 +640,6 @@ def _audit_evidence(
         identity = bundle.get("run_identity")
         if isinstance(identity, Mapping) and bundle.get("run_identity_hash") != _hash(identity):
             failures.append(f"{phase} evidence run identity hash mismatch")
-        ledger_path = bundle.get("ledger_path")
-        if isinstance(ledger_path, str) and bundle.get("ledger_hash") is not None:
-            path = Path(ledger_path)
-            if not path.is_absolute():
-                path = ROOT / path
-            try:
-                ledger_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-            except OSError as error:
-                failures.append(f"{phase} evidence ledger could not be read: {error}")
-            else:
-                if ledger_hash != bundle.get("ledger_hash"):
-                    failures.append(f"{phase} evidence ledger hash mismatch")
         rows = bundle.get("daily_evidence_rows", [])
         if "evidence_hash" in bundle and bundle.get("evidence_hash") != _hash(rows):
             failures.append(f"{phase} evidence row hash mismatch")
@@ -327,14 +663,8 @@ def _audit_evidence(
                     for item in calendar_for_reload if isinstance(item, Mapping)
                 ]
                 from datetime import timedelta
-                from src.infrastructure.exchange.binance.research_data.three_day_feature_history import (
-                    load_three_day_feature_history,
-                )
-
-                vectors, provenance = load_three_day_feature_history(
-                    symbol="BTCUSDT", start=min(days) - timedelta(days=3),
-                    end=max(days) + timedelta(days=1), raw_root=Path(str(raw_root)),
-                    expected_anchor_count=len(days),
+                vectors, provenance = _load_phase_vectors(
+                    str(phase), Path(str(raw_root)), bundle.get("vector_provenance", ())
                 )
                 recomputed = [parsed_model.assign(vector).fingerprint for vector in vectors]
                 if recomputed != assignments:
@@ -397,6 +727,7 @@ def _winner_key(item: Mapping[str, object]) -> tuple[object, ...]:
 def _audit_mapping(
     report: Mapping[str, object], mapping_file: Mapping[str, object],
     manifest: Mapping[str, object], model: Mapping[str, object], failures: list[str],
+    *, independent_evidence_rows: Sequence[Mapping[str, object]] | None = None,
 ) -> object | None:
     mapping = report.get("strict_mapping", {})
     report_mapping = dict(mapping) if isinstance(mapping, Mapping) else {}
@@ -455,11 +786,15 @@ def _audit_mapping(
         from src.domain.regime.temporal import UtcInterval
 
         evidence_root = report.get("evidence", {})
-        evidence_rows = tuple(
-            _evidence_from_payload(row)
-            for phase in sorted(evidence_root)
-            for row in evidence_root[phase].get("daily_evidence_rows", [])
+        source_rows = (
+            tuple(independent_evidence_rows)
+            if independent_evidence_rows is not None
+            else tuple(
+                row for phase in sorted(evidence_root)
+                for row in evidence_root[phase].get("daily_evidence_rows", [])
+            )
         )
+        evidence_rows = tuple(_evidence_from_payload(row) for row in source_rows)
         statistical = mapping_file.get("statistical_calendar", [])
         calendar = tuple(
             datetime.fromisoformat(str(item["day"]).replace("Z", "+00:00"))
@@ -513,13 +848,14 @@ def _timestamp_strings(value: object, path: tuple[str, ...] = ()):
     elif isinstance(value, list):
         for index, item in enumerate(value):
             yield from _timestamp_strings(item, (*path, str(index)))
-    elif isinstance(value, str) and ("at" in path[-1].lower() if path else False):
+    elif isinstance(value, str):
         try:
             parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
             return
-        if parsed.tzinfo is not None:
-            yield path, parsed.astimezone(timezone.utc)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        yield path, parsed.astimezone(timezone.utc)
 
 
 def _audit_freeze(report: Mapping[str, object], failures: list[str]) -> None:
@@ -553,10 +889,12 @@ def _audit_freeze(report: Mapping[str, object], failures: list[str]) -> None:
         failures.append("pre-Test freeze hash/identity mismatch")
     boundary = datetime(2026, 4, 4, tzinfo=timezone.utc)
     for path, timestamp in _timestamp_strings(payload):
-        canonical_interval_metadata = (
-            path[:4] == ("model", "profile", "fold", "test")
-            or path[:4] == ("mapping", "research_profile", "fold", "test")
-        )
+        canonical_interval_metadata = path in {
+            ("model", "profile", "fold", "test", "start_at"),
+            ("model", "profile", "fold", "test", "end_at"),
+            ("mapping", "research_profile", "fold", "test", "start_at"),
+            ("mapping", "research_profile", "fold", "test", "end_at"),
+        }
         if canonical_interval_metadata:
             continue
         if timestamp >= boundary:
@@ -721,7 +1059,6 @@ def _replay_untouched_test(
     try:
         from datetime import timedelta
         from scripts.chart_regime_strategy_mapping import (
-            _load_exact_minute_market,
             _manual_router_candidate,
             _select_feature_cache,
             build_three_day_daily_candidate_manifest,
@@ -737,8 +1074,10 @@ def _replay_untouched_test(
         profile = ThreeDayDailyResearchProfile()
         interval = profile.fold.test
         context_start = interval.start_at - timedelta(days=3)
-        market, _ = _load_exact_minute_market(
-            symbol="BTCUSDT", raw_kline_root=Path(str(sources["raw_kline_root"])),
+        test_provenance = report.get("test_provenance", {})
+        archives = test_provenance.get("archives", ()) if isinstance(test_provenance, Mapping) else ()
+        market = _load_verified_minute_market(
+            archives, raw_root=Path(str(sources["raw_kline_root"])),
             start_at=context_start, end_at=interval.end_at,
         )
         provider, _ = _select_feature_cache(
@@ -809,13 +1148,44 @@ def audit_three_day_k4_daily_mapping(
         report.get("model_artifact", {}) if isinstance(report.get("model_artifact"), Mapping) else {},
         model, failures,
     )
+    if model.get("artifact_version") == "three-day-k4-model-v2":
+        refitted_model = _reconstruct_cluster_fit(report, model, failures)
+        if refitted_model is not None:
+            parsed_model = refitted_model
     raw_count = _audit_raw_inputs(model, report, failures)
     manifest = _audit_manifest(report, candidate_manifest_factory, failures)
     evidence_count, evidence_rows = _audit_evidence(report, model, parsed_model, failures)
-    rebuilt_mapping = _audit_mapping(report, mapping, manifest, model, failures)
+    independent_evidence_rows: list[Mapping[str, object]] | None = None
+    if model.get("artifact_version") == "three-day-k4-model-v2" and parsed_model is not None:
+        try:
+            from scripts.chart_regime_strategy_mapping import (
+                build_three_day_daily_candidate_manifest,
+            )
+
+            typed_manifest = build_three_day_daily_candidate_manifest(expected_count=459)
+            independent_evidence_rows = []
+            evidence_root = report.get("evidence", {})
+            for phase in ("mapping_fit", "validation"):
+                bundle = evidence_root.get(phase) if isinstance(evidence_root, Mapping) else None
+                if not isinstance(bundle, Mapping):
+                    failures.append(f"{phase} report evidence is missing")
+                    continue
+                independent_evidence_rows.extend(_replay_phase_from_raw(
+                    phase=phase, bundle=bundle, report=report,
+                    model_artifact=parsed_model, manifest=typed_manifest,
+                    ledger_override=inputs.evidence_rows_path, failures=failures,
+                ))
+        except (RuntimeError, TypeError, ValueError) as error:
+            failures.append(f"candidate/evidence replay setup failed: {error}")
+            independent_evidence_rows = []
+    rebuilt_mapping = _audit_mapping(
+        report, mapping, manifest, model, failures,
+        independent_evidence_rows=independent_evidence_rows,
+    )
     _audit_freeze(report, failures)
     test_trade_count, transition_count = _audit_test_and_baselines(
-        report, failures, manifest=manifest, evidence_rows=evidence_rows
+        report, failures, manifest=manifest,
+        evidence_rows=(independent_evidence_rows if independent_evidence_rows is not None else evidence_rows),
     )
     if parsed_model is not None and rebuilt_mapping is not None:
         _replay_untouched_test(report, parsed_model, rebuilt_mapping, failures)
@@ -885,6 +1255,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--markdown", type=Path)
     parser.add_argument("--model", type=Path)
     parser.add_argument("--mapping", type=Path)
+    parser.add_argument(
+        "--evidence-rows-path", type=Path,
+        help="base evidence JSONL path; phase suffixes are resolved exactly as the experiment does",
+    )
     return parser.parse_args(argv)
 
 
@@ -896,6 +1270,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         markdown=args.markdown or defaults.markdown,
         model=args.model or defaults.model,
         mapping=args.mapping or defaults.mapping,
+        evidence_rows_path=args.evidence_rows_path,
     )
     result = audit_three_day_k4_daily_mapping(inputs)
     sys.stdout.buffer.write(canonical_json_bytes(result))
