@@ -237,7 +237,7 @@ def _reject_nested_test_material(value: object, path: tuple[str, ...] = ()) -> N
             if normalized in forbidden or normalized.startswith("test_"):
                 exact_path = (*path, str(key))
                 if exact_path in {
-                    ("model", "research_profile", "fold", "test"),
+                    ("model", "profile", "fold", "test"),
                     ("mapping", "research_profile", "fold", "test"),
                 }:
                     expected_interval = ThreeDayDailyResearchProfile().canonical_payload()[

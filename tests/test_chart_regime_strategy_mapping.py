@@ -433,17 +433,16 @@ def test_orchestrator_rejects_model_test_results_before_test_read() -> None:
 
 def test_orchestrator_allows_exact_canonical_model_profile_test_interval() -> None:
     from scripts.chart_regime_strategy_mapping import run_three_day_daily_k4_experiment
-    from src.domain.regime import ThreeDayDailyResearchProfile
+    from tests.infrastructure.regime.test_three_day_k4_model_artifact import _artifact
 
     calls = []
-    dependencies = _narrow_orchestration_dependencies({
-        "artifact_hash": "a" * 64,
-        "research_profile": ThreeDayDailyResearchProfile().canonical_payload(),
-    }, calls)
+    model = _artifact()
+    dependencies = _narrow_orchestration_dependencies(model, calls)
 
-    run_three_day_daily_k4_experiment(dependencies=dependencies)
+    report = run_three_day_daily_k4_experiment(dependencies=dependencies)
 
     assert "load-test" in calls
+    assert report["model_artifact"] == model.canonical_payload()
 
 
 def test_identical_orchestration_runs_have_identical_canonical_reports() -> None:
