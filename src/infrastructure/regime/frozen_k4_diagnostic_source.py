@@ -55,6 +55,7 @@ _FORBIDDEN_SECTIONS = frozenset(
 _CUTOFF = datetime(2025, 6, 30, tzinfo=timezone.utc)
 _PRODUCTION_ATTEMPT_HASH = "83e25e21a2bccb5cf14572da000718deae7f3e068c45b2898a26e78cef67101f"
 _PRODUCTION_FILE_SHA256 = "e19ff1b2ec685f60b05d9aa98d088ea3883b62f0a394cf9fbdc2b84264ec23a5"
+_PRODUCTION_FILE_BYTES = 39_409
 _HEX64 = re.compile(r"[0-9a-f]{64}\Z")
 _PROVENANCE_FIELDS = frozenset({
     "period", "url", "member_identity", "bytes", "sha256", "expected_sha256",
@@ -267,16 +268,71 @@ def _resolve_contained_archive(raw_root: Path, destination: Path) -> Path:
     return resolved_destination
 
 
-def _read_verified_archive(path: Path) -> bytes:
-    before = path.stat()
-    with path.open("rb") as stream:
-        content = stream.read()
-    after = path.stat()
-    identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-    identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-    if identity_before != identity_after or len(content) != before.st_size:
-        raise ValueError("local archive file identity changed during verified read")
-    return content
+def _file_identity(stat_result: object) -> tuple[int, int, int, int]:
+    return (
+        stat_result.st_dev, stat_result.st_ino,
+        stat_result.st_size, stat_result.st_mtime_ns,
+    )
+
+
+def _read_bounded_file(
+    path: Path, *, expected_bytes: int, expected_sha256: str | None = None,
+) -> bytes:
+    """Read at most expected+1 bytes from one stable handle.
+
+    POSIX uses ``O_NOFOLLOW`` when available. Windows does not expose that flag,
+    so callers additionally resolve/contain archive paths and this function
+    compares pathname identity with handle ``fstat`` plus before/after ``fstat``.
+    """
+    if type(expected_bytes) is not int or expected_bytes <= 0:
+        raise ValueError("trusted expected bytes must be a positive integer")
+    path = Path(path)
+    pathname_stat = path.stat()
+    if pathname_stat.st_size != expected_bytes:
+        raise ValueError("file stat size does not match trusted expected bytes")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        before = os.fstat(descriptor)
+        if before.st_size != expected_bytes:
+            raise ValueError("opened file handle size does not match trusted expected bytes")
+        if (
+            pathname_stat.st_dev != before.st_dev
+            or (pathname_stat.st_ino and before.st_ino and pathname_stat.st_ino != before.st_ino)
+        ):
+            raise ValueError("opened file handle identity differs from resolved pathname")
+        digest = hashlib.sha256()
+        chunks: list[bytes] = []
+        received = 0
+        while received <= expected_bytes:
+            limit = min(1024 * 1024, expected_bytes + 1 - received)
+            chunk = os.read(descriptor, limit)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            received += len(chunk)
+            digest.update(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if _file_identity(before) != _file_identity(after):
+        raise ValueError("file handle identity changed during bounded read")
+    if received != expected_bytes:
+        raise ValueError("bounded file read was truncated or oversized")
+    actual_sha256 = digest.hexdigest()
+    if expected_sha256 is not None and actual_sha256 != _require_hash(
+        expected_sha256, "trusted file SHA-256"
+    ):
+        raise ValueError("bounded file sha256 does not match trusted digest")
+    return b"".join(chunks)
+
+
+def _read_verified_archive(
+    path: Path, *, expected_bytes: int, expected_sha256: str,
+) -> bytes:
+    return _read_bounded_file(
+        path, expected_bytes=expected_bytes, expected_sha256=expected_sha256
+    )
 
 
 def _sole_zip_member(content: bytes, expected_archive_filename: str) -> str:
@@ -315,7 +371,9 @@ class _LocalProvenanceDownloader:
             raise ValueError("frozen diagnostic source permits only kline archives")
         if not destination.is_file():
             raise FileNotFoundError(f"required local archive is missing: {destination}")
-        content = _read_verified_archive(destination)
+        content = _read_verified_archive(
+            destination, expected_bytes=row["bytes"], expected_sha256=row["sha256"]
+        )
         size = len(content)
         if size != row["bytes"]:
             raise ValueError(f"archive bytes mismatch for {basename}")
@@ -326,9 +384,11 @@ class _LocalProvenanceDownloader:
         if member != row["member_identity"]:
             raise ValueError(f"archive member identity mismatch for {basename}")
         snapshot = Path(self._snapshot_directory.name) / basename
-        snapshot.write_bytes(content)
-        if hashlib.sha256(snapshot.read_bytes()).hexdigest() != digest:
-            raise ValueError("private archive snapshot hash mismatch")
+        with snapshot.open("xb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _read_bounded_file(snapshot, expected_bytes=size, expected_sha256=digest)
         resolved_snapshot = snapshot.resolve()
         self._snapshots[resolved_snapshot] = content
         return DownloadResult("cached", resolved_snapshot, digest, size, digest, member)
@@ -339,6 +399,7 @@ class _LocalProvenanceDownloader:
             content = self._snapshots.pop(resolved)
         except KeyError as exc:
             raise ValueError("archive was not verified into an immutable snapshot") from exc
+        resolved.unlink(missing_ok=True)
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
             member = archive.infolist()[0]
             with archive.open(member) as raw, io.TextIOWrapper(raw, encoding="utf-8-sig", newline="") as text:
@@ -353,6 +414,10 @@ class _LocalProvenanceDownloader:
                 else:
                     yield first
                 yield from rows
+
+    def close(self) -> None:
+        self._snapshots.clear()
+        self._snapshot_directory.cleanup()
 
 
 @dataclass(frozen=True)
@@ -698,15 +763,17 @@ def _registry_payload() -> list[dict[str, object]]:
 
 def _load_frozen_k4_diagnostic_inputs(
     attempt_path: Path, raw_root: Path, profile: _FrozenK4SourceProfile,
-    *, trusted_file_sha256: str, trusted_attempt_hash: str,
+    *, trusted_file_sha256: str, trusted_file_bytes: int,
+    trusted_attempt_hash: str,
 ) -> _LoadedK4DiagnosticInputs:
     if not isinstance(profile, _FrozenK4SourceProfile):
         raise ValueError("source profile must use the strict frozen profile contract")
     attempt_path = Path(attempt_path)
-    raw = attempt_path.read_bytes()
+    raw = _read_bounded_file(
+        attempt_path, expected_bytes=trusted_file_bytes,
+        expected_sha256=trusted_file_sha256,
+    )
     actual_file_sha256 = hashlib.sha256(raw).hexdigest()
-    if actual_file_sha256 != _require_hash(trusted_file_sha256, "trusted model file SHA-256"):
-        raise ValueError("model file SHA-256 does not match the trusted published pin")
     try:
         decoded = json.loads(raw, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -717,13 +784,16 @@ def _load_frozen_k4_diagnostic_inputs(
     fit = _restore_primary_fit(payload)
     provenance = tuple(payload["source_provenance"])
     downloader = _LocalProvenanceDownloader(provenance, Path(raw_root))
-    vectors, loaded_provenance = load_three_day_feature_history(
-        symbol=profile.symbol, start=profile.raw_start_at,
-        end=profile.fit_end_at, raw_root=Path(raw_root),
-        expected_anchor_count=profile.expected_anchor_count,
-        downloader=downloader,
-        row_reader=downloader.iter_rows,
-    )
+    try:
+        vectors, loaded_provenance = load_three_day_feature_history(
+            symbol=profile.symbol, start=profile.raw_start_at,
+            end=profile.fit_end_at, raw_root=Path(raw_root),
+            expected_anchor_count=profile.expected_anchor_count,
+            downloader=downloader,
+            row_reader=downloader.iter_rows,
+        )
+    finally:
+        downloader.close()
     if tuple(map(dict, loaded_provenance)) != tuple(map(dict, provenance)):
         raise ValueError("loaded archive provenance differs from the frozen attempt")
     verified_vector_hash = _three_day_vector_hash(vectors)
@@ -775,6 +845,7 @@ def load_frozen_k4_diagnostic_source(
     loaded = _load_frozen_k4_diagnostic_inputs(
         attempt_path, raw_root, _PRODUCTION_PROFILE,
         trusted_file_sha256=_PRODUCTION_FILE_SHA256,
+        trusted_file_bytes=_PRODUCTION_FILE_BYTES,
         trusted_attempt_hash=_PRODUCTION_ATTEMPT_HASH,
     )
     identity = FrozenK4InputIdentity(

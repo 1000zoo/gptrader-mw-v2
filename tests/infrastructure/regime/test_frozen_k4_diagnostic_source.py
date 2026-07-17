@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import inspect
 import json
+import os
 from pathlib import Path
 import shutil
 from types import MappingProxyType
@@ -27,6 +28,8 @@ from src.infrastructure.regime.frozen_k4_diagnostic_source import (
     _PRODUCTION_PROFILE,
     _PRODUCTION_ATTEMPT_HASH,
     _PRODUCTION_FILE_SHA256,
+    _PRODUCTION_FILE_BYTES,
+    _read_bounded_file,
     _resolve_contained_archive,
     _restore_primary_fit,
     _three_day_vector_hash,
@@ -147,6 +150,7 @@ def _load_private(model: Path, raw_root: Path, profile: _FrozenK4SourceProfile):
     return _load_frozen_k4_diagnostic_inputs(
         model, raw_root, profile,
         trusted_file_sha256=hashlib.sha256(raw).hexdigest(),
+        trusted_file_bytes=len(raw),
         trusted_attempt_hash=payload["attempt_hash"],
     )
 
@@ -176,6 +180,7 @@ def test_public_loader_has_no_profile_bypass_and_always_selects_production(monke
         load_frozen_k4_diagnostic_source(MODEL, Path("unused"))
     assert selected == [(_PRODUCTION_PROFILE, {
         "trusted_file_sha256": _PRODUCTION_FILE_SHA256,
+        "trusted_file_bytes": _PRODUCTION_FILE_BYTES,
         "trusted_attempt_hash": _PRODUCTION_ATTEMPT_HASH,
     })]
     with pytest.raises(TypeError):
@@ -185,12 +190,56 @@ def test_public_loader_has_no_profile_bypass_and_always_selects_production(monke
 def test_public_boundary_pins_exact_published_attempt_and_raw_file(tmp_path: Path) -> None:
     assert _PRODUCTION_ATTEMPT_HASH == "83e25e21a2bccb5cf14572da000718deae7f3e068c45b2898a26e78cef67101f"
     assert _PRODUCTION_FILE_SHA256 == "e19ff1b2ec685f60b05d9aa98d088ea3883b62f0a394cf9fbdc2b84264ec23a5"
+    assert _PRODUCTION_FILE_BYTES == 39_409
     payload = _payload()
     payload["model_gates"]["maximum_matched_centroid_distance"] = 3.0
     payload["model_gates"]["maximum_matched_centroid_distance_passed"] = False
     path = _write_payload(tmp_path, payload)
     with pytest.raises(ValueError, match="trusted|published|file SHA"):
         load_frozen_k4_diagnostic_source(path, tmp_path / "raw")
+
+
+def test_actual_published_model_bytes_and_decoded_attempt_match_pins() -> None:
+    raw = MODEL.read_bytes()
+    assert len(raw) == _PRODUCTION_FILE_BYTES
+    assert hashlib.sha256(raw).hexdigest() == _PRODUCTION_FILE_SHA256
+    assert json.loads(raw)["attempt_hash"] == _PRODUCTION_ATTEMPT_HASH
+
+
+@pytest.mark.parametrize("mode", ("oversized", "truncated"))
+def test_bounded_reader_rejects_wrong_stat_size_before_bulk_read(tmp_path, monkeypatch, mode) -> None:
+    path = tmp_path / "untrusted.bin"
+    if mode == "oversized":
+        with path.open("wb") as stream:
+            stream.seek(10_000_000)
+            stream.write(b"x")
+        expected = 10
+    else:
+        path.write_bytes(b"tiny")
+        expected = 100
+    monkeypatch.setattr(os, "read", lambda *_a, **_k: pytest.fail("bulk read attempted"))
+    with pytest.raises(ValueError, match="size|bytes"):
+        _read_bounded_file(path, expected_bytes=expected)
+
+
+def test_bounded_reader_rejects_fstat_identity_change(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "stable.bin"
+    path.write_bytes(b"stable")
+    actual_fstat = os.fstat
+    calls = 0
+    def changing_fstat(fd):
+        nonlocal calls
+        result = actual_fstat(fd)
+        calls += 1
+        if calls == 2:
+            return SimpleNamespace(
+                st_dev=result.st_dev, st_ino=result.st_ino, st_size=result.st_size,
+                st_mtime_ns=result.st_mtime_ns + 1,
+            )
+        return result
+    monkeypatch.setattr(os, "fstat", changing_fstat)
+    with pytest.raises(ValueError, match="identity changed"):
+        _read_bounded_file(path, expected_bytes=6)
 
 
 def test_real_miniature_archive_loads_4320_window_in_float64_registry_order(mini) -> None:
@@ -311,22 +360,24 @@ def test_resolved_archive_escape_is_rejected_deterministically(tmp_path: Path) -
 
 def test_archive_file_identity_change_is_rejected_on_windows_without_symlink(mini, monkeypatch) -> None:
     import src.infrastructure.regime.frozen_k4_diagnostic_source as module
-    actual_stat = Path.stat
+    actual_fstat = os.fstat
     calls = 0
-    def changing_stat(path, *args, **kwargs):
+    def changing_fstat(descriptor):
         nonlocal calls
-        result = actual_stat(path, *args, **kwargs)
-        if path == mini.archive:
-            calls += 1
-            if calls == 2:
-                return SimpleNamespace(
-                    st_dev=result.st_dev, st_ino=result.st_ino, st_size=result.st_size,
-                    st_mtime_ns=result.st_mtime_ns + 1,
-                )
+        result = actual_fstat(descriptor)
+        calls += 1
+        if calls == 2:
+            return SimpleNamespace(
+                st_dev=result.st_dev, st_ino=result.st_ino, st_size=result.st_size,
+                st_mtime_ns=result.st_mtime_ns + 1,
+            )
         return result
-    monkeypatch.setattr(Path, "stat", changing_stat)
+    monkeypatch.setattr(os, "fstat", changing_fstat)
+    row = json.loads(mini.model.read_bytes())["source_provenance"][0]
     with pytest.raises(ValueError, match="identity changed"):
-        module._read_verified_archive(mini.archive)
+        module._read_verified_archive(
+            mini.archive, expected_bytes=row["bytes"], expected_sha256=row["sha256"]
+        )
 
 
 def test_archive_replacement_after_verified_read_does_not_change_consumed_snapshot(
@@ -334,14 +385,45 @@ def test_archive_replacement_after_verified_read_does_not_change_consumed_snapsh
 ) -> None:
     import src.infrastructure.regime.frozen_k4_diagnostic_source as module
     original = module._read_verified_archive
-    def replace_after_read(path):
-        verified = original(path)
+    def replace_after_read(path, **trusted):
+        verified = original(path, **trusted)
         path.write_bytes(b"replacement-not-a-zip")
         return verified
     monkeypatch.setattr(module, "_read_verified_archive", replace_after_read)
     source = _load_private(mini.model, mini.raw_root, mini.profile)
     assert len(source.vectors) == 1
     assert source.identity_hashes["feature_vectors_sha256"] == source.attempt_payload["fit_input_vector_hash"]
+
+
+def test_private_snapshots_unlink_after_rows_and_tempdir_cleans_on_success(mini, monkeypatch) -> None:
+    import src.infrastructure.regime.frozen_k4_diagnostic_source as module
+    actual_iter_rows = module._LocalProvenanceDownloader.iter_rows
+    snapshots = []
+    def tracked_rows(self, path):
+        snapshots.append(Path(path))
+        yield from actual_iter_rows(self, path)
+        assert not Path(path).exists()
+    monkeypatch.setattr(module._LocalProvenanceDownloader, "iter_rows", tracked_rows)
+    source = _load_private(mini.model, mini.raw_root, mini.profile)
+    assert len(source.vectors) == 1
+    assert snapshots and all(not path.exists() for path in snapshots)
+
+
+def test_private_snapshot_tempdir_cleans_on_vector_hash_error(mini, tmp_path, monkeypatch) -> None:
+    import src.infrastructure.regime.frozen_k4_diagnostic_source as module
+    actual_temporary_directory = module.tempfile.TemporaryDirectory
+    directories = []
+    def tracked_directory(*args, **kwargs):
+        result = actual_temporary_directory(*args, **kwargs)
+        directories.append(Path(result.name))
+        return result
+    monkeypatch.setattr(module.tempfile, "TemporaryDirectory", tracked_directory)
+    payload = json.loads(mini.model.read_bytes())
+    payload["fit_input_vector_hash"] = "f" * 64
+    model = _write_payload(tmp_path, payload)
+    with pytest.raises(ValueError, match="vector hash"):
+        _load_private(model, mini.raw_root, mini.profile)
+    assert directories and all(not path.exists() for path in directories)
 
 
 def test_miniature_archive_cannot_escape_raw_root_via_symlink(mini, tmp_path: Path) -> None:
