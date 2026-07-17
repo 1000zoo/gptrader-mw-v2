@@ -1,0 +1,9 @@
+half_label,primary_component_index,half_component_index,primary_component_fingerprint,half_component_fingerprint,sample_count,exceedance_count,euclidean_distance,top_drift_features,diagnostic_only
+A,0,3,39e3bacf11776871a5ff8111,a40802651dda625eef950cfd,204,24,0.85298949009626313,volume_cv_3d|max_drawdown_3d|rv_1d|rv_3d|range_ratio_3d,true
+A,1,0,b03e2a19935047396af5f0d5,15d3fc436752e80fbf377325,238,16,0.76030849398696576,mean_body_ratio_3d|volume_cv_3d|rv_1d|rv_3d|rv_4h,true
+A,2,1,dddf565fe433ec33a8d07106,3de9bb954a2c15cb4492c426,252,21,1.1092161649469547,max_runup_3d|rv_1d|rv_3d|volume_cv_3d|rv_4h,true
+A,3,2,e37692350fa4ad4230e3336e,5ae28957385af58ebee4cf8e,126,15,1.9133522641135228,rv_3d|max_drawdown_3d|rv_1d|range_ratio_3d|rv_4h,true
+B,0,2,39e3bacf11776871a5ff8111,9511ccf67a32c14786b9505f,184,24,1.0327644857936529,rv_3d|max_drawdown_3d|range_ratio_3d|rv_1d|mean_body_ratio_3d,true
+B,1,0,b03e2a19935047396af5f0d5,17afd0fca04b61ad4cb40d66,299,16,0.31333104455106625,volume_cv_3d|volume_ratio_1d_3d|rv_ratio_1d_3d|rv_1d|rv_4h,true
+B,2,3,dddf565fe433ec33a8d07106,bb123c373acaf6526349830a,203,21,0.92699977882823537,rv_3d|mean_body_ratio_3d|rv_1d|mean_lower_wick_ratio_3d|range_ratio_3d,true
+B,3,1,e37692350fa4ad4230e3336e,79a3672f5b2e02b1cc6b62e6,135,15,2.3526219570607076,rv_1d|volume_cv_3d|rv_4h|rv_3d|range_ratio_3d,true
