@@ -162,7 +162,7 @@ def test_test_loader_requires_validated_freeze_and_records_first_read() -> None:
         profile={"profile_id": "three-day-daily-k4-v1"}, chronology={},
     )
     state = ThreeDayExperimentState(stage=ThreeDayExperimentStage.PRE_TEST_FROZEN)
-    sentinel = {"provenance": {}}
+    sentinel = {"provenance": {"pre_test_freeze_hash": freeze.pre_test_freeze_hash}}
     assert load_test_after_freeze(state=state, freeze=freeze, loader=lambda: sentinel) is sentinel
     assert state.stage is ThreeDayExperimentStage.TEST_LOADED
     assert state.events[-1][0] == "first_test_read"
@@ -186,6 +186,72 @@ def test_failing_test_loader_leaves_freeze_stage_and_no_read_event() -> None:
             state=state, freeze=freeze,
             loader=lambda: (_ for _ in ()).throw(OSError("read failed")),
         )
+    assert state.stage is ThreeDayExperimentStage.PRE_TEST_FROZEN
+    assert state.events == []
+
+
+@pytest.mark.parametrize("supplied", (None, "b" * 64, "A" * 64, "malformed"))
+def test_test_loader_rejects_missing_wrong_or_malformed_freeze_hash(supplied) -> None:
+    from scripts.chart_regime_strategy_mapping import (
+        ThreeDayExperimentStage, ThreeDayExperimentState,
+        create_pre_test_freeze, load_test_after_freeze,
+    )
+    freeze = create_pre_test_freeze(
+        model={"artifact_hash": "a" * 64}, candidate_manifest={"candidate_count": 459},
+        evidence={}, mapping={"artifact_hash": "c" * 64},
+        global_fixed_baseline={"decision": "cash"},
+        profile={"profile_id": "three-day-daily-k4-v1"}, chronology={},
+    )
+    provenance = {} if supplied is None else {"pre_test_freeze_hash": supplied}
+    state = ThreeDayExperimentState(stage=ThreeDayExperimentStage.PRE_TEST_FROZEN)
+    with pytest.raises(ValueError, match="freeze hash"):
+        load_test_after_freeze(
+            state=state, freeze=freeze,
+            loader=lambda: {"provenance": provenance},
+        )
+    assert state.stage is ThreeDayExperimentStage.PRE_TEST_FROZEN
+    assert state.events == []
+
+
+@pytest.mark.parametrize(
+    "identity",
+    (
+        "model_artifact_hash", "candidate_manifest_hash",
+        "candidate_universe_hash", "mapping_artifact_hash", "profile_id",
+    ),
+)
+def test_test_loader_rejects_any_supplied_identity_that_disagrees_with_freeze(identity) -> None:
+    from scripts.chart_regime_strategy_mapping import (
+        ThreeDayExperimentStage, ThreeDayExperimentState,
+        create_pre_test_freeze, load_test_after_freeze,
+    )
+    freeze = create_pre_test_freeze(
+        model={"artifact_hash": "a" * 64},
+        candidate_manifest={
+            "manifest_hash": "b" * 64,
+            "candidate_universe_hash": "c" * 64,
+        },
+        evidence={}, mapping={"artifact_hash": "d" * 64},
+        global_fixed_baseline={"decision": "cash"},
+        profile={"profile_id": "three-day-daily-k4-v1"}, chronology={},
+    )
+    provenance = {
+        "pre_test_freeze_hash": freeze.pre_test_freeze_hash,
+        "model_artifact_hash": "a" * 64,
+        "candidate_manifest_hash": "b" * 64,
+        "candidate_universe_hash": "c" * 64,
+        "mapping_artifact_hash": "d" * 64,
+        "profile_id": "three-day-daily-k4-v1",
+    }
+    provenance[identity] = "wrong"
+    state = ThreeDayExperimentState(stage=ThreeDayExperimentStage.PRE_TEST_FROZEN)
+
+    with pytest.raises(ValueError, match=identity):
+        load_test_after_freeze(
+            state=state, freeze=freeze,
+            loader=lambda: {"provenance": provenance},
+        )
+
     assert state.stage is ThreeDayExperimentStage.PRE_TEST_FROZEN
     assert state.events == []
 
@@ -257,7 +323,10 @@ def test_three_day_orchestrator_enforces_exact_pretest_order_and_strict_test_pol
         report_validation_sensitivity=called("sensitivity", {"winner": "looser"}),
         rebuild_final_strict_mapping=called("final_mapping", {"artifact_hash": "1" * 64}),
         select_global_fixed_baseline=called("global_baseline", {"decision": "cash"}),
-        load_test=called("load_test", {"provenance": {"hash": "9" * 64}}),
+        load_test=lambda freeze: (
+            calls.append(("load_test", (freeze,), {}))
+            or {"provenance": {"pre_test_freeze_hash": freeze.pre_test_freeze_hash}}
+        ),
         run_test_comparisons=called("comparisons", {"cash": {"status": "ok"}}),
         publish=called("publish", None),
     )
@@ -293,7 +362,9 @@ def test_identical_orchestration_runs_have_identical_canonical_reports() -> None
             report_validation_sensitivity=lambda **kwargs: {"strict": {}},
             rebuild_final_strict_mapping=lambda **kwargs: {"artifact_hash": "1" * 64},
             select_global_fixed_baseline=lambda **kwargs: {"decision": "cash"},
-            load_test=lambda freeze: {"provenance": {"hash": "2" * 64}},
+            load_test=lambda freeze: {
+                "provenance": {"pre_test_freeze_hash": freeze.pre_test_freeze_hash}
+            },
             run_test_comparisons=lambda **kwargs: {"cash": {"status": "completed"}},
             publish=lambda **kwargs: None,
         )
@@ -546,7 +617,10 @@ def test_three_day_main_composes_concrete_stages_and_publishes_last(monkeypatch,
     def load_test(*args, **kwargs):
         assert "global-baseline" in calls
         calls.append("test-load")
-        return SimpleNamespace(data_provenance={"hash": "9" * 64})
+        freeze = args[1]
+        return SimpleNamespace(data_provenance={
+            "pre_test_freeze_hash": freeze.pre_test_freeze_hash
+        })
     monkeypatch.setattr(module, "load_three_day_test_inputs", load_test)
     monkeypatch.setattr(
         module, "run_concrete_three_day_test_comparisons",
@@ -582,6 +656,100 @@ def test_adoption_assessment_is_inconclusive_when_required_baseline_failed() -> 
     assert result["status"] == "inconclusive"
     assert result["adopted"] is False
     assert "required_baseline_failed" in result["reasons"]
+
+
+def test_comparison_audits_publish_independently_recomputable_concentration_and_deltas() -> None:
+    from scripts.chart_regime_strategy_mapping import build_three_day_comparison_audits
+
+    primary_trades = [
+        {"exit_at": "2026-04-07T01:00:00Z", "net_pnl": "6", "exit_reason": "active_strategy_opposite_signal"},
+        {"exit_at": "2026-04-07T02:00:00Z", "net_pnl": "4", "exit_reason": "target"},
+        {"exit_at": "2026-04-08T01:00:00Z", "net_pnl": "2", "exit_reason": "active_strategy_opposite_signal"},
+        {"exit_at": "2026-04-08T02:00:00Z", "net_pnl": "-1", "exit_reason": "stop"},
+    ]
+    owner_trades = [
+        {"exit_at": "2026-04-07T01:00:00Z", "net_pnl": "3", "exit_reason": "target"},
+        {"exit_at": "2026-04-08T01:00:00Z", "net_pnl": "1", "exit_reason": "stop"},
+    ]
+    comparisons = {
+        "k4_dynamic_active_strategy_opposite_exit": {
+            "continuous_metrics": {
+                "return_ratio": "0.12",
+                "portfolio_max_drawdown_ratio": "0.03",
+            },
+            "trades": primary_trades,
+        },
+        "k4_dynamic_entry_owner_exit": {
+            "continuous_metrics": {
+                "return_ratio": "0.08",
+                "portfolio_max_drawdown_ratio": "0.02",
+            },
+            "trades": owner_trades,
+        },
+    }
+
+    concentration, active_effect = build_three_day_comparison_audits(comparisons)
+
+    positive_daily_pnl = [Decimal("10"), Decimal("1")]
+    expected_top_day_share = max(positive_daily_pnl) / sum(positive_daily_pnl)
+    positive_trade_pnl = [Decimal("6"), Decimal("4"), Decimal("2")]
+    expected_top_five_share = sum(sorted(positive_trade_pnl, reverse=True)[:5]) / sum(positive_trade_pnl)
+    assert Decimal(concentration["top_episode_profit_share"]) == expected_top_day_share
+    assert Decimal(concentration["top_day_profit_share"]) == expected_top_day_share
+    assert Decimal(concentration["top_five_trade_profit_share"]) == expected_top_five_share
+    assert concentration["positive_day_count"] == len(positive_daily_pnl)
+    assert concentration["positive_trade_count"] == len(positive_trade_pnl)
+    assert Decimal(active_effect["return_ratio_delta"]) == Decimal("0.12") - Decimal("0.08")
+    assert Decimal(active_effect["maximum_drawdown_ratio_delta"]) == Decimal("0.03") - Decimal("0.02")
+    assert active_effect["trade_count_delta"] == len(primary_trades) - len(owner_trades)
+    assert active_effect["active_strategy_opposite_exit_count"] == 2
+    assert active_effect["entry_owner_active_strategy_opposite_exit_count"] == 0
+    assert active_effect["active_strategy_opposite_exit_count_delta"] == 2
+
+
+def test_phase_evidence_payload_embeds_rows_assignments_and_recomputable_hash() -> None:
+    from scripts.chart_regime_strategy_mapping import ThreeDayPhaseEvidence
+
+    day = datetime(2025, 7, 7, tzinfo=timezone.utc)
+    row_payload = {
+        "candidate_id": "candidate-a",
+        "outcome_start_at": "2025-07-07T00:00:00Z",
+        "daily_return_ratio": "0.01",
+        "closed_trade_count": 3,
+    }
+    row = SimpleNamespace(
+        outcome_start_at=day,
+        candidate_id="candidate-a",
+        availability_status="available",
+        canonical_payload=lambda: row_payload,
+    )
+    identity = SimpleNamespace(
+        canonical_payload=lambda: {"code_version": "test"}, digest="1" * 64
+    )
+    evidence = ThreeDayPhaseEvidence(
+        phase="mapping_fit",
+        rows=(row,),
+        calendar=(day,),
+        assignments=("component-a",),
+        run_identity=identity,
+        ledger_path=Path("mapping.jsonl"),
+        ledger_hash="2" * 64,
+    )
+
+    payload = evidence.canonical_payload()
+
+    assert payload["daily_evidence_rows"] == [row_payload]
+    assert payload["component_assignments"] == ["component-a"]
+    assert payload["calendar_rows"] == [{
+        "outcome_start_at": "2025-07-07T00:00:00Z",
+        "component_fingerprint": "component-a",
+        "role": "mapping_fit",
+    }]
+    assert payload["assignment_hash"] == _canonical_hash(payload["component_assignments"])
+    independently_reconstructed = [
+        row["component_fingerprint"] for row in payload["calendar_rows"]
+    ]
+    assert independently_reconstructed == payload["component_assignments"]
 
 
 def test_all_eight_walk_forward_fold_dates_are_accepted() -> None:

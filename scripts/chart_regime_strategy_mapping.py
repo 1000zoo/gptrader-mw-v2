@@ -317,6 +317,26 @@ def load_test_after_freeze(
         provenance = result.get("provenance")
     if not isinstance(provenance, Mapping):
         raise ValueError("Test loader result requires validated provenance")
+    supplied_hash = provenance.get("pre_test_freeze_hash")
+    if (
+        not isinstance(supplied_hash, str)
+        or len(supplied_hash) != 64
+        or any(character not in "0123456789abcdef" for character in supplied_hash)
+        or supplied_hash != freeze.pre_test_freeze_hash
+    ):
+        raise ValueError("Test loader provenance freeze hash is missing, malformed, or incompatible")
+    freeze_payload = freeze.canonical_payload
+    identity_expectations = {
+        "model_artifact_hash": freeze_payload.get("model", {}).get("artifact_hash"),
+        "candidate_manifest_hash": freeze_payload.get("candidate_manifest", {}).get("manifest_hash"),
+        "candidate_universe_hash": freeze_payload.get("candidate_manifest", {}).get("candidate_universe_hash"),
+        "mapping_artifact_hash": freeze_payload.get("mapping", {}).get("artifact_hash"),
+        "profile_id": freeze_payload.get("profile", {}).get("profile_id"),
+    }
+    for key, expected in identity_expectations.items():
+        supplied = provenance.get(key)
+        if supplied is not None and supplied != expected:
+            raise ValueError(f"Test loader provenance {key} is incompatible with freeze")
     state.advance(
         ThreeDayExperimentStage.PRE_TEST_FROZEN,
         ThreeDayExperimentStage.TEST_LOADED,
@@ -361,14 +381,65 @@ def render_three_day_markdown(report: Mapping[str, object]) -> str:
         lines.append("- No component entries were rendered.")
     lines.extend(("", "## Component and eligibility summaries", ""))
     model = report.get("model_artifact", {})
-    if isinstance(model, Mapping):
-        for fingerprint in model.get("component_fingerprints", ()):
-            lines.append(f"- Model component `{fingerprint}` is frozen before outcome evidence.")
+    model_gates = model.get("model_gates", {}) if isinstance(model, Mapping) else {}
+    weights = model.get("weights", ()) if isinstance(model, Mapping) else ()
+    fingerprints = model.get("component_fingerprints", ()) if isinstance(model, Mapping) else ()
+    weight_by_component = {
+        str(fingerprint): weights[index]
+        for index, fingerprint in enumerate(fingerprints)
+        if isinstance(weights, (tuple, list)) and index < len(weights)
+    }
     assessments = mapping.get("candidate_assessments", ()) if isinstance(mapping, Mapping) else ()
+    assessments_by_component: dict[str, list[Mapping[str, object]]] = {}
     if isinstance(assessments, (tuple, list)):
+        for item in assessments:
+            if isinstance(item, Mapping):
+                assessments_by_component.setdefault(
+                    str(item.get("component_fingerprint", "unknown")), []
+                ).append(item)
         eligible = sum(bool(item.get("eligible")) for item in assessments if isinstance(item, Mapping))
         rejected = sum(not bool(item.get("eligible")) for item in assessments if isinstance(item, Mapping))
         lines.append(f"- Candidate/component assessments: eligible={eligible}; rejected={rejected}")
+    validation_rows = {
+        str(item.get("component_fingerprint")): item
+        for item in (
+            report.get("validation_sensitivity", {}).get(
+                "mapping_fit_frozen_entries_on_validation", ()
+            )
+            if isinstance(report.get("validation_sensitivity", {}), Mapping)
+            else ()
+        )
+        if isinstance(item, Mapping)
+    }
+    entries_by_component = {
+        str(item.get("component_fingerprint")): item
+        for item in entries
+        if isinstance(item, Mapping)
+    }
+    for fingerprint in fingerprints if isinstance(fingerprints, (tuple, list)) else ():
+        component = str(fingerprint)
+        component_assessments = assessments_by_component.get(component, [])
+        selected = entries_by_component.get(component, {})
+        validation = validation_rows.get(component, {})
+        assigned_days = max(
+            (int(item.get("assigned_day_count", 0)) for item in component_assessments),
+            default=0,
+        )
+        episodes = max(
+            (int(item.get("episode_count", 0)) for item in component_assessments),
+            default=0,
+        )
+        closed_trades = sum(
+            int(item.get("closed_trade_count", 0)) for item in component_assessments
+        )
+        lines.append(
+            f"- `{component}`: weight={weight_by_component.get(component, 'n/a')}; "
+            f"distance_threshold={model_gates.get('distance_threshold', 'n/a') if isinstance(model_gates, Mapping) else 'n/a'}; "
+            f"selected={selected.get('strategy_candidate_id') or 'cash'}; "
+            f"assigned_days={assigned_days}; episodes={episodes}; closed_trades={closed_trades}; "
+            f"validation_lcb={validation.get('validation_corrected_lower_bound_ratio', 'n/a')}; "
+            f"validation_mdd={validation.get('validation_maximum_drawdown_ratio', 'n/a')}"
+        )
     lines.extend(("", "## Validation sensitivity", ""))
     sensitivity = report.get("validation_sensitivity", {})
     lines.append(
@@ -388,7 +459,11 @@ def render_three_day_markdown(report: Mapping[str, object]) -> str:
                 f"{metrics.get('trade_count', row.get('trade_count', 0))} |"
             )
     lines.extend(("", "## Active-exit, concentration, and adoption", ""))
-    lines.append("- Active-exit delta is the primary dynamic comparison minus `k4_dynamic_entry_owner_exit`; full trades/equity/audits remain in JSON.")
+    lines.append(
+        "- Active-exit numeric delta (active-opposite minus entry-owner): `"
+        + json.dumps(_canonicalize_report(report.get("active_exit_effect", {})), sort_keys=True)
+        + "`"
+    )
     lines.append(f"- Concentration audit: `{json.dumps(_canonicalize_report(report.get('concentration_audit', {})), sort_keys=True)}`")
     lines.append(f"- Adoption assessment: `{json.dumps(_canonicalize_report(report.get('adoption_assessment', {})), sort_keys=True)}`")
     lines.extend((
@@ -513,7 +588,123 @@ def run_six_three_day_test_comparisons(
     return results
 
 
-def assess_three_day_adoption(comparisons: Mapping[str, object]) -> dict[str, object]:
+def _comparison_metric(row: object, name: str) -> Decimal | None:
+    if not isinstance(row, Mapping):
+        return None
+    value = row.get(name)
+    nested = row.get("continuous_metrics")
+    if value is None and isinstance(nested, Mapping):
+        value = nested.get(name)
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError):
+        return None
+    return parsed if parsed.is_finite() else None
+
+
+def build_three_day_comparison_audits(
+    comparisons: Mapping[str, object]
+) -> tuple[dict[str, object], dict[str, object]]:
+    primary = comparisons.get("k4_dynamic_active_strategy_opposite_exit", {})
+    owner = comparisons.get("k4_dynamic_entry_owner_exit", {})
+    primary_trades = tuple(primary.get("trades", ())) if isinstance(primary, Mapping) else ()
+    daily: dict[str, Decimal] = {}
+    positive_trades = []
+    for trade in primary_trades:
+        if not isinstance(trade, Mapping):
+            continue
+        try:
+            pnl = Decimal(str(trade.get("net_pnl", "0")))
+        except (InvalidOperation, TypeError):
+            continue
+        if not pnl.is_finite():
+            continue
+        exit_at = str(trade.get("exit_at", "unknown"))[:10]
+        daily[exit_at] = daily.get(exit_at, Decimal(0)) + pnl
+        if pnl > 0:
+            positive_trades.append(pnl)
+    positive_days = tuple(value for value in daily.values() if value > 0)
+    day_total = sum(positive_days, Decimal(0))
+    trade_total = sum(positive_trades, Decimal(0))
+    top_day_share = max(positive_days) / day_total if day_total else Decimal(0)
+    top_five_share = (
+        sum(sorted(positive_trades, reverse=True)[:5], Decimal(0)) / trade_total
+        if trade_total else Decimal(0)
+    )
+    concentration = {
+        "source": "k4_dynamic_active_strategy_opposite_exit",
+        "profit_basis": "positive daily net PnL and positive closed-trade net PnL",
+        "positive_day_count": len(positive_days),
+        "positive_trade_count": len(positive_trades),
+        "top_day_profit_share": str(top_day_share),
+        "top_day_profit_share_threshold": str(
+            STRICT_RISK_POLICY.maximum_top_episode_profit_share
+        ),
+        "top_day_profit_share_passed": (
+            bool(positive_days)
+            and top_day_share <= STRICT_RISK_POLICY.maximum_top_episode_profit_share
+        ),
+        "top_episode_profit_share": str(top_day_share),
+        "top_episode_profit_share_threshold": str(
+            STRICT_RISK_POLICY.maximum_top_episode_profit_share
+        ),
+        "top_episode_profit_share_passed": (
+            bool(positive_days)
+            and top_day_share <= STRICT_RISK_POLICY.maximum_top_episode_profit_share
+        ),
+        "top_five_trade_profit_share": str(top_five_share),
+        "top_five_trade_profit_share_threshold": str(
+            STRICT_RISK_POLICY.maximum_top_five_trade_profit_share
+        ),
+        "top_five_trade_profit_share_passed": (
+            bool(positive_trades)
+            and top_five_share <= STRICT_RISK_POLICY.maximum_top_five_trade_profit_share
+        ),
+    }
+    def count(row, reason=None):
+        trades = tuple(row.get("trades", ())) if isinstance(row, Mapping) else ()
+        return sum(
+            1 for trade in trades
+            if isinstance(trade, Mapping)
+            and (reason is None or trade.get("exit_reason") == reason)
+        )
+    primary_return = _comparison_metric(primary, "return_ratio") or Decimal(0)
+    owner_return = _comparison_metric(owner, "return_ratio") or Decimal(0)
+    primary_drawdown = (
+        _comparison_metric(primary, "portfolio_max_drawdown_ratio")
+        or _comparison_metric(primary, "max_drawdown_ratio") or Decimal(0)
+    )
+    owner_drawdown = (
+        _comparison_metric(owner, "portfolio_max_drawdown_ratio")
+        or _comparison_metric(owner, "max_drawdown_ratio") or Decimal(0)
+    )
+    primary_trade_count = count(primary)
+    owner_trade_count = count(owner)
+    primary_active_exit_count = count(primary, "active_strategy_opposite_signal")
+    owner_active_exit_count = count(owner, "active_strategy_opposite_signal")
+    active_effect = {
+        "comparison": (
+            "k4_dynamic_active_strategy_opposite_exit minus "
+            "k4_dynamic_entry_owner_exit"
+        ),
+        "return_ratio_delta": str(primary_return - owner_return),
+        "maximum_drawdown_ratio_delta": str(primary_drawdown - owner_drawdown),
+        "active_strategy_opposite_trade_count": primary_trade_count,
+        "entry_owner_trade_count": owner_trade_count,
+        "trade_count_delta": primary_trade_count - owner_trade_count,
+        "active_strategy_opposite_exit_count": primary_active_exit_count,
+        "entry_owner_active_strategy_opposite_exit_count": owner_active_exit_count,
+        "active_strategy_opposite_exit_count_delta": (
+            primary_active_exit_count - owner_active_exit_count
+        ),
+    }
+    return concentration, active_effect
+
+
+def assess_three_day_adoption(
+    comparisons: Mapping[str, object],
+    concentration_audit: Mapping[str, object] | None = None,
+) -> dict[str, object]:
     """Describe untouched-Test credibility without mutating any adopted state."""
     reasons = []
     required = (
@@ -529,25 +720,12 @@ def assess_three_day_adoption(comparisons: Mapping[str, object]) -> dict[str, ob
     ):
         reasons.append("required_baseline_failed")
 
-    def metric(row, name):
-        if not isinstance(row, Mapping):
-            return None
-        value = row.get(name)
-        nested = row.get("continuous_metrics")
-        if value is None and isinstance(nested, Mapping):
-            value = nested.get(name)
-        try:
-            parsed = Decimal(str(value))
-        except (InvalidOperation, TypeError):
-            return None
-        return parsed if parsed.is_finite() else None
-
     primary = rows["k4_dynamic_active_strategy_opposite_exit"]
-    primary_return = metric(primary, "return_ratio")
-    baseline_returns = tuple(metric(rows[name], "return_ratio") for name in required[:3])
-    drawdown = metric(primary, "max_drawdown_ratio")
+    primary_return = _comparison_metric(primary, "return_ratio")
+    baseline_returns = tuple(_comparison_metric(rows[name], "return_ratio") for name in required[:3])
+    drawdown = _comparison_metric(primary, "max_drawdown_ratio")
     if drawdown is None:
-        drawdown = metric(primary, "portfolio_max_drawdown_ratio")
+        drawdown = _comparison_metric(primary, "portfolio_max_drawdown_ratio")
     if primary_return is None or any(value is None for value in baseline_returns):
         reasons.append("insufficient_return_evidence")
     else:
@@ -559,6 +737,14 @@ def assess_three_day_adoption(comparisons: Mapping[str, object]) -> dict[str, ob
         reasons.append("insufficient_drawdown_evidence")
     elif drawdown > STRICT_RISK_POLICY.maximum_drawdown_ratio:
         reasons.append("unacceptable_drawdown")
+    if concentration_audit is not None and not all(
+        concentration_audit.get(key) is True
+        for key in (
+            "top_episode_profit_share_passed",
+            "top_five_trade_profit_share_passed",
+        )
+    ):
+        reasons.append("unacceptable_or_insufficient_concentration")
     credible = not reasons
     return {
         "status": "unadopted" if credible else "inconclusive",
@@ -626,6 +812,10 @@ class ThreeDayPhaseEvidence:
     ledger_hash: str
 
     def canonical_payload(self) -> dict[str, object]:
+        ordered_rows = sorted(
+            self.rows,
+            key=lambda row: (row.outcome_start_at, row.candidate_id),
+        )
         return {
             "phase": self.phase,
             "run_identity": self.run_identity.canonical_payload(),
@@ -635,6 +825,22 @@ class ThreeDayPhaseEvidence:
             "row_count": len(self.rows),
             "calendar_count": len(self.calendar),
             "assignment_hash": _canonical_hash(list(self.assignments)),
+            "calendar_rows": [
+                {
+                    "outcome_start_at": day.isoformat().replace("+00:00", "Z"),
+                    "component_fingerprint": component,
+                    "role": self.phase,
+                }
+                for day, component in zip(self.calendar, self.assignments)
+            ],
+            "component_assignments": list(self.assignments),
+            "daily_evidence_rows": [row.canonical_payload() for row in ordered_rows],
+            "unavailable_row_count": sum(
+                row.availability_status == "unavailable" for row in ordered_rows
+            ),
+            "available_row_count": sum(
+                row.availability_status == "available" for row in ordered_rows
+            ),
         }
 
 
@@ -902,6 +1108,11 @@ def load_three_day_test_inputs(args, freeze: PreTestFreeze):
         "feature_cache": cache,
         "classification_context_days": 3,
         "pre_test_freeze_hash": freeze.pre_test_freeze_hash,
+        "model_artifact_hash": freeze.canonical_payload["model"].get("artifact_hash"),
+        "candidate_manifest_hash": freeze.canonical_payload["candidate_manifest"].get("manifest_hash"),
+        "candidate_universe_hash": freeze.canonical_payload["candidate_manifest"].get("candidate_universe_hash"),
+        "mapping_artifact_hash": freeze.canonical_payload["mapping"].get("artifact_hash"),
+        "profile_id": freeze.canonical_payload["profile"].get("profile_id"),
     }
     return TestReplayInputs(market, provenance, provider)
 
@@ -1272,6 +1483,9 @@ def run_three_day_daily_k4_experiment(
         ThreeDayExperimentStage.COMPARISONS_RUN,
         "test_comparisons_run",
     )
+    concentration_audit, active_exit_effect = build_three_day_comparison_audits(
+        comparisons
+    )
     test_provenance = getattr(test_inputs, "data_provenance", None)
     if test_provenance is None and isinstance(test_inputs, Mapping):
         test_provenance = test_inputs.get("provenance", {})
@@ -1282,6 +1496,18 @@ def run_three_day_daily_k4_experiment(
         else final_mapping_payload.get("artifact_hash")
     )
     fold_payload = profile_payload["fold"]
+    assignment_by_day = {}
+    for bundle in (mapping_evidence, validation_evidence):
+        if isinstance(bundle, ThreeDayPhaseEvidence):
+            assignment_by_day.update(zip(bundle.calendar, bundle.assignments))
+    statistical_calendar = [
+        {
+            "day": item.day.isoformat().replace("+00:00", "Z"),
+            "role": item.role,
+            "component_fingerprint": assignment_by_day.get(item.day),
+        }
+        for item in build_daily_statistical_calendar(include_validation=True)
+    ]
     report = {
         "schema_version": "three-day-daily-k4-report-v1",
         "profile": profile_payload,
@@ -1291,6 +1517,7 @@ def run_three_day_daily_k4_experiment(
             {"start_at": "2026-01-01T00:00:00Z", "end_at": "2026-01-04T00:00:00Z", "days": 3},
             {"start_at": "2026-04-01T00:00:00Z", "end_at": "2026-04-04T00:00:00Z", "days": 3},
         ],
+        "statistical_calendar": statistical_calendar,
         "source_verification": _freeze_boundary_payload(sources),
         "candidate_manifest": _freeze_boundary_payload(manifest),
         "model_artifact": _freeze_boundary_payload(model),
@@ -1305,11 +1532,11 @@ def run_three_day_daily_k4_experiment(
         "validation_sensitivity": sensitivity,
         "test_provenance": _canonicalize_report(test_provenance or {}),
         "test_comparisons": comparisons,
-        "adoption_assessment": assess_three_day_adoption(comparisons),
-        "concentration_audit": {
-            "source": "k4_dynamic_active_strategy_opposite_exit",
-            "reported_in_full_comparison": True,
-        },
+        "adoption_assessment": assess_three_day_adoption(
+            comparisons, concentration_audit
+        ),
+        "concentration_audit": concentration_audit,
+        "active_exit_effect": active_exit_effect,
         "selection_and_exit_audits": {
             "preserved_in_full_dynamic_comparisons": True,
             "policies": ["entry_owner_only", "active_strategy_opposite"],
