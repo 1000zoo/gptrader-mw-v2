@@ -9,6 +9,18 @@ import pytest
 from src.application.services.frozen_k4_failure_decomposition import (
     decompose_frozen_k4_failure,
 )
+from src.application.services.frozen_k4_failure_replay import (
+    FrozenK4HalfReplay,
+    FrozenK4Replay,
+)
+from src.domain.regime.frozen_k4_failure_diagnostics import (
+    DiagnosisStatus,
+    FrozenK4InputIdentity,
+    HalfFitReceipt,
+    MatchedPair,
+    MetricReproduction,
+    OODRow,
+)
 
 
 def _ts(index: int) -> datetime:
@@ -40,37 +52,60 @@ def _fixture():
         medians=(0.0, 0.0),
         scales=(1.0, 1.0),
     )
-    half = SimpleNamespace(
-        receipt=SimpleNamespace(half_label="A"),
+    half = FrozenK4HalfReplay(
+        receipt=HalfFitReceipt("A", 820, "f" * 64),
         fit=half_fit,
         assignments=(0, 0, 0, 0, 1, 1),
+        posterior_probabilities=(),
         projected_centroids=((3.0, 4.0), (9.0, 0.0)),
         projected_covariances=((2.0, 2.0), (1.0, 1.0)),
+        precisions=(),
+        precisions_cholesky=(),
+        cost_matrix=(),
+        hungarian_assignment=((0, 0), (1, 1)),
         matched_pairs=(
-            SimpleNamespace(
+            MatchedPair(
                 half_label="A",
-                primary_component_index=0,
-                half_component_index=0,
                 primary_component_fingerprint="a" * 24,
                 half_component_fingerprint="c" * 24,
+                primary_component_index=0,
+                half_component_index=0,
+                matching_cost=5.0,
                 euclidean_distance=5.0,
             ),
-            SimpleNamespace(
+            MatchedPair(
                 half_label="A",
-                primary_component_index=1,
-                half_component_index=1,
                 primary_component_fingerprint="b" * 24,
                 half_component_fingerprint="d" * 24,
+                primary_component_index=1,
+                half_component_index=1,
+                matching_cost=1.0,
                 euclidean_distance=1.0,
             ),
         ),
+        pair_euclidean_distances=(5.0, 1.0),
+        component_weights=(0.6, 0.4),
     )
-    replay = SimpleNamespace(
-        status=SimpleNamespace(status="reproduced", decomposition_allowed=True),
+    identity = FrozenK4InputIdentity(
+        *("a" * 64 for _ in range(10)),
+        split_at="2023-04-01T00:00:00Z",
+        half_a_range=("2021-01-01T00:00:00Z", "2023-04-01T00:00:00Z"),
+        half_b_range=("2023-04-01T00:00:00Z", "2025-06-30T00:00:00Z"),
+    )
+    replay = FrozenK4Replay(
+        input_identity=identity,
+        dependency_metadata={"runtime": "unit"},
+        status=DiagnosisStatus.reproduced(
+            MetricReproduction.compare(1.0, 1.0),
+            MetricReproduction.compare(0.5, 0.5),
+            3,
+            6,
+        ),
         half_replays=(half,),
         primary_assignments=(0, 0, 0, 0, 1, 1),
+        primary_posterior_probabilities=(),
         primary_ood_rows=(
-            SimpleNamespace(
+            OODRow(
                 anchor_at="2021-01-01T00:00:00Z",
                 assigned_component_index=0,
                 assigned_component_fingerprint="a" * 24,
@@ -78,7 +113,7 @@ def _fixture():
                 threshold=9.0,
                 exceeds=False,
             ),
-            SimpleNamespace(
+            OODRow(
                 anchor_at="2021-01-02T00:00:00Z",
                 assigned_component_index=0,
                 assigned_component_fingerprint="a" * 24,
@@ -86,7 +121,7 @@ def _fixture():
                 threshold=9.0,
                 exceeds=True,
             ),
-            SimpleNamespace(
+            OODRow(
                 anchor_at="2021-01-03T00:00:00Z",
                 assigned_component_index=0,
                 assigned_component_fingerprint="a" * 24,
@@ -94,7 +129,7 @@ def _fixture():
                 threshold=9.0,
                 exceeds=True,
             ),
-            SimpleNamespace(
+            OODRow(
                 anchor_at="2021-01-04T00:00:00Z",
                 assigned_component_index=0,
                 assigned_component_fingerprint="a" * 24,
@@ -102,7 +137,7 @@ def _fixture():
                 threshold=9.0,
                 exceeds=False,
             ),
-            SimpleNamespace(
+            OODRow(
                 anchor_at="2021-01-05T00:00:00Z",
                 assigned_component_index=1,
                 assigned_component_fingerprint="b" * 24,
@@ -110,7 +145,7 @@ def _fixture():
                 threshold=9.0,
                 exceeds=True,
             ),
-            SimpleNamespace(
+            OODRow(
                 anchor_at="2021-01-06T00:00:00Z",
                 assigned_component_index=1,
                 assigned_component_fingerprint="b" * 24,
@@ -146,6 +181,27 @@ def test_feature_contributions_rank_squared_euclidean_drift() -> None:
     ]
     assert pair0[0].contribution_ratio == pytest.approx(16.0 / 25.0)
     assert result.top_drift_features[("A", 0)][:2] == ("y", "x")
+
+
+def test_cluster_summary_and_cause_classification_are_populated_from_decomposition() -> None:
+    replay, primary_fit, vectors = _fixture()
+
+    result = decompose_frozen_k4_failure(replay, primary_fit, vectors)
+
+    summary = {
+        (row.half_label, row.primary_component_index): row
+        for row in result.cluster_summaries
+    }
+    assert summary[("A", 0)].half_component_index == 0
+    assert summary[("A", 0)].sample_count == 4
+    assert summary[("A", 0)].exceedance_count == 2
+    assert summary[("A", 0)].euclidean_distance == pytest.approx(5.0)
+    assert set(result.cause_classification.causes) >= {
+        "specific-feature-drift",
+        "component-ood-concentration",
+        "covariance-aware-drift",
+    }
+    assert result.cause_classification.diagnostic_only is True
 
 
 def test_robust_locations_compare_mean_median_trimmed_mean_and_medoid() -> None:
@@ -320,10 +376,66 @@ def test_outputs_do_not_expose_forbidden_later_stage_terms_or_dates() -> None:
     assert "2025-06-30" not in text
 
 
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"Mapping": "leak"},
+        {"safe": "strategy leak"},
+        {"safe": ["Validation leak"]},
+        {"safe": {"nested": datetime(2025, 6, 30, tzinfo=timezone.utc)}},
+    ),
+)
+def test_recursive_guard_rejects_forbidden_input_context(payload: object) -> None:
+    replay, primary_fit, vectors = _fixture()
+
+    with pytest.raises(ValueError, match="isolation guard"):
+        decompose_frozen_k4_failure(
+            replay,
+            primary_fit,
+            vectors,
+            source_context=payload,
+        )
+
+
+def test_recursive_guard_rejects_forbidden_primary_or_vector_inputs() -> None:
+    replay, primary_fit, vectors = _fixture()
+    forbidden_fit = SimpleNamespace(
+        **{**primary_fit.__dict__, "feature_names": ("x", "strategy_signal")}
+    )
+    with pytest.raises(ValueError, match="isolation guard"):
+        decompose_frozen_k4_failure(replay, forbidden_fit, vectors)
+
+    late_vector = SimpleNamespace(
+        **{
+            **vectors[-1].__dict__,
+            "anchor_at": datetime(2025, 6, 30, tzinfo=timezone.utc),
+        }
+    )
+    late_vectors = tuple(vectors[:-1]) + (
+        late_vector,
+    )
+    with pytest.raises(ValueError, match="isolation guard"):
+        decompose_frozen_k4_failure(replay, primary_fit, late_vectors)
+
+
+def test_rejects_ad_hoc_mutable_replay_object() -> None:
+    replay, primary_fit, vectors = _fixture()
+    fake = SimpleNamespace(**replay.__dict__)
+
+    with pytest.raises(ValueError, match="FrozenK4Replay"):
+        decompose_frozen_k4_failure(fake, primary_fit, vectors)
+
+
 def test_rejects_non_reproduced_replay() -> None:
     replay, primary_fit, vectors = _fixture()
-    replay.status.status = "causal_reproduction_mismatch"
-    replay.status.decomposition_allowed = False
+    mismatch = FrozenK4Replay(
+        input_identity=replay.input_identity,
+        dependency_metadata={"runtime": "unit"},
+        status=DiagnosisStatus.causal_mismatch_unavailable(
+            "input-data-mismatch",
+            "b" * 64,
+        ),
+    )
 
     with pytest.raises(ValueError, match="requires reproduced replay"):
-        decompose_frozen_k4_failure(replay, primary_fit, vectors)
+        decompose_frozen_k4_failure(mismatch, primary_fit, vectors)

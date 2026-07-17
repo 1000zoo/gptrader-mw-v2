@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
+from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import Mapping, Sequence
 
 import numpy as np
 
+from src.application.services.frozen_k4_failure_replay import FrozenK4Replay
 from src.domain.regime.frozen_k4_failure_diagnostics import SensitivityRow
 
 _ASSIGNMENT_SOURCE = "frozen_reproduced_half_assignment"
 _VARIANCE_FLOOR = 1e-6
+_MAPPING_BOUNDARY = datetime(2025, 6, 30, tzinfo=timezone.utc)
+_FORBIDDEN_TERMS = frozenset(
+    ("strategy", "mapping", "validation", "evidence", "test")
+)
 
 
 @dataclass(frozen=True)
@@ -83,6 +90,30 @@ class OODSampleContributionRow:
 
 
 @dataclass(frozen=True)
+class ClusterSummaryRow:
+    half_label: str
+    primary_component_index: int
+    half_component_index: int
+    primary_component_fingerprint: str
+    half_component_fingerprint: str
+    sample_count: int
+    exceedance_count: int
+    euclidean_distance: float
+    top_drift_features: tuple[str, ...]
+    diagnostic_only: bool = True
+
+
+@dataclass(frozen=True)
+class CauseClassification:
+    causes: tuple[str, ...]
+    signals: Mapping[str, float | str] = field(repr=False)
+    diagnostic_only: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "signals", MappingProxyType(dict(self.signals)))
+
+
+@dataclass(frozen=True)
 class OffsetSubsampleRow:
     spacing_days: int
     offset: int
@@ -95,6 +126,8 @@ class OffsetSubsampleRow:
 
 @dataclass(frozen=True)
 class FrozenK4Decomposition:
+    cluster_summaries: tuple[ClusterSummaryRow, ...]
+    cause_classification: CauseClassification
     feature_contributions: tuple[FeatureContributionRow, ...]
     top_drift_features: Mapping[tuple[str, int], tuple[str, ...]]
     location_distances: tuple[LocationDistanceRow, ...]
@@ -109,10 +142,20 @@ class FrozenK4Decomposition:
 
 
 def decompose_frozen_k4_failure(
-    replay: object,
+    replay: FrozenK4Replay,
     primary_fit: object,
     vectors: Sequence[object],
+    *,
+    source_context: object | None = None,
 ) -> FrozenK4Decomposition:
+    if not isinstance(replay, FrozenK4Replay):
+        raise ValueError("decomposition requires a FrozenK4Replay")
+    if not isinstance(vectors, tuple):
+        raise ValueError("decomposition requires immutable input vectors")
+    _isolation_guard(primary_fit, "primary_fit")
+    _isolation_guard(vectors, "vectors")
+    _isolation_guard(source_context, "source_context")
+
     status = getattr(replay, "status", None)
     if (
         getattr(status, "status", None) != "reproduced"
@@ -126,6 +169,7 @@ def decompose_frozen_k4_failure(
     primary_assignments = np.asarray(tuple(replay.primary_assignments), dtype=int)
 
     feature_rows: list[FeatureContributionRow] = []
+    summary_rows: list[ClusterSummaryRow] = []
     location_rows: list[LocationDistanceRow] = []
     clipped_rows: list[ClippedSampleRow] = []
     sensitivity_rows: list[SensitivityRow] = []
@@ -208,13 +252,39 @@ def decompose_frozen_k4_failure(
                     np.asarray(half.projected_covariances[half_index], dtype=float),
                 )
             )
+            exceeded = sum(
+                1
+                for row in replay.primary_ood_rows
+                if int(row.assigned_component_index) == primary_index and row.exceeds
+            )
+            summary_rows.append(
+                ClusterSummaryRow(
+                    half_label,
+                    primary_index,
+                    half_index,
+                    pair.primary_component_fingerprint,
+                    pair.half_component_fingerprint,
+                    int(np.count_nonzero(member_mask)),
+                    exceeded,
+                    float(pair.euclidean_distance),
+                    tuple(name for name, _ in ordered[:5]),
+                )
+            )
 
     ood_by_component, ood_samples = _ood_rows(
         replay, primary_fit, feature_names, primary_clipped, primary_assignments
     )
     offsets = _offset_rows(primary_assignments)
     top = _top_features(feature_rows)
-    return FrozenK4Decomposition(
+    result = FrozenK4Decomposition(
+        tuple(summary_rows),
+        _classify_causes(
+            tuple(summary_rows),
+            tuple(feature_rows),
+            tuple(location_rows),
+            tuple(pooled_rows),
+            tuple(ood_by_component),
+        ),
         tuple(feature_rows),
         top,
         tuple(location_rows),
@@ -226,6 +296,46 @@ def decompose_frozen_k4_failure(
         tuple(ood_samples),
         tuple(offsets),
     )
+    _isolation_guard(result, "decomposition_result")
+    return result
+
+
+def _isolation_guard(value: object, path: str) -> None:
+    if value is None:
+        return
+    if isinstance(value, datetime):
+        parsed = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+        if parsed >= _MAPPING_BOUNDARY:
+            raise ValueError(f"isolation guard rejected date at {path}")
+        return
+    if isinstance(value, str):
+        lowered = value.lower()
+        if any(term in lowered for term in _FORBIDDEN_TERMS):
+            raise ValueError(f"isolation guard rejected forbidden text at {path}")
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return
+        if parsed >= _MAPPING_BOUNDARY:
+            raise ValueError(f"isolation guard rejected date at {path}")
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            _isolation_guard(str(key), f"{path}.key")
+            _isolation_guard(item, f"{path}.{key}")
+        return
+    if is_dataclass(value) and not isinstance(value, type):
+        for field in fields(value):
+            _isolation_guard(getattr(value, field.name), f"{path}.{field.name}")
+        return
+    if isinstance(value, (tuple, list, frozenset, set)):
+        for index, item in enumerate(value):
+            _isolation_guard(item, f"{path}[{index}]")
+        return
+    if hasattr(value, "__dict__"):
+        for key, item in vars(value).items():
+            _isolation_guard(str(key), f"{path}.key")
+            _isolation_guard(item, f"{path}.{key}")
 
 
 def _raw_matrix(vectors: Sequence[object], feature_names: tuple[str, ...]) -> np.ndarray:
@@ -499,6 +609,60 @@ def _ood_rows(
     return by_component, sample_rows
 
 
+def _classify_causes(
+    summaries: tuple[ClusterSummaryRow, ...],
+    features: tuple[FeatureContributionRow, ...],
+    locations: tuple[LocationDistanceRow, ...],
+    pooled: tuple[PooledMahalanobisRow, ...],
+    ood: tuple[OODComponentRow, ...],
+) -> CauseClassification:
+    causes: set[str] = set()
+    signals: dict[str, float | str] = {}
+    if summaries:
+        largest = max(summaries, key=lambda row: row.euclidean_distance)
+        signals["largest_centroid_half"] = largest.half_label
+        signals["largest_centroid_component"] = float(largest.primary_component_index)
+        signals["largest_centroid_distance"] = largest.euclidean_distance
+        if largest.euclidean_distance > 0.0:
+            causes.add("specific-cluster-drift")
+    if features:
+        largest_feature = max(features, key=lambda row: row.squared_distance)
+        signals["largest_feature_squared_distance"] = largest_feature.squared_distance
+        signals["largest_feature_component"] = float(largest_feature.primary_component_index)
+        if largest_feature.contribution_ratio >= 0.5:
+            causes.add("specific-feature-drift")
+    mean_by_key = {
+        (row.half_label, row.primary_component_index): row.centroid_distance
+        for row in locations
+        if row.statistic == "mean"
+    }
+    median_by_key = {
+        (row.half_label, row.primary_component_index): row.centroid_distance
+        for row in locations
+        if row.statistic == "coordinate_median"
+    }
+    for key, mean_distance in mean_by_key.items():
+        median_distance = median_by_key.get(key)
+        if median_distance is not None and mean_distance > median_distance * 1.25:
+            causes.add("tail-sensitive-drift")
+            signals["largest_mean_median_gap"] = max(
+                float(signals.get("largest_mean_median_gap", 0.0)),
+                mean_distance - median_distance,
+            )
+    if pooled:
+        largest_pooled = max(pooled, key=lambda row: row.squared_distance)
+        signals["largest_pooled_mahalanobis"] = largest_pooled.squared_distance
+        if largest_pooled.squared_distance > 1.0:
+            causes.add("covariance-aware-drift")
+    if ood:
+        largest_ood = max(ood, key=lambda row: row.exceedance_rate)
+        signals["largest_ood_rate"] = largest_ood.exceedance_rate
+        signals["largest_ood_component"] = float(largest_ood.component_index)
+        if largest_ood.exceedance_count > 0:
+            causes.add("component-ood-concentration")
+    return CauseClassification(tuple(sorted(causes)), signals)
+
+
 def _offset_rows(assignments: np.ndarray) -> list[OffsetSubsampleRow]:
     rows: list[OffsetSubsampleRow] = []
     for spacing in (3, 7):
@@ -530,7 +694,9 @@ def _top_features(
 
 
 __all__ = [
+    "CauseClassification",
     "ClippedSampleRow",
+    "ClusterSummaryRow",
     "ComponentDistanceRow",
     "FeatureContributionRow",
     "FrozenK4Decomposition",
