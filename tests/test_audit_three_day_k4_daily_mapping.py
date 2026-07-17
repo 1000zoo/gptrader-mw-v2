@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
+import zipfile
 
 import pytest
 
@@ -15,6 +16,7 @@ from scripts.audit_three_day_k4_daily_mapping import (
     _audit_freeze,
     _reconstruct_cluster_fit,
     _compare_phase_reconstruction,
+    _load_verified_minute_market,
     audit_three_day_k4_daily_mapping,
     canonical_json_bytes,
 )
@@ -23,6 +25,240 @@ from tests.infrastructure.regime.test_three_day_k4_model_artifact import _artifa
 
 def _hash(value: object) -> str:
     return hashlib.sha256(canonical_json_bytes(value, newline=False)).hexdigest()
+
+
+def _write_minute_zip(path: Path, start, count: int, *, skip_index: int | None = None):
+    rows = []
+    for index in range(count):
+        if index == skip_index:
+            continue
+        opened = start + __import__("datetime").timedelta(minutes=index)
+        opened_ms = int(opened.timestamp() * 1000)
+        price = 100 + (index % 17) / 100
+        rows.append(
+            f"{opened_ms},{price},{price + 1},{price - 1},{price},1,"
+            f"{opened_ms + 59999},100,1,0.5,50,0\n"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(path.stem + ".csv", "".join(rows))
+    raw = path.read_bytes()
+    return {
+        "path": str(path), "source_url": f"https://example.invalid/{path.name}",
+        "sha256": hashlib.sha256(raw).hexdigest(), "expected_sha256": hashlib.sha256(raw).hexdigest(),
+        "byte_count": len(raw), "member_name": path.stem + ".csv",
+    }
+
+
+def _write_complete_feature_cache(root: Path, start, end, manifest) -> None:
+    requirements: dict[str, set[str]] = {}
+    for entry in manifest.entries:
+        for alternative in entry.required_feature_alternatives:
+            for name, sources in alternative:
+                requirements.setdefault(name, set()).update(sources)
+    selected_sources = {name: sorted(sources)[0] for name, sources in requirements.items()}
+    sources = sorted(set(selected_sources.values()))
+    rows = []
+    cursor = start
+    from datetime import timedelta
+    while cursor < end:
+        measured = cursor + timedelta(minutes=1)
+        stamp = measured.isoformat()
+        rows.append({
+            "symbol": "BTCUSDT", "timeframe": "1m", "measured_at": stamp,
+            "unavailable_sources": [],
+            "features": {
+                name: {
+                    "value": "1", "source": source,
+                    "observed_at": stamp, "available_at": stamp,
+                }
+                for name, source in selected_sources.items()
+            },
+        })
+        cursor = measured
+    cache = root / "complete.jsonl"
+    root.mkdir(parents=True, exist_ok=True)
+    cache.write_bytes(b"".join(canonical_json_bytes(row) for row in rows))
+    identity = {
+        "schema_version": "binance-usdm-market-features-v1",
+        "start": start.isoformat(), "end": end.isoformat(), "sources": sources,
+    }
+    payload = {
+        "symbol": "BTCUSDT", "timeframe": "1m", "row_count": len(rows),
+        "output_hash": hashlib.sha256(cache.read_bytes()).hexdigest(),
+        "cache_identity_hash": _hash(identity), "input_hashes": {}, "raw_hashes": {},
+        "cache_identity": identity,
+        "source_coverage": {source: {"available_rows": len(rows)} for source in sources},
+        "provenance": {"fixture": "complete-offline"},
+    }
+    (root / "complete.manifest.json").write_bytes(canonical_json_bytes(payload, newline=False))
+
+
+def test_verified_minute_market_parses_real_local_zip_and_fails_closed(tmp_path) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    start = datetime(2025, 7, 4, tzinfo=timezone.utc)
+    archive = tmp_path / "raw" / "BTCUSDT" / "BTCUSDT-1m-2025-07.zip"
+    descriptor = _write_minute_zip(archive, start, 5)
+
+    market = _load_verified_minute_market(
+        [descriptor], raw_root=tmp_path / "raw", start_at=start,
+        end_at=start + timedelta(minutes=5),
+    )
+
+    assert len(market.candles) == 5
+    assert market.candles[0].opened_at == start
+    assert market.candles[-1].closed_at == start + timedelta(minutes=5)
+
+    for mutation in ("missing", "hash", "gap"):
+        changed = copy.deepcopy(descriptor)
+        if mutation == "missing":
+            Path(changed["path"]).unlink()
+        elif mutation == "hash":
+            changed["sha256"] = "0" * 64
+        else:
+            changed = _write_minute_zip(archive, start, 5, skip_index=2)
+        with pytest.raises(ValueError, match="missing|hash|gap|cover"):
+            _load_verified_minute_market(
+                [changed], raw_root=tmp_path / "raw", start_at=start,
+                end_at=start + timedelta(minutes=5),
+            )
+        if mutation == "missing":
+            descriptor = _write_minute_zip(archive, start, 5)
+
+
+def test_real_one_day_459_candidate_phase_replay_reconstructs_published_ledger(tmp_path) -> None:
+    from datetime import datetime, timedelta, timezone
+    from decimal import Decimal
+
+    import scripts.audit_three_day_k4_daily_mapping as audit_module
+    from scripts.chart_regime_strategy_mapping import (
+        BACKTEST_ENGINE_VERSION,
+        ThreeDayPhaseEvidence,
+        _canonical_hash,
+        _select_feature_cache,
+        build_three_day_daily_candidate_manifest,
+        canonical_daily_evidence_replay_contract,
+    )
+    from scripts.scheduler_driven_scalping_backtest import required_warmup_candles
+    from src.application.services.daily_strategy_evidence import (
+        AppendOnlyEvidenceLedger,
+        DAILY_EVIDENCE_CODE_VERSION,
+        DAILY_EVIDENCE_KEY_FIELDS,
+        DAILY_EVIDENCE_SCHEMA_VERSION,
+        DailyEvidenceRunIdentity,
+        feature_provider_config_hash,
+        market_snapshot_hash,
+        run_daily_strategy_evidence,
+    )
+    from src.domain.regime import ThreeDayDailyResearchProfile
+    from loguru import logger
+
+    logger.remove()
+
+    day = datetime(2025, 7, 7, tzinfo=timezone.utc)
+    model = _artifact()
+    manifest = build_three_day_daily_candidate_manifest(expected_count=459)
+    raw_root = tmp_path / "raw"
+    archive = raw_root / "BTCUSDT" / "BTCUSDT-1m-2025-07.zip"
+    descriptor = _write_minute_zip(archive, day - timedelta(days=3), 4 * 24 * 60)
+    canonical_url = (
+        "https://data.binance.vision/data/futures/um/monthly/klines/"
+        "BTCUSDT/1m/BTCUSDT-1m-2025-07.zip"
+    )
+    descriptor.update({
+        "url": canonical_url, "source_url": canonical_url, "period": "2025-07",
+        "bytes": descriptor["byte_count"], "member_identity": descriptor["member_name"],
+    })
+
+    vectors, vector_provenance = audit_module._load_phase_vectors(
+        "mapping_fit", raw_root, [descriptor],
+        start=day - timedelta(days=3), end=day + timedelta(days=1),
+    )
+    assignment = model.assign(vectors[0]).fingerprint
+    candidates = tuple(entry.candidate for entry in manifest.entries)
+    market_start = day - timedelta(minutes=required_warmup_candles(candidates, None))
+    market_end = day + timedelta(days=1)
+    market = _load_verified_minute_market(
+        [descriptor], raw_root=raw_root, start_at=market_start, end_at=market_end,
+    )
+    cache_root = tmp_path / "features"
+    _write_complete_feature_cache(cache_root, market_start, market_end, manifest)
+    provider, cache_provenance = _select_feature_cache(
+        cache_root, required_start=market_start, required_end=market_end,
+        verify_full_file=True,
+    )
+    feature_provenance = getattr(provider, "feature_provenance", cache_provenance)
+    source_coverage = getattr(provider, "feature_source_coverage", {})
+    unavailable = getattr(provider, "feature_unavailable_counts", {})
+    profile = ThreeDayDailyResearchProfile()
+    interval = profile.fold.mapping_fit
+    identity = DailyEvidenceRunIdentity(
+        profile_id=profile.profile_id,
+        feature_schema_version=vectors[0].schema_version,
+        phase="mapping_fit", phase_start_at=interval.start_at, phase_end_at=interval.end_at,
+        model_artifact_hash=model.artifact_hash,
+        candidate_manifest_hash=manifest.manifest_hash,
+        candidate_universe_hash=manifest.candidate_universe_hash,
+        ordered_candidate_definition_hashes=manifest.ordered_definition_hashes,
+        market_data_hash=market_snapshot_hash(market),
+        feature_cache_hash=getattr(provider, "feature_cache_hash", None),
+        feature_config_hash=feature_provider_config_hash(provider),
+        feature_cache_schema_version=str(getattr(provider, "feature_cache_schema_version", "none-v1")),
+        feature_provenance_hash=_canonical_hash(feature_provenance),
+        feature_source_coverage_hash=_canonical_hash(source_coverage),
+        feature_unavailable_counts_hash=_canonical_hash(unavailable),
+        engine_version=BACKTEST_ENGINE_VERSION,
+        cost_model=canonical_daily_evidence_replay_contract().cost_model,
+        symbol="BTCUSDT", timeframe="1m", initial_equity=Decimal("10000"),
+        code_version=DAILY_EVIDENCE_CODE_VERSION,
+        evidence_schema_version=DAILY_EVIDENCE_SCHEMA_VERSION,
+    )
+    ledger_path = tmp_path / "mapping-fit.jsonl"
+    rows = run_daily_strategy_evidence(
+        manifest=manifest, phase="mapping_fit", outcome_start_at=day,
+        component_fingerprint=assignment, market=market,
+        market_feature_provider=provider, run_identity=identity,
+        ledger=AppendOnlyEvidenceLedger(ledger_path, DAILY_EVIDENCE_KEY_FIELDS),
+        replay_contract=canonical_daily_evidence_replay_contract(),
+    )
+    provider.close()
+    phase = ThreeDayPhaseEvidence(
+        "mapping_fit", tuple(rows), (day,), (assignment,), identity, ledger_path,
+        hashlib.sha256(ledger_path.read_bytes()).hexdigest(), (descriptor,),
+        tuple(vector_provenance), dict(feature_provenance), dict(source_coverage),
+        dict(unavailable),
+    ).canonical_payload()
+    report = {
+        "source_verification": {
+            "raw_kline_root": str(raw_root), "feature_cache_root": str(cache_root),
+        },
+        "evidence": {"mapping_fit": phase},
+    }
+    publication = audit_module.canonical_json_bytes(report, newline=False)
+    parsed_report = json.loads(publication)
+    failures: list[str] = []
+
+    replayed = audit_module._replay_phase_from_raw(
+        phase="mapping_fit", bundle=parsed_report["evidence"]["mapping_fit"],
+        report=parsed_report, model_artifact=model, manifest=manifest,
+        ledger_override=None, failures=failures,
+    )
+
+    assert failures == []
+    assert len(replayed) == 459
+    assert replayed == phase["daily_evidence_rows"]
+
+    tampered = copy.deepcopy(parsed_report["evidence"]["mapping_fit"])
+    tampered["daily_evidence_rows"][0]["final_equity"] = "9999"
+    tamper_failures: list[str] = []
+    audit_module._compare_phase_reconstruction(
+        "mapping_fit", tampered,
+        AppendOnlyEvidenceLedger(ledger_path, DAILY_EVIDENCE_KEY_FIELDS).load(),
+        replayed, [assignment], tamper_failures,
+    )
+    assert any("ledger/report evidence" in failure for failure in tamper_failures)
+    assert any("raw scheduler-replayed evidence" in failure for failure in tamper_failures)
 
 
 def _write_bundle(tmp_path: Path) -> tuple[AuditInputs, dict[str, object]]:
@@ -506,7 +742,7 @@ def test_real_typed_task7_publication_raw_root_and_ledgers_flow_through_audit(
     )
     monkeypatch.setattr(
         module, "_load_phase_vectors",
-        lambda phase, root, provenance=(): (
+        lambda phase, root, provenance=(), **kwargs: (
             tuple(SimpleNamespace(fingerprint=value) for value in evidence_root[phase]["component_assignments"]),
             (),
         ),

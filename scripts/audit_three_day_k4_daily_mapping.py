@@ -534,16 +534,24 @@ def _replay_phase_from_raw(
             raise ValueError("verified raw_kline_root and feature_cache_root are required")
         profile = ThreeDayDailyResearchProfile()
         interval = getattr(profile.fold, phase)
+        calendar_rows = bundle.get("calendar_rows", [])
+        days = [
+            datetime.fromisoformat(str(item["outcome_start_at"]).replace("Z", "+00:00"))
+            for item in calendar_rows
+        ]
+        if not days or any(not interval.start_at <= day < interval.end_at for day in days):
+            raise ValueError("phase replay calendar is empty or outside the frozen interval")
         candidates = tuple(entry.candidate for entry in manifest.entries)
         warmup = required_warmup_candles(candidates, None)
-        market_start = interval.start_at - timedelta(minutes=warmup)
+        market_start = min(days) - timedelta(minutes=warmup)
+        market_end = max(days) + timedelta(days=1)
         market = _load_verified_minute_market(
             bundle.get("archive_descriptors", ()), raw_root=Path(str(raw_root)),
-            start_at=market_start, end_at=interval.end_at,
+            start_at=market_start, end_at=market_end,
         )
         provider, _ = _select_feature_cache(
             Path(str(cache_root)), required_start=market_start,
-            required_end=interval.end_at, verify_full_file=True,
+            required_end=market_end, verify_full_file=True,
         )
         identity_payload = bundle.get("run_identity")
         if not isinstance(identity_payload, Mapping):
@@ -551,15 +559,13 @@ def _replay_phase_from_raw(
         identity = _run_identity_from_payload(identity_payload)
         if identity.digest != bundle.get("run_identity_hash"):
             raise ValueError("phase run identity digest mismatch")
-        calendar_rows = bundle.get("calendar_rows", [])
-        days = [
-            datetime.fromisoformat(str(item["outcome_start_at"]).replace("Z", "+00:00"))
-            for item in calendar_rows
-        ]
+        vector_start = min(days) - timedelta(days=3)
+        vector_end = max(days) + timedelta(days=1)
         assignments = [
             model_artifact.assign(vector).fingerprint
             for vector in _load_phase_vectors(
-                phase, Path(str(raw_root)), bundle.get("vector_provenance", ())
+                phase, Path(str(raw_root)), bundle.get("vector_provenance", ()),
+                start=vector_start, end=vector_end,
             )[0]
         ]
         actual_ledger = _load_actual_ledger_rows(phase, bundle, ledger_override, failures)
@@ -594,7 +600,10 @@ def _replay_phase_from_raw(
             close()
 
 
-def _load_phase_vectors(phase: str, raw_root: Path, provenance=()):
+def _load_phase_vectors(
+    phase: str, raw_root: Path, provenance=(), *,
+    start: datetime | None = None, end: datetime | None = None,
+):
     from datetime import timedelta
     from src.domain.regime import ThreeDayDailyResearchProfile
     from src.infrastructure.exchange.binance.research_data.three_day_feature_history import (
@@ -602,10 +611,13 @@ def _load_phase_vectors(phase: str, raw_root: Path, provenance=()):
     )
 
     interval = getattr(ThreeDayDailyResearchProfile().fold, phase)
+    requested_start = start or interval.start_at - timedelta(days=3)
+    requested_end = end or interval.end_at
+    anchor_count = int((requested_end - requested_start - timedelta(days=3)).days)
     return load_three_day_feature_history(
-        symbol="BTCUSDT", start=interval.start_at - timedelta(days=3),
-        end=interval.end_at, raw_root=raw_root,
-        expected_anchor_count=(interval.end_at - interval.start_at).days,
+        symbol="BTCUSDT", start=requested_start,
+        end=requested_end, raw_root=raw_root,
+        expected_anchor_count=anchor_count,
         downloader=_LocalVerifiedDownloader(provenance, raw_root),
     )
 
@@ -664,7 +676,8 @@ def _audit_evidence(
                 ]
                 from datetime import timedelta
                 vectors, provenance = _load_phase_vectors(
-                    str(phase), Path(str(raw_root)), bundle.get("vector_provenance", ())
+                    str(phase), Path(str(raw_root)), bundle.get("vector_provenance", ()),
+                    start=min(days) - timedelta(days=3), end=max(days) + timedelta(days=1),
                 )
                 recomputed = [parsed_model.assign(vector).fingerprint for vector in vectors]
                 if recomputed != assignments:

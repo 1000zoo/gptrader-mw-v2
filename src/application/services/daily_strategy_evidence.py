@@ -799,7 +799,11 @@ def _available_evidence(replay, *, entry, run_identity, component_fingerprint,
     gross = _replay_decimal(replay["gross_pnl"], "gross PnL")
     net = _replay_decimal(replay["net_pnl"], "net PnL")
     fees = _replay_decimal(replay["fee_paid"], "fees", nonnegative=True)
-    if initial != run_identity.initial_equity or final != initial + net or gross - fees != net:
+    if (
+        initial != run_identity.initial_equity
+        or not _decimal_reconciles(final, initial + net)
+        or not _decimal_reconciles(gross - fees, net)
+    ):
         raise ValueError("canonical replay accounting does not reconcile")
     if not isinstance(replay["trades"], list):
         raise ValueError("canonical replay trades must be a JSON list")
@@ -812,8 +816,20 @@ def _available_evidence(replay, *, entry, run_identity, component_fingerprint,
         trade_pnls = tuple(item["net_pnl"] for item in audited)
         trade_gross = sum((item["gross_pnl"] for item in audited), Decimal(0))
         trade_fees = sum((item["fee_paid"] for item in audited), Decimal(0))
-        if sum(trade_pnls, Decimal(0)) != net or trade_gross != gross or trade_fees != fees:
+        if (
+            not _decimal_reconciles(sum(trade_pnls, Decimal(0)), net)
+            or not _decimal_reconciles(trade_gross, gross)
+            or not _decimal_reconciles(trade_fees, fees)
+        ):
             raise ValueError("canonical replay trade ledger does not reconcile")
+        # Normalize sub-ULP scheduler accumulation noise to the exact domain
+        # accounting identities after the independently reported values pass.
+        net = gross - fees
+        final = initial + net
+        if trade_pnls:
+            normalized = list(trade_pnls)
+            normalized[-1] += net - sum(normalized, Decimal(0))
+            trade_pnls = tuple(normalized)
         positive = sum((value for value in trade_pnls if value > 0), Decimal(0))
         negative = -sum((value for value in trade_pnls if value < 0), Decimal(0))
         profit_factor = positive / negative if negative else None
@@ -828,7 +844,7 @@ def _available_evidence(replay, *, entry, run_identity, component_fingerprint,
         ), Decimal(0)) / initial
         daily_return = net / initial
     reported_return = _replay_decimal(replay["return_ratio"], "return ratio")
-    if reported_return != daily_return:
+    if not _decimal_reconciles(reported_return, daily_return):
         raise ValueError("canonical replay return ratio mismatch")
     drawdown = _replay_decimal(replay["max_drawdown_ratio"], "maximum drawdown", nonnegative=True)
     aggregate_mae = _replay_decimal(
@@ -876,6 +892,12 @@ def _replay_decimal(value, field, *, positive=False, nonnegative=False):
     if not result.is_finite() or (positive and result <= 0) or (nonnegative and result < 0):
         raise ValueError(f"canonical replay {field} is invalid")
     return result
+
+
+def _decimal_reconciles(left: Decimal, right: Decimal) -> bool:
+    """Allow only accumulated arithmetic noise from the 28-digit replay context."""
+    scale = max(Decimal(1), abs(left), abs(right))
+    return abs(left - right) <= scale * Decimal("1e-26")
 
 
 def _validate_trade_payload(trade, entry):

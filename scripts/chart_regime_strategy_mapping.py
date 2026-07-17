@@ -1020,7 +1020,7 @@ def load_three_day_phase_evidence(
         market_data_hash=market_snapshot_hash(market),
         feature_cache_hash=getattr(provider, "feature_cache_hash", None),
         feature_config_hash=feature_provider_config_hash(provider),
-        feature_cache_schema_version=str(getattr(provider, "feature_schema_version", "none-v1")),
+        feature_cache_schema_version=str(getattr(provider, "feature_cache_schema_version", "none-v1")),
         feature_provenance_hash=_canonical_hash(provider_provenance),
         feature_source_coverage_hash=_canonical_hash(provider_coverage),
         feature_unavailable_counts_hash=_canonical_hash(unavailable),
@@ -4603,6 +4603,7 @@ class _IndexedJsonlShard:
 
 class IndexedCompositeFeatureProvider:
     required_warmup_candles = 0
+    feature_cache_schema_version = "binance-usdm-market-features-v1"
 
     def __init__(
         self, plan: FeatureCachePlan, *, progress: Callable[[str], None] | None = None
