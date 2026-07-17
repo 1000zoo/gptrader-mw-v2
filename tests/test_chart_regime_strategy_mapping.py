@@ -130,7 +130,7 @@ def test_pre_test_freeze_is_immutable_and_excludes_test_results() -> None:
         mapping={"artifact_hash": "e" * 64, "risk_policy": "strict"},
         global_fixed_baseline={"decision": "cash", "candidate_id": None},
         profile={"profile_id": "three-day-daily-k4-v1"},
-        chronology={"test": {"start_at": "2026-04-04T00:00:00Z"}},
+        chronology={"validation_end_at": "2026-04-01T00:00:00Z"},
     )
     original_hash = freeze.pre_test_freeze_hash
 
@@ -162,10 +162,45 @@ def test_test_loader_requires_validated_freeze_and_records_first_read() -> None:
         profile={"profile_id": "three-day-daily-k4-v1"}, chronology={},
     )
     state = ThreeDayExperimentState(stage=ThreeDayExperimentStage.PRE_TEST_FROZEN)
-    sentinel = object()
+    sentinel = {"provenance": {}}
     assert load_test_after_freeze(state=state, freeze=freeze, loader=lambda: sentinel) is sentinel
     assert state.stage is ThreeDayExperimentStage.TEST_LOADED
     assert state.events[-1][0] == "first_test_read"
+    assert state.events[-1][1:] == (1, "TEST_LOADED", "2026-04-04T00:00:00Z")
+
+
+def test_failing_test_loader_leaves_freeze_stage_and_no_read_event() -> None:
+    from scripts.chart_regime_strategy_mapping import (
+        ThreeDayExperimentStage, ThreeDayExperimentState,
+        create_pre_test_freeze, load_test_after_freeze,
+    )
+    freeze = create_pre_test_freeze(
+        model={"artifact_hash": "a" * 64}, candidate_manifest={"candidate_count": 459},
+        evidence={}, mapping={"artifact_hash": "b" * 64},
+        global_fixed_baseline={"decision": "cash"},
+        profile={"profile_id": "three-day-daily-k4-v1"}, chronology={},
+    )
+    state = ThreeDayExperimentState(stage=ThreeDayExperimentStage.PRE_TEST_FROZEN)
+    with pytest.raises(OSError, match="read failed"):
+        load_test_after_freeze(
+            state=state, freeze=freeze,
+            loader=lambda: (_ for _ in ()).throw(OSError("read failed")),
+        )
+    assert state.stage is ThreeDayExperimentStage.PRE_TEST_FROZEN
+    assert state.events == []
+
+
+def test_pretest_freeze_recursively_rejects_test_material() -> None:
+    from scripts.chart_regime_strategy_mapping import create_pre_test_freeze
+
+    with pytest.raises(ValueError, match="Test"):
+        create_pre_test_freeze(
+            model={"artifact_hash": "a" * 64}, candidate_manifest={"candidate_count": 459},
+            evidence={"validation": {"nested": {"test_hash": "x"}}},
+            mapping={"artifact_hash": "b" * 64},
+            global_fixed_baseline={"decision": "cash"},
+            profile={"profile_id": "three-day-daily-k4-v1"}, chronology={},
+        )
 
 
 def test_four_file_publication_is_atomic_and_rejects_aliases_before_mutation(tmp_path) -> None:
@@ -222,7 +257,7 @@ def test_three_day_orchestrator_enforces_exact_pretest_order_and_strict_test_pol
         report_validation_sensitivity=called("sensitivity", {"winner": "looser"}),
         rebuild_final_strict_mapping=called("final_mapping", {"artifact_hash": "1" * 64}),
         select_global_fixed_baseline=called("global_baseline", {"decision": "cash"}),
-        load_test=called("load_test", {"test": "untouched"}),
+        load_test=called("load_test", {"provenance": {"hash": "9" * 64}}),
         run_test_comparisons=called("comparisons", {"cash": {"status": "ok"}}),
         publish=called("publish", None),
     )
@@ -239,6 +274,40 @@ def test_three_day_orchestrator_enforces_exact_pretest_order_and_strict_test_pol
     assert calls[10][2]["risk_policy"] == STRICT_RISK_POLICY
     assert result["validation_sensitivity"]["winner"] == "looser"
     assert result["strict_mapping"]["artifact_hash"] == "1" * 64
+    assert calls[-1][2]["report"] == result
+
+
+def test_identical_orchestration_runs_have_identical_canonical_reports() -> None:
+    from scripts.chart_regime_strategy_mapping import (
+        ThreeDayExperimentDependencies, run_three_day_daily_k4_experiment,
+    )
+
+    def dependencies():
+        return ThreeDayExperimentDependencies(
+            verify_sources=lambda: {"source_hash": "a" * 64},
+            fit_and_freeze_model=lambda sources: {"artifact_hash": "b" * 64},
+            freeze_candidates=lambda: {"candidate_count": 459, "manifest_hash": "c" * 64},
+            load_mapping_evidence=lambda **kwargs: {"ledger_hash": "d" * 64},
+            build_strict_mapping=lambda **kwargs: {"artifact_hash": "e" * 64},
+            load_validation_evidence=lambda **kwargs: {"ledger_hash": "f" * 64},
+            report_validation_sensitivity=lambda **kwargs: {"strict": {}},
+            rebuild_final_strict_mapping=lambda **kwargs: {"artifact_hash": "1" * 64},
+            select_global_fixed_baseline=lambda **kwargs: {"decision": "cash"},
+            load_test=lambda freeze: {"provenance": {"hash": "2" * 64}},
+            run_test_comparisons=lambda **kwargs: {"cash": {"status": "completed"}},
+            publish=lambda **kwargs: None,
+        )
+
+    first = run_three_day_daily_k4_experiment(dependencies=dependencies())
+    second = run_three_day_daily_k4_experiment(dependencies=dependencies())
+    assert json.dumps(first, sort_keys=True) == json.dumps(second, sort_keys=True)
+    assert {
+        "source_verification", "intervals", "purges", "candidate_manifest",
+        "model_artifact", "evidence", "validation_sensitivity", "strict_mapping",
+        "strict_mapping_artifact_hash", "global_fixed_baseline", "test_provenance",
+        "test_comparisons", "selection_and_exit_audits", "concentration_audit",
+        "adoption_assessment", "safety", "leakage_audit", "limitations",
+    } <= set(first)
 
 
 def test_three_day_publication_render_is_byte_identical_and_noncyclic() -> None:
@@ -307,7 +376,11 @@ def test_six_test_comparisons_use_shared_inputs_and_explicit_adopted_failure() -
 def test_main_routes_explicit_three_day_profile_before_weekly_loaders(monkeypatch) -> None:
     import scripts.chart_regime_strategy_mapping as module
 
-    args = SimpleNamespace(profile="three-day-daily-k4-v1")
+    args = SimpleNamespace(
+        profile="three-day-daily-k4-v1",
+        output_json=Path("a.json"), output_markdown=Path("b.md"),
+        output_model=Path("c.json"), output_mapping=Path("d.json"),
+    )
     calls = []
     monkeypatch.setattr(module, "parse_walk_forward_args", lambda argv=None: args)
     monkeypatch.setattr(
@@ -336,7 +409,7 @@ def test_concrete_dependency_factory_keeps_validation_and_test_lazy(monkeypatch,
     )
     monkeypatch.setattr(
         module, "verify_three_day_experiment_sources",
-        lambda a: calls.append("verify") or {"candidate_manifest": object()},
+        lambda a: calls.append("verify") or {},
     )
     monkeypatch.setattr(module, "load_three_day_validation_evidence", lambda *a, **k: calls.append("validation"))
     monkeypatch.setattr(module, "load_three_day_test_inputs", lambda *a, **k: calls.append("test"))
@@ -346,6 +419,23 @@ def test_concrete_dependency_factory_keeps_validation_and_test_lazy(monkeypatch,
     assert calls == []
     dependencies.verify_sources()
     assert calls == ["verify"]
+
+
+def test_three_day_main_rejects_output_alias_before_any_dependency(monkeypatch, tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    alias = tmp_path / "same.json"
+    args = SimpleNamespace(
+        profile="three-day-daily-k4-v1",
+        output_json=alias, output_markdown=alias,
+        output_model=tmp_path / "model.json", output_mapping=tmp_path / "mapping.json",
+    )
+    calls = []
+    monkeypatch.setattr(module, "parse_walk_forward_args", lambda argv=None: args)
+    monkeypatch.setattr(module, "run_three_day_profile_main", lambda args: calls.append("dependency"))
+
+    assert module.main([]) == 1
+    assert calls == []
 
 
 def test_three_day_model_gate_failure_publishes_cash_without_test(monkeypatch) -> None:
@@ -375,11 +465,37 @@ def test_three_day_model_gate_failure_publishes_cash_without_test(monkeypatch) -
     assert calls == ["verify", "cash-report"]
 
 
+def test_concrete_model_gate_failure_never_expands_candidate_factories(monkeypatch, tmp_path) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+
+    args = SimpleNamespace(
+        symbol="BTCUSDT", raw_kline_root=tmp_path, feature_cache_root=None,
+        evidence_rows_path=tmp_path / "evidence.jsonl", resume=False,
+        output_json=tmp_path / "r.json", output_markdown=tmp_path / "r.md",
+        output_model=tmp_path / "model.json", output_mapping=tmp_path / "mapping.json",
+        dry_run=False, manifest_only=False,
+    )
+    monkeypatch.setattr(module, "verify_three_day_experiment_sources", lambda args: {})
+    monkeypatch.setattr(
+        module, "load_and_fit_fold_local_three_day_k4_model",
+        lambda **kwargs: module.ThreeDayK4FitOutcome("failed-model-cash", None, ("gate",)),
+    )
+    monkeypatch.setattr(
+        module, "build_three_day_daily_candidate_manifest",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("candidate factory reached")),
+    )
+
+    with pytest.raises(module.ThreeDayModelGateFailure):
+        module.run_three_day_daily_k4_experiment(
+            dependencies=module.build_three_day_experiment_dependencies(args)
+        )
+
+
 def test_three_day_main_composes_concrete_stages_and_publishes_last(monkeypatch, tmp_path) -> None:
     import scripts.chart_regime_strategy_mapping as module
 
     calls = []
-    manifest = object()
+    manifest = SimpleNamespace(entries=(object(),) * 459)
     args = SimpleNamespace(
         profile="three-day-daily-k4-v1", symbol="BTCUSDT",
         raw_kline_root=tmp_path, feature_cache_root=None,
@@ -391,7 +507,11 @@ def test_three_day_main_composes_concrete_stages_and_publishes_last(monkeypatch,
     monkeypatch.setattr(module, "parse_walk_forward_args", lambda argv=None: args)
     monkeypatch.setattr(
         module, "verify_three_day_experiment_sources",
-        lambda supplied: calls.append("verify") or {"candidate_manifest": manifest},
+        lambda supplied: calls.append("verify") or {},
+    )
+    monkeypatch.setattr(
+        module, "build_three_day_daily_candidate_manifest",
+        lambda **kwargs: calls.append("candidate-freeze") or manifest,
     )
     monkeypatch.setattr(
         module, "load_and_fit_fold_local_three_day_k4_model",
@@ -426,7 +546,7 @@ def test_three_day_main_composes_concrete_stages_and_publishes_last(monkeypatch,
     def load_test(*args, **kwargs):
         assert "global-baseline" in calls
         calls.append("test-load")
-        return object()
+        return SimpleNamespace(data_provenance={"hash": "9" * 64})
     monkeypatch.setattr(module, "load_three_day_test_inputs", load_test)
     monkeypatch.setattr(
         module, "run_concrete_three_day_test_comparisons",
@@ -441,7 +561,7 @@ def test_three_day_main_composes_concrete_stages_and_publishes_last(monkeypatch,
 
     assert module.main([]) == 0
     assert calls == [
-        "verify", "cluster-fit", "mapping-evidence", "initial-mapping",
+        "verify", "cluster-fit", "candidate-freeze", "mapping-evidence", "initial-mapping",
         "validation-evidence", "sensitivity", "final-mapping", "global-baseline",
         "test-load", "comparisons", "publish",
     ]

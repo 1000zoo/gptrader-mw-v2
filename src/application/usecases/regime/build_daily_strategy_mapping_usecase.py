@@ -62,7 +62,7 @@ class BuildDailyStrategyMappingCommand:
     model_artifact_hash: str
     candidate_manifest: tuple[tuple[str, str], ...]
     calendar: tuple[datetime, ...]
-    component_assignments: tuple[str, ...]
+    component_assignments: tuple[str | None, ...]
     evidence_rows: tuple[DailyStrategyEvidence, ...]
 
 
@@ -103,6 +103,32 @@ class GlobalFixedBaselineResult:
         }
 
 
+@dataclass(frozen=True)
+class DailyStatisticalCalendarDay:
+    day: datetime
+    role: str
+
+
+def build_daily_statistical_calendar(
+    *, include_validation: bool
+) -> tuple[DailyStatisticalCalendarDay, ...]:
+    fold = ThreeDayDailyWalkForwardFold.default()
+    end = fold.validation.end_at if include_validation else fold.mapping_fit.end_at
+    return tuple(
+        DailyStatisticalCalendarDay(
+            day=fold.mapping_fit.start_at + timedelta(days=index),
+            role=(
+                "mapping_fit"
+                if fold.mapping_fit.start_at <= fold.mapping_fit.start_at + timedelta(days=index) < fold.mapping_fit.end_at
+                else "validation"
+                if fold.validation.start_at <= fold.mapping_fit.start_at + timedelta(days=index) < fold.validation.end_at
+                else "purge"
+            ),
+        )
+        for index in range((end - fold.mapping_fit.start_at).days)
+    )
+
+
 class BuildDailyStrategyMappingUseCase:
     def execute(
         self, command: BuildDailyStrategyMappingCommand
@@ -133,8 +159,9 @@ class BuildDailyStrategyMappingUseCase:
             preliminary: dict[str, dict[str, object]] = {}
             coverage_eligible: list[str] = []
             for candidate in candidate_ids:
-                candidate_rows = tuple(rows_by_key[(candidate, day)] for day in calendar)
-                component_rows = tuple(candidate_rows[index] for index in assigned_indices)
+                component_rows = tuple(
+                    rows_by_key[(candidate, calendar[index])] for index in assigned_indices
+                )
                 available_rows = tuple(
                     row for row in component_rows if row.availability_status == "available"
                 )
@@ -149,7 +176,9 @@ class BuildDailyStrategyMappingUseCase:
                 )
                 trade_count = sum(row.closed_trade_count for row in available_rows)
                 aligned = tuple(
-                    Decimal(0)
+                    None
+                    if assignments[index] is None
+                    else Decimal(0)
                     if assignments[index] != component
                     else (
                         rows_by_key[(candidate, day)].net_return_ratio
@@ -332,10 +361,22 @@ def select_global_fixed_daily_candidate(
         raise ValueError("global fixed evidence must cover every candidate and day")
 
     aligned_by_candidate: dict[str, tuple[Decimal | None, ...]] = {}
-    aligned_calendar = tuple(
-        calendar[0] + timedelta(days=index)
-        for index in range((calendar[-1] - calendar[0]).days + 1)
-    )
+    mapping_plan = build_daily_statistical_calendar(include_validation=False)
+    combined_plan = build_daily_statistical_calendar(include_validation=True)
+    observed_set = set(calendar)
+    if observed_set == {item.day for item in mapping_plan}:
+        statistical_plan = mapping_plan
+    elif observed_set == {item.day for item in combined_plan if item.role != "purge"}:
+        statistical_plan = combined_plan
+    else:
+        statistical_plan = tuple(
+            DailyStatisticalCalendarDay(
+                calendar[0] + timedelta(days=index),
+                "global" if calendar[0] + timedelta(days=index) in observed_set else "purge",
+            )
+            for index in range((calendar[-1] - calendar[0]).days + 1)
+        )
+    aligned_calendar = tuple(item.day for item in statistical_plan)
     prelim: dict[str, tuple[tuple[DailyStrategyEvidence, ...], Counter[str], int, int]] = {}
     coverage = []
     for candidate in candidate_ids:
@@ -364,7 +405,7 @@ def select_global_fixed_daily_candidate(
         lower_bounds.update(
             _aligned_component_corrected_lower_bounds(
                 {candidate: aligned_by_candidate[candidate] for candidate in coverage},
-                ("global",) * len(aligned_calendar),
+                tuple(None if item.role == "purge" else "global" for item in statistical_plan),
                 "global",
             )
         )
@@ -413,6 +454,73 @@ def select_global_fixed_daily_candidate(
     return GlobalFixedBaselineResult(
         "strategy", winner.candidate_id, winner.candidate_hash, tuple(assessments)
     )
+
+
+_RISK_REJECTION_REASONS = frozenset({
+    "worst_seven_day_return_below_limit",
+    "expected_shortfall_below_limit",
+    "maximum_drawdown_above_limit",
+    "top_episode_profit_share_above_limit",
+    "top_five_trade_profit_share_above_limit",
+})
+
+
+def reassess_daily_mapping_policy(
+    artifact: DailyStrategyMappingArtifact, risk_policy: DailyRiskPolicy
+) -> dict[str, object]:
+    """Apply a descriptive risk sensitivity to frozen K4 component statistics."""
+    if not isinstance(artifact, DailyStrategyMappingArtifact):
+        raise ValueError("policy reassessment requires a daily mapping artifact")
+    if not isinstance(risk_policy, DailyRiskPolicy):
+        raise ValueError("policy reassessment requires a daily risk policy")
+    by_component = {
+        component: tuple(
+            item for item in artifact.candidate_assessments
+            if item.component_fingerprint == component
+        )
+        for component in artifact.component_fingerprints
+    }
+    components = []
+    for component, assessments in by_component.items():
+        rows = []
+        eligible = []
+        for item in assessments:
+            reasons = set(item.rejection_reasons) - _RISK_REJECTION_REASONS
+            if item.worst_seven_day_return_ratio < risk_policy.minimum_worst_seven_day_return_ratio:
+                reasons.add("worst_seven_day_return_below_limit")
+            if item.expected_shortfall_10_ratio < risk_policy.minimum_expected_shortfall_10_ratio:
+                reasons.add("expected_shortfall_below_limit")
+            if item.maximum_drawdown_ratio > risk_policy.maximum_drawdown_ratio:
+                reasons.add("maximum_drawdown_above_limit")
+            if item.top_episode_profit_share > risk_policy.maximum_top_episode_profit_share:
+                reasons.add("top_episode_profit_share_above_limit")
+            if item.top_five_trade_profit_share > risk_policy.maximum_top_five_trade_profit_share:
+                reasons.add("top_five_trade_profit_share_above_limit")
+            ordered_reasons = tuple(reason for reason in _REJECTION_ORDER if reason in reasons)
+            row = {
+                "candidate_id": item.candidate_id,
+                "candidate_hash": item.candidate_hash,
+                "eligible": not ordered_reasons,
+                "rejection_reasons": list(ordered_reasons),
+                "corrected_lower_bound_ratio": str(item.corrected_lower_bound_ratio),
+                "return_without_best_episode_ratio": str(item.return_without_best_episode_ratio),
+                "expected_shortfall_10_ratio": str(item.expected_shortfall_10_ratio),
+                "maximum_drawdown_ratio": str(item.maximum_drawdown_ratio),
+            }
+            rows.append(row)
+            if not ordered_reasons:
+                eligible.append(item)
+        winner = min(eligible, key=_winner_order_key) if eligible else None
+        components.append({
+            "component_fingerprint": component,
+            "decision": "strategy" if winner is not None else "cash",
+            "strategy_candidate_id": None if winner is None else winner.candidate_id,
+            "assessments": rows,
+        })
+    return {
+        "risk_policy": risk_policy.canonical_payload(),
+        "components": components,
+    }
 
 
 def _circular_moving_block_indices(
@@ -756,16 +864,10 @@ def _validate_manifest(
 
 def _validate_calendar(calendar: Sequence[datetime]) -> tuple[datetime, ...]:
     supplied = tuple(calendar)
-    fold = ThreeDayDailyWalkForwardFold.default()
-    mapping_count = (fold.mapping_fit.end_at - fold.mapping_fit.start_at).days
-    mapping = tuple(
-        fold.mapping_fit.start_at + timedelta(days=index) for index in range(mapping_count)
-    )
-    validation_count = (fold.validation.end_at - fold.validation.start_at).days
-    validation = tuple(
-        fold.validation.start_at + timedelta(days=index) for index in range(validation_count)
-    )
-    if supplied not in (mapping, mapping + validation):
+    mapping = tuple(item.day for item in build_daily_statistical_calendar(include_validation=False))
+    combined = tuple(item.day for item in build_daily_statistical_calendar(include_validation=True))
+    validation = tuple(item.day for item in build_daily_statistical_calendar(include_validation=True) if item.role == "validation")
+    if supplied not in (mapping, validation, combined):
         raise ValueError(
             "calendar must be the complete Mapping Fit calendar or ordered Mapping Fit plus Validation"
         )
@@ -773,14 +875,26 @@ def _validate_calendar(calendar: Sequence[datetime]) -> tuple[datetime, ...]:
 
 
 def _validate_assignments(
-    calendar: tuple[datetime, ...], assignments: Sequence[str]
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    calendar: tuple[datetime, ...], assignments: Sequence[str | None]
+) -> tuple[tuple[str | None, ...], tuple[str, ...]]:
     supplied = tuple(assignments)
     if len(supplied) != len(calendar):
         raise ValueError("one component assignment is required per calendar day")
-    if any(not isinstance(value, str) or not value or value != value.strip() for value in supplied):
-        raise ValueError("component assignments must be canonical strings")
-    components = tuple(sorted(set(supplied)))
+    combined_roles = {
+        item.day: item.role for item in build_daily_statistical_calendar(include_validation=True)
+    }
+    if any(
+        (value is None) != (combined_roles.get(day) == "purge")
+        for day, value in zip(calendar, supplied)
+    ):
+        raise ValueError("component assignments must mark exactly purge days as null")
+    if any(
+        value is not None
+        and (not isinstance(value, str) or not value or value != value.strip())
+        for value in supplied
+    ):
+        raise ValueError("component assignments must be canonical strings or purge nulls")
+    components = tuple(sorted({value for value in supplied if value is not None}))
     if len(components) != 4:
         raise ValueError("component assignments must contain exactly four frozen components")
     return supplied, components
@@ -790,14 +904,16 @@ def _validate_evidence_grid(
     evidence_rows: Sequence[DailyStrategyEvidence],
     *,
     calendar: tuple[datetime, ...],
-    assignments: tuple[str, ...],
+    assignments: tuple[str | None, ...],
     candidate_ids: tuple[str, ...],
     candidate_hashes: Mapping[str, str],
     model_artifact_hash: str,
 ) -> dict[tuple[str, datetime], DailyStrategyEvidence]:
     if _SHA256.fullmatch(model_artifact_hash) is None:
         raise ValueError("model hash must be a lowercase SHA256 hash")
-    calendar_set = set(calendar)
+    calendar_set = {
+        day for day, assignment in zip(calendar, assignments) if assignment is not None
+    }
     assignment_by_day = dict(zip(calendar, assignments))
     rows_by_key: dict[tuple[str, datetime], DailyStrategyEvidence] = {}
     cost_hash: str | None = None
@@ -874,7 +990,7 @@ def _validate_evidence_grid(
         if row.data_hash != previous_data_hash:
             raise ValueError("data hash drift across candidates")
         rows_by_key[key] = row
-    expected = {(candidate, day) for candidate in candidate_ids for day in calendar}
+    expected = {(candidate, day) for candidate in candidate_ids for day in calendar_set}
     if set(rows_by_key) != expected:
         raise ValueError("evidence coverage must include every frozen candidate and calendar day")
     return rows_by_key
@@ -944,12 +1060,15 @@ __all__ = [
     "BuildDailyStrategyMappingCommand",
     "BuildDailyStrategyMappingResult",
     "BuildDailyStrategyMappingUseCase",
+    "DailyStatisticalCalendarDay",
     "GlobalFixedBaselineResult",
     "compounded_return_without_best_episode",
+    "build_daily_statistical_calendar",
     "expected_shortfall_10",
     "maximum_drawdown",
     "positive_profit_concentration_shares",
     "rejection_reasons",
+    "reassess_daily_mapping_policy",
     "select_global_fixed_daily_candidate",
     "worst_seven_calendar_day_return",
 ]

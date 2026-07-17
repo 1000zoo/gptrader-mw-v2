@@ -34,7 +34,10 @@ from scripts.deferred_strategy_registry import (
     ensure_candidate_ids_allowed,
     load_deferred_strategy_registry,
 )
-from scripts.chart_regime_balance_diagnostic import write_bytes_atomic
+from scripts.chart_regime_balance_diagnostic import (
+    validate_atomic_destinations,
+    write_bytes_atomic,
+)
 from scripts.scheduler_driven_scalping_backtest import (
     BACKTEST_ENGINE_VERSION,
     FEE_RATE,
@@ -69,6 +72,8 @@ from src.application.usecases.regime.build_daily_strategy_mapping_usecase import
     BuildDailyStrategyMappingCommand,
     BuildDailyStrategyMappingUseCase,
     select_global_fixed_daily_candidate,
+    build_daily_statistical_calendar,
+    reassess_daily_mapping_policy,
 )
 from src.application.usecases.regime.select_regime_model_usecase import (
     RegimeModelEvidence,
@@ -153,10 +158,26 @@ class ThreeDayExperimentStage(Enum):
     PUBLISHED = auto()
 
 
+_DETERMINISTIC_STAGE_BOUNDARIES = {
+    ThreeDayExperimentStage.SOURCES_VERIFIED: "2021-01-01T00:00:00Z",
+    ThreeDayExperimentStage.MODEL_FROZEN: "2025-06-30T00:00:00Z",
+    ThreeDayExperimentStage.CANDIDATES_FROZEN: "2025-06-30T00:00:00Z",
+    ThreeDayExperimentStage.MAPPING_EVIDENCE_LOADED: "2025-07-07T00:00:00Z",
+    ThreeDayExperimentStage.INITIAL_STRICT_MAPPING_BUILT: "2026-01-01T00:00:00Z",
+    ThreeDayExperimentStage.VALIDATION_REPORTED: "2026-04-01T00:00:00Z",
+    ThreeDayExperimentStage.FINAL_MAPPING_FROZEN: "2026-04-01T00:00:00Z",
+    ThreeDayExperimentStage.GLOBAL_BASELINE_FROZEN: "2026-04-01T00:00:00Z",
+    ThreeDayExperimentStage.PRE_TEST_FROZEN: "2026-04-01T00:00:00Z",
+    ThreeDayExperimentStage.TEST_LOADED: "2026-04-04T00:00:00Z",
+    ThreeDayExperimentStage.COMPARISONS_RUN: "2026-07-01T00:00:00Z",
+    ThreeDayExperimentStage.PUBLISHED: "publication-plan-v1",
+}
+
+
 @dataclass
 class ThreeDayExperimentState:
     stage: ThreeDayExperimentStage = ThreeDayExperimentStage.INITIAL
-    events: list[tuple[str, str]] = field(default_factory=list)
+    events: list[tuple[str, int, str, str]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if not isinstance(self.stage, ThreeDayExperimentStage):
@@ -175,7 +196,12 @@ class ThreeDayExperimentState:
                 f"out-of-order three-day stage: expected {expected.name}, found {self.stage.name}"
             )
         self.stage = target
-        self.events.append((event, datetime.now(timezone.utc).isoformat()))
+        self.events.append((
+            event,
+            len(self.events) + 1,
+            target.name,
+            _DETERMINISTIC_STAGE_BOUNDARIES[target],
+        ))
 
 
 def _deeply_immutable(value: object) -> object:
@@ -198,6 +224,38 @@ def _deeply_immutable(value: object) -> object:
     raise TypeError(f"unsupported freeze payload value: {type(value).__name__}")
 
 
+def _reject_nested_test_material(value: object, path: tuple[str, ...] = ()) -> None:
+    forbidden = {
+        "test", "test_results", "test_data", "test_hash", "test_provenance",
+        "test_comparisons", "comparisons",
+    }
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            normalized = str(key).strip().lower().replace("-", "_")
+            if normalized in forbidden or normalized.startswith("test_"):
+                raise ValueError(
+                    "pre-Test freeze recursively rejects Test material at "
+                    + ".".join((*path, str(key)))
+                )
+            _reject_nested_test_material(item, (*path, str(key)))
+    elif isinstance(value, (tuple, list)):
+        for index, item in enumerate(value):
+            _reject_nested_test_material(item, (*path, str(index)))
+
+
+def _without_test_metadata(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {
+            key: _without_test_metadata(item)
+            for key, item in value.items()
+            if str(key).strip().lower().replace("-", "_") != "test"
+            and not str(key).strip().lower().replace("-", "_").startswith("test_")
+        }
+    if isinstance(value, (tuple, list)):
+        return [_without_test_metadata(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True)
 class PreTestFreeze:
     canonical_payload: Mapping[str, object]
@@ -207,8 +265,7 @@ class PreTestFreeze:
         immutable = _deeply_immutable(self.canonical_payload)
         if not isinstance(immutable, Mapping):
             raise ValueError("pre-Test freeze payload must be a mapping")
-        if any(key.startswith("test_") or key == "test" for key in immutable):
-            raise ValueError("pre-Test freeze cannot contain Test observations or results")
+        _reject_nested_test_material(immutable)
         expected = _canonical_hash(immutable)
         if self.pre_test_freeze_hash != expected:
             raise ValueError("pre-Test freeze hash is inconsistent")
@@ -252,12 +309,20 @@ def load_test_after_freeze(
         raise RuntimeError("validated pre-Test freeze is required before Test loading")
     if state.stage is not ThreeDayExperimentStage.PRE_TEST_FROZEN:
         raise RuntimeError("pre-Test freeze stage is required before Test loading")
+    result = loader()
+    if result is None:
+        raise ValueError("Test loader returned no validated result")
+    provenance = getattr(result, "data_provenance", None)
+    if provenance is None and isinstance(result, Mapping):
+        provenance = result.get("provenance")
+    if not isinstance(provenance, Mapping):
+        raise ValueError("Test loader result requires validated provenance")
     state.advance(
         ThreeDayExperimentStage.PRE_TEST_FROZEN,
         ThreeDayExperimentStage.TEST_LOADED,
         "first_test_read",
     )
-    return loader()
+    return result
 
 
 @dataclass(frozen=True)
@@ -294,10 +359,38 @@ def render_three_day_markdown(report: Mapping[str, object]) -> str:
             lines.append(f"- `{entry.get('component_fingerprint', 'unknown')}` -> `{destination}` ({reasons})")
     if not entries:
         lines.append("- No component entries were rendered.")
-    lines.extend(("", "## Untouched Test comparisons", ""))
+    lines.extend(("", "## Component and eligibility summaries", ""))
+    model = report.get("model_artifact", {})
+    if isinstance(model, Mapping):
+        for fingerprint in model.get("component_fingerprints", ()):
+            lines.append(f"- Model component `{fingerprint}` is frozen before outcome evidence.")
+    assessments = mapping.get("candidate_assessments", ()) if isinstance(mapping, Mapping) else ()
+    if isinstance(assessments, (tuple, list)):
+        eligible = sum(bool(item.get("eligible")) for item in assessments if isinstance(item, Mapping))
+        rejected = sum(not bool(item.get("eligible")) for item in assessments if isinstance(item, Mapping))
+        lines.append(f"- Candidate/component assessments: eligible={eligible}; rejected={rejected}")
+    lines.extend(("", "## Validation sensitivity", ""))
+    sensitivity = report.get("validation_sensitivity", {})
+    lines.append(
+        "- Strict/tighter/looser results are descriptive: `"
+        + json.dumps(_canonicalize_report(sensitivity), sort_keys=True, separators=(",", ":"))
+        + "`"
+    )
+    lines.extend(("", "## Untouched Test comparisons", "", "| Comparison | Status | Return | Drawdown | Trades |", "|---|---:|---:|---:|---:|"))
     if isinstance(comparisons, Mapping):
         for label, result in sorted(comparisons.items()):
-            lines.append(f"- `{label}`: `{json.dumps(_canonicalize_report(result), sort_keys=True)}`")
+            row = result if isinstance(result, Mapping) else {}
+            metrics = row.get("continuous_metrics", row) if isinstance(row, Mapping) else {}
+            lines.append(
+                f"| `{label}` | {row.get('status', 'missing')} | "
+                f"{metrics.get('return_ratio', 'n/a')} | "
+                f"{metrics.get('portfolio_max_drawdown_ratio', metrics.get('max_drawdown_ratio', 'n/a'))} | "
+                f"{metrics.get('trade_count', row.get('trade_count', 0))} |"
+            )
+    lines.extend(("", "## Active-exit, concentration, and adoption", ""))
+    lines.append("- Active-exit delta is the primary dynamic comparison minus `k4_dynamic_entry_owner_exit`; full trades/equity/audits remain in JSON.")
+    lines.append(f"- Concentration audit: `{json.dumps(_canonicalize_report(report.get('concentration_audit', {})), sort_keys=True)}`")
+    lines.append(f"- Adoption assessment: `{json.dumps(_canonicalize_report(report.get('adoption_assessment', {})), sort_keys=True)}`")
     lines.extend((
         "",
         "## Limitations",
@@ -554,16 +647,11 @@ class ThreeDayModelGateFailure(RuntimeError):
 def verify_three_day_experiment_sources(args: argparse.Namespace) -> dict[str, object]:
     if args.symbol != "BTCUSDT":
         raise ValueError("three-day profile supports BTCUSDT only")
-    manifest = build_three_day_daily_candidate_manifest(expected_count=459)
-    if len(manifest.entries) != 459:
-        raise ValueError("three-day candidate manifest must contain exactly 459 candidates")
     if args.evidence_rows_path is None and not (args.dry_run or args.manifest_only):
         raise ValueError("normal three-day execution requires --evidence-rows-path")
     return {
         "profile": ThreeDayDailyResearchProfile().canonical_payload(),
-        "candidate_manifest": manifest,
-        "candidate_count": len(manifest.entries),
-        "candidate_manifest_hash": manifest.manifest_hash,
+        "candidate_factory_registry": "canonical-eight-groups-v1",
         "raw_kline_root": Path(args.raw_kline_root).as_posix(),
         "feature_cache_root": None if args.feature_cache_root is None else Path(args.feature_cache_root).as_posix(),
     }
@@ -688,11 +776,29 @@ def load_three_day_validation_evidence(args, *, model, candidate_manifest):
 
 
 def _mapping_command(model, manifest, *bundles: ThreeDayPhaseEvidence):
+    phases = {bundle.phase for bundle in bundles}
+    if phases == {"validation"}:
+        plan = tuple(
+            item for item in build_daily_statistical_calendar(include_validation=True)
+            if item.role == "validation"
+        )
+    else:
+        plan = build_daily_statistical_calendar(
+            include_validation="validation" in phases
+        )
+    assignment_by_day = {
+        day: assignment
+        for bundle in bundles
+        for day, assignment in zip(bundle.calendar, bundle.assignments)
+    }
     return BuildDailyStrategyMappingCommand(
         model_artifact_hash=model.artifact_hash,
         candidate_manifest=manifest.ordered_definition_hashes,
-        calendar=tuple(day for bundle in bundles for day in bundle.calendar),
-        component_assignments=tuple(value for bundle in bundles for value in bundle.assignments),
+        calendar=tuple(item.day for item in plan),
+        component_assignments=tuple(
+            None if item.role == "purge" else assignment_by_day[item.day]
+            for item in plan
+        ),
         evidence_rows=tuple(row for bundle in bundles for row in bundle.rows),
     )
 
@@ -716,16 +822,49 @@ def rebuild_three_day_final_mapping(
 
 
 def report_three_day_validation_sensitivity(
-    *, frozen_mapping, validation_evidence, strict_policy, sensitivity_policies
+    *, frozen_mapping, model, candidate_manifest, mapping_evidence,
+    validation_evidence, strict_policy, sensitivity_policies
 ):
-    manifest = tuple(sorted(frozen_mapping.candidate_hashes.items()))
-    rows = validation_evidence.rows
+    validation_mapping = BuildDailyStrategyMappingUseCase().execute(
+        _mapping_command(model, candidate_manifest, validation_evidence)
+    ).artifact
+    combined_mapping = BuildDailyStrategyMappingUseCase().execute(
+        _mapping_command(model, candidate_manifest, mapping_evidence, validation_evidence)
+    ).artifact
     policies = {"strict": strict_policy, **dict(sensitivity_policies)}
+    scopes = {
+        "mapping_fit": frozen_mapping,
+        "validation": validation_mapping,
+        "combined": combined_mapping,
+    }
+    frozen_validation = []
+    validation_assessments = {
+        (item.component_fingerprint, item.candidate_id): item
+        for item in validation_mapping.candidate_assessments
+    }
+    for entry in frozen_mapping.entries:
+        item = (
+            None if entry.strategy_candidate_id is None else
+            validation_assessments.get((entry.component_fingerprint, entry.strategy_candidate_id))
+        )
+        frozen_validation.append({
+            "component_fingerprint": entry.component_fingerprint,
+            "frozen_candidate_id": entry.strategy_candidate_id,
+            "validation_status": "cash" if item is None else "assessed",
+            "validation_corrected_lower_bound_ratio": None if item is None else str(item.corrected_lower_bound_ratio),
+            "validation_maximum_drawdown_ratio": None if item is None else str(item.maximum_drawdown_ratio),
+            "validation_rejection_reasons": [] if item is None else list(item.rejection_reasons),
+        })
     return {
-        name: select_global_fixed_daily_candidate(
-            candidate_manifest=manifest, evidence_rows=rows, risk_policy=policy
-        ).canonical_payload()
-        for name, policy in sorted(policies.items())
+        "policies": {
+            name: {
+                scope: reassess_daily_mapping_policy(artifact, policy)
+                for scope, artifact in scopes.items()
+            }
+            for name, policy in sorted(policies.items())
+        },
+        "mapping_fit_frozen_entries_on_validation": frozen_validation,
+        "selection_effect": "descriptive_only_final_and_test_remain_combined_strict",
     }
 
 
@@ -866,7 +1005,6 @@ def build_three_day_experiment_dependencies(args) -> ThreeDayExperimentDependenc
     def verify():
         result = verify_three_day_experiment_sources(args)
         sources.update(result)
-        manifest_holder["value"] = result["candidate_manifest"]
         return result
 
     def fit(verified):
@@ -879,8 +1017,10 @@ def build_three_day_experiment_dependencies(args) -> ThreeDayExperimentDependenc
         return outcome.artifact
 
     def manifest():
-        if "value" not in manifest_holder:
-            raise RuntimeError("sources must be verified before candidate freeze")
+        value = build_three_day_daily_candidate_manifest(expected_count=459)
+        if len(value.entries) != 459:
+            raise ValueError("three-day candidate manifest must contain exactly 459 candidates")
+        manifest_holder["value"] = value
         return manifest_holder["value"]
 
     def publish(**kwargs):
@@ -926,10 +1066,11 @@ def _publish_model_failure(args, failure: ThreeDayModelGateFailure) -> None:
 def run_three_day_profile_main(args) -> int:
     if args.dry_run or args.manifest_only:
         plan = verify_three_day_experiment_sources(args)
+        manifest = build_three_day_daily_candidate_manifest(expected_count=459)
         print(json.dumps({
             "profile": THREE_DAY_PROFILE_ID,
-            "candidate_count": plan["candidate_count"],
-            "candidate_manifest_hash": plan["candidate_manifest_hash"],
+            "candidate_count": len(manifest.entries),
+            "candidate_manifest_hash": manifest.manifest_hash,
             "mode": "manifest" if args.manifest_only else "dry-run",
         }, sort_keys=True))
         return 0
@@ -1051,6 +1192,9 @@ def run_three_day_daily_k4_experiment(
     )
     sensitivity = dependencies.report_validation_sensitivity(
         frozen_mapping=initial_mapping,
+        model=model,
+        candidate_manifest=manifest,
+        mapping_evidence=mapping_evidence,
         validation_evidence=validation_evidence,
         strict_policy=STRICT_RISK_POLICY,
         sensitivity_policies=ThreeDayDailyResearchProfile().sensitivity_policies,
@@ -1084,17 +1228,27 @@ def run_three_day_daily_k4_experiment(
         "global_fixed_baseline_frozen",
     )
     profile = ThreeDayDailyResearchProfile()
+    profile_payload = profile.canonical_payload()
+    pretest_profile_payload = dict(profile_payload)
+    pretest_profile_payload["fold"] = {
+        name: value
+        for name, value in profile_payload["fold"].items()
+        if name != "test"
+    }
+    freeze_mapping_payload = dict(_freeze_boundary_payload(final_mapping))
+    if hasattr(final_mapping, "candidate_assessments"):
+        freeze_mapping_payload["artifact_hash"] = daily_mapping_artifact_hash(final_mapping)
     freeze = create_pre_test_freeze(
-        model=_freeze_boundary_payload(model),
+        model=_without_test_metadata(_freeze_boundary_payload(model)),
         candidate_manifest=_freeze_boundary_payload(manifest),
         evidence={
             "mapping": _freeze_boundary_payload(mapping_evidence),
             "validation": _freeze_boundary_payload(validation_evidence),
         },
-        mapping=_freeze_boundary_payload(final_mapping),
+        mapping=freeze_mapping_payload,
         global_fixed_baseline=_freeze_boundary_payload(global_baseline),
-        profile=profile.canonical_payload(),
-        chronology=profile.canonical_payload()["fold"],
+        profile=pretest_profile_payload,
+        chronology=pretest_profile_payload["fold"],
     )
     current.advance(
         ThreeDayExperimentStage.GLOBAL_BASELINE_FROZEN,
@@ -1118,21 +1272,69 @@ def run_three_day_daily_k4_experiment(
         ThreeDayExperimentStage.COMPARISONS_RUN,
         "test_comparisons_run",
     )
+    test_provenance = getattr(test_inputs, "data_provenance", None)
+    if test_provenance is None and isinstance(test_inputs, Mapping):
+        test_provenance = test_inputs.get("provenance", {})
+    final_mapping_payload = _freeze_boundary_payload(final_mapping)
+    final_mapping_hash = (
+        daily_mapping_artifact_hash(final_mapping)
+        if hasattr(final_mapping, "candidate_assessments")
+        else final_mapping_payload.get("artifact_hash")
+    )
+    fold_payload = profile_payload["fold"]
     report = {
         "schema_version": "three-day-daily-k4-report-v1",
-        "profile": profile.canonical_payload(),
+        "profile": profile_payload,
+        "intervals": fold_payload,
+        "purges": [
+            {"start_at": "2025-06-30T00:00:00Z", "end_at": "2025-07-07T00:00:00Z", "days": 7},
+            {"start_at": "2026-01-01T00:00:00Z", "end_at": "2026-01-04T00:00:00Z", "days": 3},
+            {"start_at": "2026-04-01T00:00:00Z", "end_at": "2026-04-04T00:00:00Z", "days": 3},
+        ],
+        "source_verification": _freeze_boundary_payload(sources),
+        "candidate_manifest": _freeze_boundary_payload(manifest),
+        "model_artifact": _freeze_boundary_payload(model),
+        "evidence": {
+            "mapping_fit": _freeze_boundary_payload(mapping_evidence),
+            "validation": _freeze_boundary_payload(validation_evidence),
+        },
         "pre_test_freeze_hash": freeze.pre_test_freeze_hash,
-        "strict_mapping": _freeze_boundary_payload(final_mapping),
+        "strict_mapping": final_mapping_payload,
+        "strict_mapping_artifact_hash": final_mapping_hash,
         "global_fixed_baseline": _freeze_boundary_payload(global_baseline),
         "validation_sensitivity": sensitivity,
+        "test_provenance": _canonicalize_report(test_provenance or {}),
         "test_comparisons": comparisons,
         "adoption_assessment": assess_three_day_adoption(comparisons),
+        "concentration_audit": {
+            "source": "k4_dynamic_active_strategy_opposite_exit",
+            "reported_in_full_comparison": True,
+        },
+        "selection_and_exit_audits": {
+            "preserved_in_full_dynamic_comparisons": True,
+            "policies": ["entry_owner_only", "active_strategy_opposite"],
+        },
+        "safety": {
+            "runtime_config_mutated": False,
+            "registry_mutated": False,
+            "automatic_promotion": False,
+            "test_policy": "strict",
+        },
         "leakage_audit": {
             "test_loaded_after_freeze": True,
             "test_policy": "strict",
             "test_excluded_from_freeze": True,
         },
         "events": tuple(current.events),
+        "publication_plan": {
+            "artifact_count": 4,
+            "transaction": "atomic-four-file-v1",
+        },
+        "limitations": [
+            "Research-only evidence; no live adoption or runtime mutation.",
+            "Sensitivity policies are descriptive and never select the Test policy.",
+            "Test observations are excluded from the pre-Test freeze identity.",
+        ],
     }
     dependencies.publish(
         report=report,
@@ -1144,7 +1346,6 @@ def run_three_day_daily_k4_experiment(
         ThreeDayExperimentStage.PUBLISHED,
         "published",
     )
-    report["events"] = tuple(current.events)
     return report
 
 
@@ -4439,6 +4640,14 @@ def parse_walk_forward_args(argv: Sequence[str] | None = None) -> argparse.Names
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_walk_forward_args(argv)
     if getattr(args, "profile", None) == THREE_DAY_PROFILE_ID:
+        try:
+            validate_atomic_destinations(
+                args.output_json, args.output_markdown,
+                args.output_model, args.output_mapping,
+            )
+        except ValueError as error:
+            print(f"three-day experiment failed: {error}")
+            return 1
         return run_three_day_profile_main(args)
     supplied = [getattr(args, name) for name in ("cluster_fit_start", "cluster_fit_end", "mapping_fit_start", "mapping_fit_end", "validation_start", "validation_end", "test_start", "test_end")]
     if any(value is None for value in supplied):

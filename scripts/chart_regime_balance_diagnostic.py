@@ -160,6 +160,11 @@ def _validate_distinct_destinations(*paths: Path) -> None:
                 raise ValueError("report destinations must be distinct (hardlink alias)")
 
 
+def validate_atomic_destinations(*paths: Path) -> None:
+    """Validate every final destination before rendering or source acquisition."""
+    _validate_distinct_destinations(*(Path(path) for path in paths))
+
+
 def build_primary_configs() -> tuple[CandidateConfig, ...]:
     values = [
         CandidateConfig(f"kmeans-k{count}", RegimeModelConfig("kmeans", count, random_seed=PRIMARY_SEED))

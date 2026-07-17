@@ -20,7 +20,9 @@ from src.application.usecases.regime.build_daily_strategy_mapping_usecase import
     maximum_drawdown,
     positive_profit_concentration_shares,
     rejection_reasons,
+    reassess_daily_mapping_policy,
     select_global_fixed_daily_candidate,
+    build_daily_statistical_calendar,
     worst_seven_calendar_day_return,
 )
 
@@ -48,13 +50,30 @@ def test_global_fixed_selector_ignores_components_and_uses_shared_winner_order()
     assert result.candidate_id == "candidate-b"
     assert result.candidate_hash == sha("candidate-b")
     assert all(item.component_fingerprint == "global" for item in result.assessments)
+
+
+def test_combined_statistical_calendar_preserves_three_day_purge() -> None:
+    plan = build_daily_statistical_calendar(include_validation=True)
+    by_day = {item.day: item.role for item in plan}
+    utc = timezone.utc
+
+    assert by_day[datetime(2025, 12, 31, tzinfo=utc)] == "mapping_fit"
+    assert tuple(
+        by_day[datetime(2026, 1, day, tzinfo=utc)] for day in range(1, 4)
+    ) == ("purge", "purge", "purge")
+    assert by_day[datetime(2026, 1, 4, tzinfo=utc)] == "validation"
+
+    aligned = (Decimal("0.01"),) * 4 + (None, None, None) + (Decimal("0.01"),) * 3
+    assert module._has_complete_seven_day_block(aligned) is False
 from src.domain.regime import (
     DailyCandidateAssessment,
     DailyStrategyEvidence,
     daily_mapping_artifact_hash,
 )
 from src.domain.regime.mapping import candidate_universe_hash
-from src.domain.regime.three_day_daily_profile import ThreeDayDailyWalkForwardFold
+from src.domain.regime.three_day_daily_profile import (
+    DailyRiskPolicy, STRICT_RISK_POLICY, ThreeDayDailyWalkForwardFold,
+)
 
 
 ZERO = Decimal("0")
@@ -161,6 +180,21 @@ def assessment(candidate_id: str = "candidate-a", **changes) -> DailyCandidateAs
     }
     fields.update(changes)
     return DailyCandidateAssessment(**fields)
+
+
+def test_sensitivity_can_change_winners_without_mutating_strict_artifact() -> None:
+    artifact = BuildDailyStrategyMappingUseCase().execute(valid_command()).artifact
+    frozen_hash = daily_mapping_artifact_hash(artifact)
+    strict = reassess_daily_mapping_policy(artifact, STRICT_RISK_POLICY)
+    concentration_zero = DailyRiskPolicy(
+        Decimal("-0.03"), Decimal("-0.01"), Decimal("0.10"), Decimal("0"), Decimal("0")
+    )
+    tighter = reassess_daily_mapping_policy(artifact, concentration_zero)
+
+    assert [item["decision"] for item in strict["components"]] != [
+        item["decision"] for item in tighter["components"]
+    ]
+    assert daily_mapping_artifact_hash(artifact) == frozen_hash
 
 
 def valid_gate_values() -> dict[str, object]:
