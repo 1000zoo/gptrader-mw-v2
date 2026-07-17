@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -12,18 +15,82 @@ import numpy as np
 import pytest
 
 from src.domain.regime.cluster_diagnostic import ClusterDiagnosticFit
-from src.domain.regime.frozen_k4_failure_diagnostics import FrozenK4InputIdentity
 from src.domain.regime.three_day_chart_features import (
     THREE_DAY_CHART_FEATURE_REGISTRY_V1,
 )
 from src.infrastructure.regime.frozen_k4_diagnostic_source import (
-    FrozenK4DiagnosticSource,
+    _FrozenK4SourceProfile,
+    _PRODUCTION_PROFILE,
+    _restore_primary_fit,
+    _three_day_vector_hash,
+    _validate_attempt,
     load_frozen_k4_diagnostic_source,
 )
+from src.infrastructure.exchange.binance.research_data.historical_feature_loader import archive_url
 
 
 MODEL = Path("docs/backtests/chart-regime-strategy-mapping-btcusdt-3d-k4-daily-model.json")
-RAW_ROOT = Path(".research-data/binance-usdm/raw/klines")
+
+
+@dataclass(frozen=True)
+class MiniFixture:
+    model: Path
+    raw_root: Path
+    archive: Path
+    profile: _FrozenK4SourceProfile
+
+
+@pytest.fixture()
+def mini(tmp_path: Path) -> MiniFixture:
+    start = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    fit_start = start + timedelta(days=3)
+    end = start + timedelta(days=4)
+    profile = _FrozenK4SourceProfile.testing(
+        raw_start_at=start,
+        fit_start_at=fit_start,
+        fit_end_at=end,
+        expected_anchor_count=1,
+    )
+    url = archive_url("klines", "BTCUSDT", "2024-01", "monthly")
+    archive_path = tmp_path / "raw" / "BTCUSDT" / Path(url).name
+    archive_path.parent.mkdir(parents=True)
+    rows = []
+    for index in range(4 * 24 * 60):
+        opened = start + timedelta(minutes=index)
+        millis = int(opened.timestamp() * 1000)
+        price = 40_000 + index / 100
+        rows.append(
+            f"{millis},{price},{price + 1},{price - 1},{price + .5},1,{millis + 59999},1,1,.5,.5,0"
+        )
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("BTCUSDT-1m-2024-01.csv", "\n".join(rows) + "\n")
+    raw = archive_path.read_bytes()
+    payload = _payload()
+    payload["fit_interval"] = {
+        "start_at": fit_start.isoformat(), "end_at": end.isoformat()
+    }
+    payload["fit_input_anchor_count"] = 1
+    payload["first_usable_anchor_at"] = fit_start.isoformat()
+    payload["last_usable_anchor_at"] = fit_start.isoformat()
+    payload["source_provenance"] = [{
+        "period": "2024-01", "url": url,
+        "member_identity": "BTCUSDT-1m-2024-01.csv", "bytes": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "expected_sha256": hashlib.sha256(raw).hexdigest(), "checksum_verified": True,
+        "source": "klines", "symbol": "BTCUSDT", "timeframe": "1m",
+        "granularity": "monthly", "requested_start_at": start.isoformat().replace("+00:00", "Z"),
+        "requested_end_at": end.isoformat().replace("+00:00", "Z"),
+    }]
+    payload["source_provenance_hash"] = _hash(payload["source_provenance"])
+    # Generate once with an explicit temporary binding, then freeze the publisher hash.
+    payload["fit_input_vector_hash"] = "0" * 64
+    model = _write_payload(tmp_path, payload)
+    with pytest.raises(ValueError, match="vector hash") as error:
+        load_frozen_k4_diagnostic_source(model, tmp_path / "raw", _source_profile=profile)
+    actual = str(error.value).rsplit(" ", 1)[-1]
+    payload["fit_input_vector_hash"] = actual
+    model = _write_payload(tmp_path, payload)
+    return MiniFixture(model, tmp_path / "raw", archive_path, profile)
 
 
 def _payload() -> dict[str, object]:
@@ -47,28 +114,74 @@ def _write_payload(tmp_path: Path, payload: dict[str, object]) -> Path:
     return path
 
 
-@pytest.fixture(scope="module")
-def source() -> FrozenK4DiagnosticSource:
-    return load_frozen_k4_diagnostic_source(MODEL, RAW_ROOT)
+def _hash(value: object) -> str:
+    return hashlib.sha256(json.dumps(value, allow_nan=False, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
 
 
-def test_loads_exact_frozen_primary_and_1641_float64_ordered_vectors(source) -> None:
-    assert isinstance(source.primary_fit, ClusterDiagnosticFit)
-    assert isinstance(source.identity, FrozenK4InputIdentity)
-    assert len(source.vectors) == 1_641
-    assert source.vectors[0].anchor_at.isoformat() == "2021-01-01T00:00:00+00:00"
-    assert source.vectors[-1].anchor_at.isoformat() == "2025-06-29T00:00:00+00:00"
-    assert all(
-        (vector.anchor_at - vector.window_start_at).total_seconds() == 4_320 * 60
-        for vector in source.vectors
+def _rebind_archive(payload: dict[str, object], archive: Path) -> None:
+    raw = archive.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    payload["source_provenance"][0]["bytes"] = len(raw)
+    payload["source_provenance"][0]["sha256"] = digest
+    payload["source_provenance"][0]["expected_sha256"] = digest
+    payload["source_provenance_hash"] = _hash(payload["source_provenance"])
+
+
+def test_published_attempt_matches_exact_1641_anchor_production_profile() -> None:
+    payload = _validate_attempt(_payload(), _PRODUCTION_PROFILE)
+    fit = _restore_primary_fit(payload)
+    assert payload["fit_input_anchor_count"] == 1_641
+    assert payload["first_usable_anchor_at"] == "2021-01-01T00:00:00+00:00"
+    assert payload["last_usable_anchor_at"] == "2025-06-29T00:00:00+00:00"
+    assert isinstance(fit, ClusterDiagnosticFit)
+    assert fit.feature_names == tuple(payload["feature_names"])
+
+
+def test_real_miniature_archive_loads_4320_window_in_float64_registry_order(mini) -> None:
+    source = load_frozen_k4_diagnostic_source(
+        mini.model, mini.raw_root, _source_profile=mini.profile
     )
-    registry_names = tuple(spec.name for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1)
-    assert source.primary_fit.feature_names == tuple(source.attempt_payload["feature_names"])
-    assert tuple(source.vectors[0].values) == registry_names
+    assert len(source.vectors) == 1
+    assert (source.vectors[0].anchor_at - source.vectors[0].window_start_at) == timedelta(minutes=4320)
+    assert tuple(source.vectors[0].values) == tuple(spec.name for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1)
     assert np.asarray(tuple(source.vectors[0].values.values())).dtype == np.float64
+    assert _three_day_vector_hash(source.vectors) == source.attempt_payload["fit_input_vector_hash"]
+    assert source.identity.feature_vectors_sha256 == source.attempt_payload["fit_input_vector_hash"]
 
 
-def test_owns_a_detached_deeply_immutable_attempt_payload(source) -> None:
+def test_rehashed_attempt_cannot_bypass_vector_binding(mini, tmp_path: Path) -> None:
+    payload = json.loads(mini.model.read_bytes())
+    payload["fit_input_vector_hash"] = "f" * 64
+    model = _write_payload(tmp_path, payload)
+    with pytest.raises(ValueError, match="vector hash"):
+        load_frozen_k4_diagnostic_source(model, mini.raw_root, _source_profile=mini.profile)
+
+
+@pytest.mark.parametrize("field", ("value", "timestamp", "order"))
+def test_publisher_vector_hash_binds_values_timestamps_and_order(mini, field: str) -> None:
+    source = load_frozen_k4_diagnostic_source(mini.model, mini.raw_root, _source_profile=mini.profile)
+    vector = source.vectors[0]
+    payload = {
+        "symbol": vector.symbol,
+        "anchor_at": vector.anchor_at.isoformat(),
+        "window_start_at": vector.window_start_at.isoformat(),
+        "values": list(vector.values.items()),
+    }
+    if field == "value":
+        payload["values"][0] = (payload["values"][0][0], payload["values"][0][1] + 1)
+    elif field == "timestamp":
+        payload["anchor_at"] = (vector.anchor_at + timedelta(days=1)).isoformat()
+    else:
+        payload["values"][0], payload["values"][1] = payload["values"][1], payload["values"][0]
+    assert _hash({
+        "schema_version": vector.schema_version,
+        "registry_names": [spec.name for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1],
+        "vectors": [payload],
+    }) != source.attempt_payload["fit_input_vector_hash"]
+
+
+def test_owns_a_detached_deeply_immutable_attempt_payload(mini) -> None:
+    source = load_frozen_k4_diagnostic_source(mini.model, mini.raw_root, _source_profile=mini.profile)
     assert isinstance(source.attempt_payload, MappingProxyType)
     assert isinstance(source.attempt_payload["model_parameters"], MappingProxyType)
     disk_payload = _payload()
@@ -84,13 +197,41 @@ def test_missing_local_archive_never_fetches(monkeypatch, tmp_path: Path) -> Non
         load_frozen_k4_diagnostic_source(MODEL, tmp_path)
 
 
+def test_miniature_archive_cannot_escape_raw_root_via_symlink(mini, tmp_path: Path) -> None:
+    outside = tmp_path / "outside.zip"
+    shutil.copyfile(mini.archive, outside)
+    mini.archive.unlink()
+    try:
+        mini.archive.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"platform cannot create file symlink: {exc}")
+    with pytest.raises(ValueError, match="root|escape|symlink"):
+        load_frozen_k4_diagnostic_source(mini.model, mini.raw_root, _source_profile=mini.profile)
+
+
+@pytest.mark.parametrize(
+    "mutation, message",
+    [
+        (lambda p: p["model_gates"].__setitem__("Evidence", {}), "model gates"),
+        (lambda p: p["model_gates"].pop("passed"), "model gates"),
+        (lambda p: p["model_gates"].__setitem__("component_count", "4"), "model gates"),
+        (lambda p: p["model_gates"].__setitem__("iterations", p["model_gates"]["iterations"] + 1), "relationship"),
+        (lambda p: p["model_parameters"]["weights"].__setitem__(0, "0.2"), "numeric|weights"),
+        (lambda p: p["feature_names"].reverse(), "feature names"),
+        (lambda p: p.__setitem__("failed_gate_names", ["maximum_low_confidence_rate"]), "failed gate"),
+    ],
+)
+def test_rejects_adversarial_nested_attempt_schema(mini, tmp_path, mutation, message) -> None:
+    payload = json.loads(mini.model.read_bytes())
+    mutation(payload)
+    model = _write_payload(tmp_path, payload)
+    with pytest.raises(ValueError, match=message):
+        load_frozen_k4_diagnostic_source(model, mini.raw_root, _source_profile=mini.profile)
+
+
 @pytest.mark.parametrize("mode", ("mutated", "extra_member", "path_traversal"))
-def test_rejects_archive_content_or_member_set(tmp_path: Path, mode: str) -> None:
-    row = _payload()["source_provenance"][0]
-    source_archive = RAW_ROOT / "BTCUSDT" / Path(row["url"]).name
-    destination = tmp_path / "BTCUSDT" / source_archive.name
-    destination.parent.mkdir()
-    shutil.copyfile(source_archive, destination)
+def test_rejects_archive_content_or_member_set(mini, tmp_path: Path, mode: str) -> None:
+    destination = mini.archive
     if mode == "mutated":
         raw = bytearray(destination.read_bytes())
         raw[-1] ^= 1
@@ -98,8 +239,25 @@ def test_rejects_archive_content_or_member_set(tmp_path: Path, mode: str) -> Non
     else:
         with zipfile.ZipFile(destination, "a") as archive:
             archive.writestr("extra.csv" if mode == "extra_member" else "../escape.csv", "x")
+        payload = json.loads(mini.model.read_bytes())
+        _rebind_archive(payload, destination)
+        mini = MiniFixture(_write_payload(tmp_path, payload), mini.raw_root, destination, mini.profile)
     with pytest.raises(ValueError, match="sha256|bytes|member|ZIP|archive"):
-        load_frozen_k4_diagnostic_source(MODEL, tmp_path)
+        load_frozen_k4_diagnostic_source(mini.model, mini.raw_root, _source_profile=mini.profile)
+
+
+def test_rejects_one_minute_continuity_gap_after_archive_receipt_is_rebound(mini, tmp_path) -> None:
+    with zipfile.ZipFile(mini.archive) as archive:
+        member = archive.namelist()[0]
+        rows = archive.read(member).decode().splitlines()
+    rows.pop(100)
+    with zipfile.ZipFile(mini.archive, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(member, "\n".join(rows) + "\n")
+    payload = json.loads(mini.model.read_bytes())
+    _rebind_archive(payload, mini.archive)
+    model = _write_payload(tmp_path, payload)
+    with pytest.raises(ValueError, match="continuity"):
+        load_frozen_k4_diagnostic_source(model, mini.raw_root, _source_profile=mini.profile)
 
 
 @pytest.mark.parametrize(
