@@ -82,13 +82,14 @@ def _half_label(value: object) -> str:
 
 
 def _finite(value: object, field_name: str, *, nonnegative: bool = False) -> float:
-    if (
-        not isinstance(value, (int, float))
-        or isinstance(value, bool)
-        or not math.isfinite(value)
-    ):
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
         raise ValueError(f"{field_name} must be finite")
-    number = float(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{field_name} must be finite") from error
+    if not math.isfinite(number):
+        raise ValueError(f"{field_name} must be finite")
     if nonnegative and number < 0:
         raise ValueError(f"{field_name} must be nonnegative")
     return number
@@ -153,6 +154,10 @@ class MetricReproduction:
             or self.numeric_tolerance_match is not computed_tolerance
         ):
             raise ValueError("reproduction fields do not match the compared values")
+        object.__setattr__(self, "expected_value", expected)
+        object.__setattr__(self, "reproduced_value", reproduced)
+        object.__setattr__(self, "absolute_error", absolute)
+        object.__setattr__(self, "relative_error", relative)
 
     @classmethod
     def compare(cls, expected: float, reproduced: float) -> "MetricReproduction":
@@ -196,6 +201,7 @@ class FrozenK4InputIdentity:
     feature_schema_sha256: str
     source_provenance_sha256: str
     source_anchor_manifest_sha256: str
+    feature_vectors_sha256: str
     dependency_metadata_sha256: str
     split_at: str
     half_a_range: tuple[str, str]
@@ -211,6 +217,7 @@ class FrozenK4InputIdentity:
             "feature_schema_sha256",
             "source_provenance_sha256",
             "source_anchor_manifest_sha256",
+            "feature_vectors_sha256",
             "dependency_metadata_sha256",
         ):
             _canonical_sha256(getattr(self, field_name), field_name)
@@ -243,6 +250,7 @@ class FrozenK4InputIdentity:
             "feature_schema_sha256": self.feature_schema_sha256,
             "source_provenance_sha256": self.source_provenance_sha256,
             "source_anchor_manifest_sha256": self.source_anchor_manifest_sha256,
+            "feature_vectors_sha256": self.feature_vectors_sha256,
             "dependency_metadata_sha256": self.dependency_metadata_sha256,
             "split_at": self.split_at,
             "half_a_range": tuple(self.half_a_range),
@@ -311,8 +319,12 @@ class MatchedPair:
         )
         _component_index(self.primary_component_index, "primary component index")
         _component_index(self.half_component_index, "half component index")
-        _finite(self.matching_cost, "matching cost", nonnegative=True)
-        _finite(self.euclidean_distance, "euclidean distance", nonnegative=True)
+        matching_cost = _finite(self.matching_cost, "matching cost", nonnegative=True)
+        euclidean_distance = _finite(
+            self.euclidean_distance, "euclidean distance", nonnegative=True
+        )
+        object.__setattr__(self, "matching_cost", matching_cost)
+        object.__setattr__(self, "euclidean_distance", euclidean_distance)
 
     def canonical_payload(self) -> dict[str, object]:
         return {
@@ -350,6 +362,8 @@ class OODRow:
             raise ValueError("OOD comparison operator must be strict >")
         if not isinstance(self.exceeds, bool) or self.exceeds is not (distance > threshold):
             raise ValueError("OOD exceeds flag must use the strict > comparison")
+        object.__setattr__(self, "squared_mahalanobis", distance)
+        object.__setattr__(self, "threshold", threshold)
 
     @classmethod
     def classify(
@@ -407,13 +421,16 @@ class SensitivityRow:
         ):
             raise ValueError("sensitivity statistic must be nonblank and canonical")
         _nonnegative_integer(self.excluded_count, "excluded count")
-        _finite(self.centroid_distance, "centroid distance", nonnegative=True)
+        centroid_distance = _finite(
+            self.centroid_distance, "centroid distance", nonnegative=True
+        )
         if self.assignment_source != _ASSIGNMENT_SOURCE:
             raise ValueError("sensitivity assignment source must remain frozen")
         if self.refit_after_exclusion is not False:
             raise ValueError("sensitivity row cannot claim a refit")
         if self.diagnostic_only is not True:
             raise ValueError("sensitivity row must be diagnostic-only")
+        object.__setattr__(self, "centroid_distance", centroid_distance)
 
     def canonical_payload(self) -> dict[str, object]:
         return {

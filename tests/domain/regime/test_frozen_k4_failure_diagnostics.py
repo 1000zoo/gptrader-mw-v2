@@ -1,4 +1,6 @@
 from dataclasses import FrozenInstanceError
+import hashlib
+import json
 
 import pytest
 
@@ -50,7 +52,8 @@ def _identity() -> FrozenK4InputIdentity:
         feature_schema_sha256=SHA_F,
         source_provenance_sha256=SHA_0,
         source_anchor_manifest_sha256=SHA_1,
-        dependency_metadata_sha256=SHA_2,
+        feature_vectors_sha256=SHA_2,
+        dependency_metadata_sha256=SHA_A,
         split_at="2023-04-01T00:00:00Z",
         half_a_range=("2021-01-01T00:00:00Z", "2023-04-01T00:00:00Z"),
         half_b_range=("2023-04-01T00:00:00Z", "2025-06-30T00:00:00Z"),
@@ -110,6 +113,33 @@ def test_input_identity_payload_is_deterministic_and_detached():
     assert first is not second
     first["model_file_sha256"] = SHA_A
     assert identity.model_file_sha256 == SHA_B
+
+
+def test_feature_vector_hash_changes_canonical_identity_without_exposing_state():
+    original = _identity()
+    mutated_payload = original.canonical_payload()
+    mutated_payload["feature_vectors_sha256"] = SHA_F
+    mutated = FrozenK4InputIdentity(**mutated_payload)
+
+    original_bytes = json.dumps(
+        original.canonical_payload(), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    mutated_bytes = json.dumps(
+        mutated.canonical_payload(), sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    assert original.feature_vectors_sha256 == SHA_2
+    assert mutated.feature_vectors_sha256 == SHA_F
+    assert hashlib.sha256(original_bytes).digest() != hashlib.sha256(mutated_bytes).digest()
+    mutated_payload["feature_vectors_sha256"] = SHA_0
+    assert mutated.feature_vectors_sha256 == SHA_F
+
+
+def test_feature_vector_hash_requires_canonical_sha256():
+    payload = _identity().canonical_payload()
+    payload["feature_vectors_sha256"] = SHA_F.upper()
+
+    with pytest.raises(ValueError, match="canonical SHA-256"):
+        FrozenK4InputIdentity(**payload)
 
 
 @pytest.mark.parametrize(
@@ -189,6 +219,57 @@ def test_matched_pair_uses_half_label_fingerprints_and_finite_distances():
     assert pair.canonical_payload()["half_label"] == "B"
     with pytest.raises(ValueError, match="finite"):
         MatchedPair("B", FP_A, FP_B, 1, 3, float("nan"), 2.5)
+
+
+def test_declared_float_fields_normalize_in_canonical_payloads():
+    metric_int = MetricReproduction(1, 2, False, False, 1, 1)
+    metric_float = MetricReproduction(1.0, 2.0, False, False, 1.0, 1.0)
+    pair_int = MatchedPair("A", FP_A, FP_B, 0, 1, 2, 2)
+    pair_float = MatchedPair("A", FP_A, FP_B, 0, 1, 2.0, 2.0)
+    ood_int = OODRow("2021-01-01T00:00:00Z", 0, FP_A, 10, 9, True)
+    ood_float = OODRow("2021-01-01T00:00:00Z", 0, FP_A, 10.0, 9.0, True)
+    sensitivity_int = SensitivityRow("A", FP_A, "mean", 0, 2)
+    sensitivity_float = SensitivityRow("A", FP_A, "mean", 0, 2.0)
+
+    for integer_contract, float_contract in (
+        (metric_int, metric_float),
+        (pair_int, pair_float),
+        (ood_int, ood_float),
+        (sensitivity_int, sensitivity_float),
+    ):
+        integer_payload = integer_contract.canonical_payload()
+        float_payload = float_contract.canonical_payload()
+        assert integer_payload == float_payload
+        assert json.dumps(
+            integer_payload, sort_keys=True, separators=(",", ":")
+        ) == json.dumps(float_payload, sort_keys=True, separators=(",", ":"))
+
+    assert all(
+        isinstance(value, float)
+        for value in (
+            metric_int.expected_value,
+            metric_int.reproduced_value,
+            metric_int.absolute_error,
+            metric_int.relative_error,
+            pair_int.matching_cost,
+            pair_int.euclidean_distance,
+            ood_int.squared_mahalanobis,
+            ood_int.threshold,
+            sensitivity_int.centroid_distance,
+        )
+    )
+
+
+@pytest.mark.parametrize("value", [10**400, -(10**400)])
+def test_finite_validation_converts_overflow_to_value_error(value):
+    with pytest.raises(ValueError, match="finite"):
+        MetricReproduction.compare(1.0, value)
+
+
+@pytest.mark.parametrize("value", [True, False])
+def test_finite_validation_still_rejects_booleans(value):
+    with pytest.raises(ValueError, match="finite"):
+        MetricReproduction.compare(value, 1.0)
 
 
 @pytest.mark.parametrize(
