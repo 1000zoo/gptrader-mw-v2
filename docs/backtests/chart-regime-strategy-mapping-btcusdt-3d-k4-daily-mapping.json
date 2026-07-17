@@ -1,0 +1,1 @@
+{"artifact_hash":"55fe412694f244aa6bd26cd954845ff64733519ae655b846474d51b819c207b0","model_attempt_hash":"83e25e21a2bccb5cf14572da000718deae7f3e068c45b2898a26e78cef67101f","rejection_reasons":["maximum_distance_exceedance_rate","maximum_matched_centroid_distance"],"schema_version":"three-day-k4-cash-sentinel-v1","status":"cash-only-model-gate-failure"}
