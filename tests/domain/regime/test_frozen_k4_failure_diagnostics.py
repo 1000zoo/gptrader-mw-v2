@@ -23,6 +23,21 @@ SHA_F = "f" * 64
 SHA_0 = "0" * 64
 SHA_1 = "1" * 64
 SHA_2 = "2" * 64
+FP_A = "a" * 24
+FP_B = "b" * 24
+
+SUCCESS_FILES = {
+    "frozen_k4_failure_reproduction.json": SHA_A,
+    "frozen_k4_cluster_diagnostics.csv": SHA_B,
+    "frozen_k4_feature_contributions.csv": SHA_C,
+    "frozen_k4_ood_samples.csv": SHA_D,
+    "frozen_k4_distance_comparison.csv": SHA_E,
+    "frozen_k4_failure_diagnosis.md": SHA_F,
+}
+MISMATCH_FILES = {
+    "frozen_k4_failure_reproduction.json": SHA_A,
+    "frozen_k4_failure_diagnosis.md": SHA_F,
+}
 
 
 def _identity() -> FrozenK4InputIdentity:
@@ -97,11 +112,33 @@ def test_input_identity_payload_is_deterministic_and_detached():
     assert identity.model_file_sha256 == SHA_B
 
 
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        (
+            "half_a_range",
+            ("2021-01-02T00:00:00Z", "2023-04-01T00:00:00Z"),
+        ),
+        (
+            "half_b_range",
+            ("2023-04-01T00:00:00Z", "2025-06-29T00:00:00Z"),
+        ),
+    ],
+)
+def test_input_identity_rejects_non_frozen_half_boundaries(field_name, value):
+    payload = _identity().canonical_payload()
+    payload[field_name] = value
+
+    with pytest.raises(ValueError, match="frozen half ranges"):
+        FrozenK4InputIdentity(**payload)
+
+
 def test_half_fit_receipt_enforces_labels_and_diagnostic_only_flags():
     receipt = HalfFitReceipt(
         half_label="A",
         anchor_count=820,
         fit_sha256=SHA_A,
+        anchor_range=("2021-01-01T00:00:00Z", "2023-04-01T00:00:00Z"),
     )
 
     assert receipt.diagnostic_only is True
@@ -114,26 +151,73 @@ def test_half_fit_receipt_enforces_labels_and_diagnostic_only_flags():
         HalfFitReceipt("A", 820, SHA_A, primary_replacement_allowed=True)
 
 
+@pytest.mark.parametrize(
+    ("half_label", "anchor_count", "anchor_range"),
+    [
+        (
+            "A",
+            821,
+            ("2021-01-01T00:00:00Z", "2023-04-01T00:00:00Z"),
+        ),
+        (
+            "B",
+            820,
+            ("2023-04-01T00:00:00Z", "2025-06-30T00:00:00Z"),
+        ),
+        (
+            "A",
+            820,
+            ("2023-04-01T00:00:00Z", "2025-06-30T00:00:00Z"),
+        ),
+        (
+            "B",
+            821,
+            ("2021-01-01T00:00:00Z", "2023-04-01T00:00:00Z"),
+        ),
+    ],
+)
+def test_half_fit_receipt_rejects_wrong_count_or_label_range_pair(
+    half_label, anchor_count, anchor_range
+):
+    with pytest.raises(ValueError, match="frozen half"):
+        HalfFitReceipt(half_label, anchor_count, SHA_A, anchor_range)
+
+
 def test_matched_pair_uses_half_label_fingerprints_and_finite_distances():
-    pair = MatchedPair("B", SHA_A, SHA_B, 1, 3, 2.5, 2.5)
+    pair = MatchedPair("B", FP_A, FP_B, 1, 3, 2.5, 2.5)
 
     assert pair.canonical_payload()["half_label"] == "B"
     with pytest.raises(ValueError, match="finite"):
-        MatchedPair("B", SHA_A, SHA_B, 1, 3, float("nan"), 2.5)
+        MatchedPair("B", FP_A, FP_B, 1, 3, float("nan"), 2.5)
+
+
+@pytest.mark.parametrize(
+    "fingerprint",
+    ["a" * 23, "a" * 25, "A" * 24, "g" * 24],
+)
+def test_component_fingerprint_requires_exactly_24_lowercase_hex(fingerprint):
+    with pytest.raises(ValueError, match="24 lowercase hexadecimal"):
+        MatchedPair("A", fingerprint, FP_B, 0, 1, 1.0, 1.0)
+
+
+@pytest.mark.parametrize("index", [True, -1, 4, 5])
+def test_matched_pair_rejects_component_index_outside_frozen_k4(index):
+    with pytest.raises(ValueError, match="0 through 3"):
+        MatchedPair("A", FP_A, FP_B, index, 1, 1.0, 1.0)
 
 
 def test_ood_row_uses_strict_greater_than_comparison():
     equal = OODRow.classify(
         anchor_at="2021-01-01T00:00:00Z",
         assigned_component_index=1,
-        assigned_component_fingerprint=SHA_A,
+        assigned_component_fingerprint=FP_A,
         squared_mahalanobis=10.0,
         threshold=10.0,
     )
     above = OODRow.classify(
         anchor_at="2021-01-02T00:00:00Z",
         assigned_component_index=1,
-        assigned_component_fingerprint=SHA_A,
+        assigned_component_fingerprint=FP_A,
         squared_mahalanobis=10.0000000001,
         threshold=10.0,
     )
@@ -143,10 +227,22 @@ def test_ood_row_uses_strict_greater_than_comparison():
     assert above.exceeds is True
 
 
+@pytest.mark.parametrize("index", [False, -1, 4, 10])
+def test_ood_row_rejects_component_index_outside_frozen_k4(index):
+    with pytest.raises(ValueError, match="0 through 3"):
+        OODRow.classify(
+            anchor_at="2021-01-01T00:00:00Z",
+            assigned_component_index=index,
+            assigned_component_fingerprint=FP_A,
+            squared_mahalanobis=10.0,
+            threshold=9.0,
+        )
+
+
 def test_sensitivity_row_cannot_claim_refit_or_runtime_use():
     row = SensitivityRow(
         half_label="A",
-        component_fingerprint=SHA_A,
+        component_fingerprint=FP_A,
         statistic="coordinate_median",
         excluded_count=3,
         centroid_distance=1.25,
@@ -158,7 +254,7 @@ def test_sensitivity_row_cannot_claim_refit_or_runtime_use():
     with pytest.raises(ValueError, match="assignment source"):
         SensitivityRow(
             "A",
-            SHA_A,
+            FP_A,
             "coordinate_median",
             3,
             1.25,
@@ -200,7 +296,7 @@ def test_diagnosis_status_cannot_open_decomposition_after_mismatch():
 
 
 def test_final_manifest_copies_and_sorts_file_hashes():
-    hashes = {"z.json": SHA_A, "a.csv": SHA_B}
+    hashes = dict(reversed(tuple(SUCCESS_FILES.items())))
     manifest = FrozenK4DiagnosisManifest(
         run_id=SHA_C,
         input_identity_sha256=SHA_D,
@@ -209,10 +305,53 @@ def test_final_manifest_copies_and_sorts_file_hashes():
     )
     hashes["later.txt"] = SHA_E
 
-    assert tuple(manifest.file_sha256) == ("a.csv", "z.json")
+    assert tuple(manifest.file_sha256) == tuple(sorted(SUCCESS_FILES))
     payload = manifest.canonical_payload()
-    assert tuple(payload["file_sha256"]) == ("a.csv", "z.json")
-    payload["file_sha256"]["a.csv"] = SHA_A
-    assert manifest.file_sha256["a.csv"] == SHA_B
+    assert tuple(payload["file_sha256"]) == tuple(sorted(SUCCESS_FILES))
+    payload["file_sha256"]["frozen_k4_cluster_diagnostics.csv"] = SHA_A
+    assert manifest.file_sha256["frozen_k4_cluster_diagnostics.csv"] == SHA_B
     with pytest.raises(FrozenInstanceError):
         manifest.status = "reproduction_mismatch"
+
+
+def test_final_manifest_accepts_only_reproduction_files_after_mismatch():
+    manifest = FrozenK4DiagnosisManifest(
+        run_id=SHA_C,
+        input_identity_sha256=SHA_D,
+        status="reproduction_mismatch",
+        file_sha256=MISMATCH_FILES,
+    )
+
+    assert set(manifest.file_sha256) == set(MISMATCH_FILES)
+
+
+@pytest.mark.parametrize(
+    ("status", "file_sha256"),
+    [
+        ("reproduced", {}),
+        (
+            "reproduced",
+            {
+                name: value
+                for name, value in SUCCESS_FILES.items()
+                if name != "frozen_k4_ood_samples.csv"
+            },
+        ),
+        ("reproduced", {**SUCCESS_FILES, "manifest.json": SHA_0}),
+        (
+            "reproduction_mismatch",
+            {**MISMATCH_FILES, "frozen_k4_cluster_diagnostics.csv": SHA_B},
+        ),
+        ("reproduction_mismatch", {"frozen_k4_failure_reproduction.json": SHA_A}),
+    ],
+)
+def test_final_manifest_rejects_missing_or_extra_status_artifacts(
+    status, file_sha256
+):
+    with pytest.raises(ValueError, match="artifact filename set"):
+        FrozenK4DiagnosisManifest(
+            run_id=SHA_C,
+            input_identity_sha256=SHA_D,
+            status=status,
+            file_sha256=file_sha256,
+        )

@@ -15,8 +15,32 @@ from typing import Mapping
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_COMPONENT_FINGERPRINT = re.compile(r"^[0-9a-f]{24}$")
 _HALF_LABELS = ("A", "B")
 _ASSIGNMENT_SOURCE = "frozen_reproduced_half_assignment"
+_FROZEN_HALF_RANGES = MappingProxyType(
+    {
+        "A": ("2021-01-01T00:00:00Z", "2023-04-01T00:00:00Z"),
+        "B": ("2023-04-01T00:00:00Z", "2025-06-30T00:00:00Z"),
+    }
+)
+_FROZEN_HALF_ANCHOR_COUNTS = MappingProxyType({"A": 820, "B": 821})
+_SUCCESS_ARTIFACT_FILENAMES = frozenset(
+    {
+        "frozen_k4_failure_reproduction.json",
+        "frozen_k4_cluster_diagnostics.csv",
+        "frozen_k4_feature_contributions.csv",
+        "frozen_k4_ood_samples.csv",
+        "frozen_k4_distance_comparison.csv",
+        "frozen_k4_failure_diagnosis.md",
+    }
+)
+_MISMATCH_ARTIFACT_FILENAMES = frozenset(
+    {
+        "frozen_k4_failure_reproduction.json",
+        "frozen_k4_failure_diagnosis.md",
+    }
+)
 _MISMATCH_CLASSIFICATIONS = (
     "input-data-mismatch",
     "split-boundary-mismatch",
@@ -77,13 +101,20 @@ def _nonnegative_integer(value: object, field_name: str) -> int:
 
 
 def _component_fingerprint(value: object, field_name: str) -> str:
+    if not isinstance(value, str) or _COMPONENT_FINGERPRINT.fullmatch(value) is None:
+        raise ValueError(
+            f"{field_name} must be exactly 24 lowercase hexadecimal characters"
+        )
+    return value
+
+
+def _component_index(value: object, field_name: str) -> int:
     if (
-        not isinstance(value, str)
-        or not value
-        or value != value.strip()
-        or any(character not in "0123456789abcdef" for character in value)
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 0 <= value <= 3
     ):
-        raise ValueError(f"{field_name} must be a canonical component fingerprint")
+        raise ValueError(f"{field_name} must be an integer from 0 through 3")
     return value
 
 
@@ -196,6 +227,11 @@ class FrozenK4InputIdentity:
             raise ValueError("half ranges must meet exactly at split_at")
         if self.half_a_range[0] >= self.half_b_range[1]:
             raise ValueError("half ranges must be chronologically ordered")
+        if (
+            self.half_a_range != _FROZEN_HALF_RANGES["A"]
+            or self.half_b_range != _FROZEN_HALF_RANGES["B"]
+        ):
+            raise ValueError("identity must use the exact frozen half ranges")
 
     def canonical_payload(self) -> dict[str, object]:
         return {
@@ -219,24 +255,37 @@ class HalfFitReceipt:
     half_label: str
     anchor_count: int
     fit_sha256: str
+    anchor_range: tuple[str, str] | None = None
     diagnostic_only: bool = True
     primary_replacement_allowed: bool = False
 
     def __post_init__(self) -> None:
-        _half_label(self.half_label)
-        if _nonnegative_integer(self.anchor_count, "anchor count") == 0:
-            raise ValueError("anchor count must be positive")
+        half_label = _half_label(self.half_label)
+        _nonnegative_integer(self.anchor_count, "anchor count")
         _canonical_sha256(self.fit_sha256, "fit_sha256")
+        expected_range = _FROZEN_HALF_RANGES[half_label]
+        anchor_range = expected_range if self.anchor_range is None else self.anchor_range
+        if not isinstance(anchor_range, tuple) or len(anchor_range) != 2:
+            raise ValueError("half fit receipt requires an immutable frozen half range")
+        for index, boundary in enumerate(anchor_range):
+            _canonical_timestamp(boundary, f"anchor_range[{index}]")
+        if (
+            self.anchor_count != _FROZEN_HALF_ANCHOR_COUNTS[half_label]
+            or anchor_range != expected_range
+        ):
+            raise ValueError("half fit receipt count and range must match its frozen half")
         if self.diagnostic_only is not True:
             raise ValueError("half fit receipt must be diagnostic-only")
         if self.primary_replacement_allowed is not False:
             raise ValueError("diagnostic half fit cannot replace the primary model")
+        object.__setattr__(self, "anchor_range", tuple(anchor_range))
 
     def canonical_payload(self) -> dict[str, object]:
         return {
             "half_label": self.half_label,
             "anchor_count": self.anchor_count,
             "fit_sha256": self.fit_sha256,
+            "anchor_range": tuple(self.anchor_range),
             "diagnostic_only": self.diagnostic_only,
             "primary_replacement_allowed": self.primary_replacement_allowed,
         }
@@ -260,8 +309,8 @@ class MatchedPair:
         _component_fingerprint(
             self.half_component_fingerprint, "half component fingerprint"
         )
-        _nonnegative_integer(self.primary_component_index, "primary component index")
-        _nonnegative_integer(self.half_component_index, "half component index")
+        _component_index(self.primary_component_index, "primary component index")
+        _component_index(self.half_component_index, "half component index")
         _finite(self.matching_cost, "matching cost", nonnegative=True)
         _finite(self.euclidean_distance, "euclidean distance", nonnegative=True)
 
@@ -289,7 +338,7 @@ class OODRow:
 
     def __post_init__(self) -> None:
         _canonical_timestamp(self.anchor_at, "anchor_at")
-        _nonnegative_integer(self.assigned_component_index, "assigned component index")
+        _component_index(self.assigned_component_index, "assigned component index")
         _component_fingerprint(
             self.assigned_component_fingerprint, "assigned component fingerprint"
         )
@@ -508,6 +557,15 @@ class FrozenK4DiagnosisManifest:
             ):
                 raise ValueError("manifest file names must be canonical basenames")
             copied[name] = _canonical_sha256(value, f"file_sha256[{name}]")
+        expected_filenames = (
+            _SUCCESS_ARTIFACT_FILENAMES
+            if self.status == "reproduced"
+            else _MISMATCH_ARTIFACT_FILENAMES
+        )
+        if set(copied) != expected_filenames:
+            raise ValueError(
+                "manifest artifact filename set must exactly match diagnosis status"
+            )
         if self.diagnostic_only is not True:
             raise ValueError("diagnosis manifest must be diagnostic-only")
         if self.primary_replacement_allowed is not False:
