@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
@@ -234,3 +235,126 @@ def test_existing_directory_must_be_byte_identical(tmp_path: Path) -> None:
 
     with pytest.raises(PublicationError, match="differs"):
         _publish_atomically(output_root, final_dir, {"a.txt": b"changed"}, lambda s, t: None)
+
+
+def test_publication_preserves_failed_model_registry_bytes_and_avoids_forbidden_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = tmp_path / "failed-model-registry.json"
+    registry.write_bytes(b'{"registry":"must remain byte-identical"}\n')
+    before = registry.read_bytes()
+    before_hash = hashlib.sha256(before).hexdigest()
+    forbidden_roots = tuple(
+        tmp_path / name
+        for name in ("Mapping", "Validation", "Evidence", "candidate", "Test")
+    )
+    for root in forbidden_roots:
+        root.mkdir()
+        (root / "sentinel.txt").write_text("must not be read", encoding="utf-8")
+
+    original_open = Path.open
+    original_read_bytes = Path.read_bytes
+
+    def is_forbidden(path: Path) -> bool:
+        resolved = path.resolve()
+        return any(
+            resolved == root.resolve() or root.resolve() in resolved.parents
+            for root in forbidden_roots
+        )
+
+    def guarded_open(self: Path, *args, **kwargs):
+        if is_forbidden(self):
+            raise AssertionError(f"forbidden diagnostic path was opened: {self}")
+        return original_open(self, *args, **kwargs)
+
+    def guarded_read_bytes(self: Path) -> bytes:
+        if is_forbidden(self):
+            raise AssertionError(f"forbidden diagnostic path was read: {self}")
+        return original_read_bytes(self)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+
+    final_dir = publish_frozen_k4_failure_diagnosis(
+        model_attempt=registry,
+        raw_kline_root=tmp_path,
+        output_root=tmp_path / "out",
+        source_loader=lambda attempt, raw: _source(),
+        replay_runner=lambda source: _success_replay(),
+        decomposition_runner=lambda replay, fit, vectors: _decomposition(),
+    )
+
+    assert final_dir.is_dir()
+    assert registry.read_bytes() == before
+    assert hashlib.sha256(registry.read_bytes()).hexdigest() == before_hash
+
+
+def test_publication_is_byte_identical_across_single_threaded_runs_with_same_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    monkeypatch.setenv("MKL_NUM_THREADS", "1")
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "1")
+
+    first = publish_frozen_k4_failure_diagnosis(
+        model_attempt=tmp_path / "attempt.json",
+        raw_kline_root=tmp_path / "raw",
+        output_root=tmp_path / "out-a",
+        source_loader=lambda attempt, raw: _source(),
+        replay_runner=lambda source: _success_replay(),
+        decomposition_runner=lambda replay, fit, vectors: _decomposition(),
+    )
+    second = publish_frozen_k4_failure_diagnosis(
+        model_attempt=tmp_path / "attempt.json",
+        raw_kline_root=tmp_path / "raw",
+        output_root=tmp_path / "out-b",
+        source_loader=lambda attempt, raw: _source(),
+        replay_runner=lambda source: _success_replay(),
+        decomposition_runner=lambda replay, fit, vectors: _decomposition(),
+    )
+
+    assert first.name == second.name
+    assert _directory_bytes(first) == _directory_bytes(second)
+
+
+def test_dependency_metadata_change_fails_closed_without_replacing_metric(
+    tmp_path: Path,
+) -> None:
+    first_source = _source()
+    second_source = SimpleNamespace(
+        identity=first_source.identity,
+        dependency_metadata={"runtime": "changed"},
+        primary_fit=SimpleNamespace(),
+        vectors=(),
+    )
+
+    first = publish_frozen_k4_failure_diagnosis(
+        model_attempt=tmp_path / "attempt.json",
+        raw_kline_root=tmp_path / "raw",
+        output_root=tmp_path / "out",
+        source_loader=lambda attempt, raw: first_source,
+        replay_runner=lambda source: _success_replay(),
+        decomposition_runner=lambda replay, fit, vectors: _decomposition(),
+    )
+    with pytest.raises(PublicationError, match="differs"):
+        publish_frozen_k4_failure_diagnosis(
+            model_attempt=tmp_path / "attempt.json",
+            raw_kline_root=tmp_path / "raw",
+            output_root=tmp_path / "out",
+            source_loader=lambda attempt, raw: second_source,
+            replay_runner=lambda source: SimpleNamespace(
+                **{
+                    **_success_replay().__dict__,
+                    "dependency_metadata": second_source.dependency_metadata,
+                }
+            ),
+            decomposition_runner=lambda replay, fit, vectors: _decomposition(),
+        )
+
+    first_reproduction = json.loads(
+        (first / "frozen_k4_failure_reproduction.json").read_text(encoding="utf-8")
+    )
+
+    assert first_reproduction["dependency_metadata"] == {"runtime": "unit"}

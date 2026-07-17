@@ -76,7 +76,7 @@ _PINNED_STAGE_SHA256: Mapping[str, str] = MappingProxyType(
         "input": "1618860cffdc7808825a09070cf6820f70ce5a0ad89b1b5028270105a91540ac",
         "split": "3650eae7ea692826d4d76472571a2e6ab7e3b183b74a1b4930347d8c4a279598",
         "preprocessing": "d7085939f4ea2b56962745045a97f4753ad4c7fdf305657002b6a514418c19ad",
-        "dependency": "4fd82ae00bfadcb35939b17ea7c01a3df5bad159440e8685051bed40d2f890b7",
+        "dependency": "c22138a9988945d686bdaa961c9f3a1580d0241244c62884310e156ed729f863",
         "fit_a": "41d5d824a13ac5469e9145e8eecdcb99780fa7aa2184e12b1be6e378797ce888",
         "fit_b": "d6c7ed9414541f9de8fae09769952741b9b7b2694ad7b72064c41bdceccfef56",
         "projection": "310dd7f6a9abda6c74727d302f995ae2121c2e366748bb62220d2b57e3691656",
@@ -433,7 +433,7 @@ def _terminal_fit_error_replay(
     observed_prefit = {
         "input": _input_data_sha256(source.vectors),
         "split": _sha256(_split_payload(source)),
-        "dependency": _sha256(_thaw(source.dependency_metadata)),
+        "dependency": _sha256(_dependency_stage_payload(source.dependency_metadata)),
     }
     stage = next(
         (
@@ -484,7 +484,7 @@ def _observed_stage_sha256(
                 for label in ("A", "B")
             },
         }),
-        "dependency": _sha256(_thaw(source.dependency_metadata)),
+        "dependency": _sha256(_dependency_stage_payload(source.dependency_metadata)),
         "fit_a": _fit_sha256(fits["A"]),
         "fit_b": _fit_sha256(fits["B"]),
         "projection": _sha256({
@@ -632,6 +632,17 @@ def _sha256(value: object) -> str:
         value, allow_nan=False, ensure_ascii=True, separators=(",", ":"), sort_keys=True
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _dependency_stage_payload(metadata: Mapping[str, object]) -> object:
+    payload = _thaw(metadata)
+    if not isinstance(payload, dict):
+        raise ValueError("dependency metadata must be a mapping")
+    return {
+        key: value
+        for key, value in sorted(payload.items())
+        if key != "thread_environment"
+    }
 
 
 def _matrix_tuple(values: np.ndarray) -> tuple[tuple[float, ...], ...]:
