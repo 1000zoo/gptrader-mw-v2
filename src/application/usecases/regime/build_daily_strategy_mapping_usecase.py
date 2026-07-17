@@ -18,6 +18,7 @@ from src.domain.regime.daily_mapping import (
     DailyStrategyMappingEntry,
 )
 from src.domain.regime.mapping import candidate_universe_hash
+from src.domain.regime.temporal import UtcInterval
 from src.domain.regime.three_day_chart_features import (
     THREE_DAY_CHART_FEATURE_SCHEMA_VERSION,
 )
@@ -61,9 +62,13 @@ _REJECTION_ORDER = (
 class BuildDailyStrategyMappingCommand:
     model_artifact_hash: str
     candidate_manifest: tuple[tuple[str, str], ...]
+    frozen_component_fingerprints: tuple[str, ...]
     calendar: tuple[datetime, ...]
     component_assignments: tuple[str | None, ...]
     evidence_rows: tuple[DailyStrategyEvidence, ...]
+    calendar_roles: tuple[str, ...] = ()
+    evidence_intervals: tuple[tuple[str, UtcInterval], ...] = ()
+    evidence_ledger_identities: tuple[tuple[str, str, str], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -137,9 +142,24 @@ class BuildDailyStrategyMappingUseCase:
             raise ValueError("daily strategy mapping command is required")
         candidate_ids, candidate_hashes = _validate_manifest(command.candidate_manifest)
         calendar = _validate_calendar(command.calendar)
-        assignments, components = _validate_assignments(
-            calendar, command.component_assignments
+        components = _validate_frozen_components(
+            command.frozen_component_fingerprints
         )
+        assignments = _validate_assignments(
+            calendar, command.component_assignments, components
+        )
+        role_by_day = {
+            item.day: item.role
+            for item in build_daily_statistical_calendar(include_validation=True)
+        }
+        calendar_roles = command.calendar_roles or tuple(
+            role_by_day[day] for day in calendar
+        )
+        if (
+            len(calendar_roles) != len(calendar)
+            or tuple(calendar_roles) != tuple(role_by_day[day] for day in calendar)
+        ):
+            raise ValueError("calendar roles must match the frozen statistical calendar")
         rows_by_key = _validate_evidence_grid(
             command.evidence_rows,
             calendar=calendar,
@@ -278,10 +298,14 @@ class BuildDailyStrategyMappingUseCase:
                     DailyStrategyMappingEntry(component, "strategy", winner.candidate_id)
                 )
             else:
-                aggregate = tuple(
-                    reason
-                    for reason in _REJECTION_ORDER
-                    if any(reason in item.rejection_reasons for item in component_assessments)
+                aggregate = (
+                    ("insufficient_evidence",)
+                    if not assigned_indices
+                    else tuple(
+                        reason
+                        for reason in _REJECTION_ORDER
+                        if any(reason in item.rejection_reasons for item in component_assessments)
+                    )
                 )
                 entries.append(
                     DailyStrategyMappingEntry(
@@ -307,6 +331,13 @@ class BuildDailyStrategyMappingUseCase:
             risk_policy=STRICT_RISK_POLICY,
             cluster_fit=fold.cluster_fit,
             mapping_fit=fold.mapping_fit,
+            evidence_intervals=tuple(command.evidence_intervals),
+            statistical_calendar=tuple(
+                (day, role, assignment)
+                for day, role, assignment
+                in zip(calendar, calendar_roles, assignments)
+            ),
+            evidence_ledger_identities=tuple(command.evidence_ledger_identities),
         )
         return BuildDailyStrategyMappingResult(artifact)
 
@@ -874,9 +905,25 @@ def _validate_calendar(calendar: Sequence[datetime]) -> tuple[datetime, ...]:
     return supplied
 
 
+def _validate_frozen_components(components: Sequence[str]) -> tuple[str, ...]:
+    supplied = tuple(components)
+    if (
+        len(supplied) != 4
+        or len(set(supplied)) != 4
+        or any(
+            not isinstance(value, str) or not value or value != value.strip()
+            for value in supplied
+        )
+    ):
+        raise ValueError("frozen component universe must contain exactly four canonical fingerprints")
+    return tuple(sorted(supplied))
+
+
 def _validate_assignments(
-    calendar: tuple[datetime, ...], assignments: Sequence[str | None]
-) -> tuple[tuple[str | None, ...], tuple[str, ...]]:
+    calendar: tuple[datetime, ...],
+    assignments: Sequence[str | None],
+    frozen_components: tuple[str, ...],
+) -> tuple[str | None, ...]:
     supplied = tuple(assignments)
     if len(supplied) != len(calendar):
         raise ValueError("one component assignment is required per calendar day")
@@ -894,10 +941,10 @@ def _validate_assignments(
         for value in supplied
     ):
         raise ValueError("component assignments must be canonical strings or purge nulls")
-    components = tuple(sorted({value for value in supplied if value is not None}))
-    if len(components) != 4:
-        raise ValueError("component assignments must contain exactly four frozen components")
-    return supplied, components
+    observed = {value for value in supplied if value is not None}
+    if not observed.issubset(frozen_components):
+        raise ValueError("component assignment is outside the frozen component universe")
+    return supplied
 
 
 def _validate_evidence_grid(

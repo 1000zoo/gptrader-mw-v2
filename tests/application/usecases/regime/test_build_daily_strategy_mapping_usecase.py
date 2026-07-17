@@ -88,6 +88,13 @@ def sha(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def sha256_payload(value: object) -> str:
+    return hashlib.sha256(json.dumps(
+        value, allow_nan=False, ensure_ascii=True,
+        separators=(",", ":"), sort_keys=True,
+    ).encode()).hexdigest()
+
+
 def mapping_calendar() -> tuple[datetime, ...]:
     fold = ThreeDayDailyWalkForwardFold.default()
     count = (fold.mapping_fit.end_at - fold.mapping_fit.start_at).days
@@ -484,6 +491,7 @@ def valid_command(*, candidates: tuple[str, ...] = ("candidate-a",)) -> BuildDai
     return BuildDailyStrategyMappingCommand(
         model_artifact_hash=MODEL_HASH,
         candidate_manifest=manifest,
+        frozen_component_fingerprints=COMPONENTS,
         calendar=calendar,
         component_assignments=assignments,
         evidence_rows=rows,
@@ -542,6 +550,126 @@ def test_use_case_assesses_full_frozen_grid_and_emits_exactly_four_entries() -> 
     assert len(result.artifact.entries) == 4
     assert len(result.artifact.candidate_assessments) == 4
     assert {entry.component_fingerprint for entry in result.artifact.entries} == set(COMPONENTS)
+
+
+def test_unobserved_frozen_component_emits_insufficient_evidence_cash_entry() -> None:
+    command = valid_command()
+    assignments = tuple(
+        COMPONENTS[0] if component == COMPONENTS[3] else component
+        for component in command.component_assignments
+    )
+    rows = tuple(
+        replace(row, component_fingerprint=assignments[command.calendar.index(row.outcome_start_at)])
+        for row in command.evidence_rows
+    )
+
+    result = BuildDailyStrategyMappingUseCase().execute(replace(
+        command, component_assignments=assignments, evidence_rows=rows
+    ))
+
+    missing = next(
+        entry for entry in result.artifact.entries
+        if entry.component_fingerprint == COMPONENTS[3]
+    )
+    assert missing.decision == "cash"
+    assert "insufficient_evidence" in missing.rejection_reasons
+    missing_assessments = [
+        item for item in result.artifact.candidate_assessments
+        if item.component_fingerprint == COMPONENTS[3]
+    ]
+    assert len(missing_assessments) == 1
+    assert missing_assessments[0].assigned_day_count == 0
+
+
+def test_assignment_outside_frozen_component_universe_is_rejected() -> None:
+    command = valid_command()
+    assignments = ("unknown-component",) + command.component_assignments[1:]
+    rows = tuple(
+        replace(row, component_fingerprint="unknown-component")
+        if row.outcome_start_at == command.calendar[0] else row
+        for row in command.evidence_rows
+    )
+
+    with pytest.raises(ValueError, match="frozen component"):
+        BuildDailyStrategyMappingUseCase().execute(replace(
+            command, component_assignments=assignments, evidence_rows=rows
+        ))
+
+
+def test_real_mapping_artifact_can_cross_freeze_and_reach_test_loaded() -> None:
+    from scripts.chart_regime_strategy_mapping import (
+        ThreeDayExperimentStage, ThreeDayExperimentState,
+        create_pre_test_freeze, load_test_after_freeze,
+    )
+
+    command = valid_command()
+    mapping = BuildDailyStrategyMappingUseCase().execute(command).artifact
+    mapping_payload = mapping.canonical_payload()
+    mapping_payload["artifact_hash"] = daily_mapping_artifact_hash(mapping)
+    profile = mapping_payload["research_profile"]
+    freeze = create_pre_test_freeze(
+        model={"artifact_hash": MODEL_HASH},
+        candidate_manifest={
+            "manifest_hash": sha("manifest"),
+            "candidate_universe_hash": mapping.candidate_universe_hash,
+        },
+        evidence={}, mapping=mapping_payload,
+        global_fixed_baseline={"decision": "cash"},
+        profile={"profile_id": profile["profile_id"]}, chronology={},
+    )
+    provenance = {
+        "pre_test_freeze_hash": freeze.pre_test_freeze_hash,
+        "model_artifact_hash": MODEL_HASH,
+        "candidate_manifest_hash": sha("manifest"),
+        "candidate_universe_hash": mapping.candidate_universe_hash,
+        "mapping_artifact_hash": daily_mapping_artifact_hash(mapping),
+        "profile_id": profile["profile_id"],
+    }
+    state = ThreeDayExperimentState(stage=ThreeDayExperimentStage.PRE_TEST_FROZEN)
+
+    load_test_after_freeze(
+        state=state, freeze=freeze, loader=lambda: {"provenance": provenance}
+    )
+
+    assert state.stage is ThreeDayExperimentStage.TEST_LOADED
+
+
+def test_validation_interval_and_ledger_identity_change_final_artifact_hash() -> None:
+    fold = ThreeDayDailyWalkForwardFold.default()
+    command = valid_command()
+    common = replace(
+        command,
+        evidence_intervals=(
+            ("mapping_fit", fold.mapping_fit),
+            ("validation", fold.validation),
+        ),
+        evidence_ledger_identities=(
+            ("mapping_fit", sha("mapping-ledger"), sha("mapping-run")),
+            ("validation", sha("validation-ledger-a"), sha("validation-run")),
+        ),
+    )
+    first = BuildDailyStrategyMappingUseCase().execute(common).artifact
+    second = BuildDailyStrategyMappingUseCase().execute(replace(
+        common,
+        evidence_ledger_identities=(
+            ("mapping_fit", sha("mapping-ledger"), sha("mapping-run")),
+            ("validation", sha("validation-ledger-b"), sha("validation-run")),
+        ),
+    )).artifact
+
+    assert first.canonical_payload()["evidence_intervals"][-1] == {
+        "role": "validation",
+        "start_at": fold.validation.start_at.isoformat().replace("+00:00", "Z"),
+        "end_at": fold.validation.end_at.isoformat().replace("+00:00", "Z"),
+    }
+    first_payload = first.canonical_payload()
+    assert first_payload["statistical_calendar_hash"] == sha256_payload(
+        first_payload["statistical_calendar"]
+    )
+    assert first_payload["evidence_ledger_identity_hash"] == sha256_payload(
+        first_payload["evidence_ledger_identities"]
+    )
+    assert daily_mapping_artifact_hash(first) != daily_mapping_artifact_hash(second)
 
 
 def test_max_stat_universe_includes_coverage_eligible_candidate_with_too_few_trades(
@@ -701,7 +829,7 @@ def test_no_complete_seven_day_window_is_an_explicit_rejection() -> None:
     [
         (lambda command: replace(command, calendar=command.calendar[:-1]), "complete Mapping Fit calendar"),
         (lambda command: replace(command, component_assignments=command.component_assignments[:-1]), "component assignment"),
-        (lambda command: replace(command, component_assignments=("unknown",) + command.component_assignments[1:]), "exactly four"),
+        (lambda command: replace(command, component_assignments=("unknown",) + command.component_assignments[1:]), "frozen component"),
         (lambda command: replace(command, evidence_rows=command.evidence_rows + (command.evidence_rows[0],)), "duplicate"),
         (lambda command: replace(command, evidence_rows=command.evidence_rows[:-1]), "coverage"),
         (lambda command: replace(command, evidence_rows=(replace(command.evidence_rows[0], model_artifact_hash=sha("drift")),) + command.evidence_rows[1:]), "model hash"),

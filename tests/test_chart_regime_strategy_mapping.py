@@ -833,8 +833,23 @@ def test_phase_evidence_payload_embeds_rows_assignments_and_recomputable_hash() 
         canonical_payload=lambda: row_payload,
     )
     identity = SimpleNamespace(
-        canonical_payload=lambda: {"code_version": "test"}, digest="1" * 64
+        canonical_payload=lambda: {"code_version": "test"}, digest="1" * 64,
+        feature_provenance_hash=_canonical_hash({"provider": "cache-a"}),
+        feature_source_coverage_hash=_canonical_hash({"coverage": 1}),
+        feature_unavailable_counts_hash=_canonical_hash({"missing": 0}),
     )
+    archives = ({
+        "source_url": "https://example.invalid/archive.zip",
+        "member_name": "BTCUSDT-1m.csv",
+        "byte_count": 123,
+        "sha256": "3" * 64,
+    },)
+    vector_provenance = ({
+        "url": "https://example.invalid/vector.zip",
+        "member_identity": "member-v1",
+        "bytes": 456,
+        "sha256": "4" * 64,
+    },)
     evidence = ThreeDayPhaseEvidence(
         phase="mapping_fit",
         rows=(row,),
@@ -843,6 +858,11 @@ def test_phase_evidence_payload_embeds_rows_assignments_and_recomputable_hash() 
         run_identity=identity,
         ledger_path=Path("mapping.jsonl"),
         ledger_hash="2" * 64,
+        archive_descriptors=archives,
+        vector_provenance=vector_provenance,
+        feature_provenance={"provider": "cache-a"},
+        feature_source_coverage={"coverage": 1},
+        feature_unavailable_counts={"missing": 0},
     )
 
     payload = evidence.canonical_payload()
@@ -855,10 +875,36 @@ def test_phase_evidence_payload_embeds_rows_assignments_and_recomputable_hash() 
         "role": "mapping_fit",
     }]
     assert payload["assignment_hash"] == _canonical_hash(payload["component_assignments"])
+    assert payload["archive_descriptors"] == list(archives)
+    assert payload["archive_descriptor_hash"] == _canonical_hash(list(archives))
+    assert payload["vector_provenance"] == list(vector_provenance)
+    assert payload["vector_provenance_hash"] == _canonical_hash(list(vector_provenance))
+    assert payload["feature_provenance_hash"] == _canonical_hash(payload["feature_provenance"])
     independently_reconstructed = [
         row["component_fingerprint"] for row in payload["calendar_rows"]
     ]
     assert independently_reconstructed == payload["component_assignments"]
+
+
+def test_canonical_report_reuses_large_already_canonical_daily_grid() -> None:
+    from scripts.chart_regime_strategy_mapping import _canonicalize_report
+
+    rows = [
+        {
+            "candidate_id": f"candidate-{candidate:03d}",
+            "day_index": day,
+            "net_return_ratio": "0.001",
+        }
+        for day in range(265)
+        for candidate in range(459)
+    ]
+    report = {"daily_evidence_rows": rows, "schema_version": "memory-regression-v1"}
+
+    normalized = _canonicalize_report(report)
+
+    assert normalized is report
+    assert normalized["daily_evidence_rows"] is rows
+    assert len(json.dumps(normalized, separators=(",", ":"))) < 12_000_000
 
 
 def test_all_eight_walk_forward_fold_dates_are_accepted() -> None:

@@ -234,9 +234,19 @@ def _reject_nested_test_material(value: object, path: tuple[str, ...] = ()) -> N
         for key, item in value.items():
             normalized = str(key).strip().lower().replace("-", "_")
             if normalized in forbidden or normalized.startswith("test_"):
+                exact_path = (*path, str(key))
+                if exact_path == ("mapping", "research_profile", "fold", "test"):
+                    expected_interval = ThreeDayDailyResearchProfile().canonical_payload()[
+                        "fold"
+                    ]["test"]
+                    if not isinstance(item, Mapping) or dict(item) != expected_interval:
+                        raise ValueError(
+                            "pre-Test freeze Test interval metadata is not canonical"
+                        )
+                    continue
                 raise ValueError(
                     "pre-Test freeze recursively rejects Test material at "
-                    + ".".join((*path, str(key)))
+                    + ".".join(exact_path)
                 )
             _reject_nested_test_material(item, (*path, str(key)))
     elif isinstance(value, (tuple, list)):
@@ -826,18 +836,56 @@ class ThreeDayPhaseEvidence:
     run_identity: DailyEvidenceRunIdentity
     ledger_path: Path
     ledger_hash: str
+    archive_descriptors: tuple[Mapping[str, object], ...] = ()
+    vector_provenance: tuple[Mapping[str, object], ...] = ()
+    feature_provenance: Mapping[str, object] = field(default_factory=dict)
+    feature_source_coverage: Mapping[str, object] = field(default_factory=dict)
+    feature_unavailable_counts: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        for descriptor in self.archive_descriptors:
+            if (
+                not isinstance(descriptor, Mapping)
+                or not {"source_url", "member_name", "byte_count", "sha256"}
+                <= set(descriptor)
+            ):
+                raise ValueError("archive descriptor requires URL, member, bytes, and SHA256")
+        expected_hashes = {
+            "feature_provenance_hash": self.feature_provenance,
+            "feature_source_coverage_hash": self.feature_source_coverage,
+            "feature_unavailable_counts_hash": self.feature_unavailable_counts,
+        }
+        for name, payload in expected_hashes.items():
+            expected = getattr(self.run_identity, name, None)
+            if payload and expected != _canonical_hash(payload):
+                raise ValueError(f"phase evidence {name} is inconsistent")
 
     def canonical_payload(self) -> dict[str, object]:
         ordered_rows = sorted(
             self.rows,
             key=lambda row: (row.outcome_start_at, row.candidate_id),
         )
+        archives = list(self.archive_descriptors)
+        vectors = list(self.vector_provenance)
+        feature_provenance = dict(self.feature_provenance)
+        source_coverage = dict(self.feature_source_coverage)
+        unavailable_counts = dict(self.feature_unavailable_counts)
         return {
             "phase": self.phase,
             "run_identity": self.run_identity.canonical_payload(),
             "run_identity_hash": self.run_identity.digest,
             "ledger_path": self.ledger_path.as_posix(),
             "ledger_hash": self.ledger_hash,
+            "archive_descriptors": archives,
+            "archive_descriptor_hash": _canonical_hash(archives),
+            "vector_provenance": vectors,
+            "vector_provenance_hash": _canonical_hash(vectors),
+            "feature_provenance": feature_provenance,
+            "feature_provenance_hash": _canonical_hash(feature_provenance),
+            "feature_source_coverage": source_coverage,
+            "feature_source_coverage_hash": _canonical_hash(source_coverage),
+            "feature_unavailable_counts": unavailable_counts,
+            "feature_unavailable_counts_hash": _canonical_hash(unavailable_counts),
             "row_count": len(self.rows),
             "calendar_count": len(self.calendar),
             "assignment_hash": _canonical_hash(list(self.assignments)),
@@ -884,6 +932,14 @@ def _phase_ledger_path(base: Path, phase: str) -> Path:
     return base.with_name(f"{base.stem}-{label}{base.suffix or '.jsonl'}")
 
 
+def _single_archive_member_name(path: Path) -> str:
+    with zipfile.ZipFile(path) as archive:
+        names = tuple(name for name in archive.namelist() if not name.endswith("/"))
+    if len(names) != 1:
+        raise ValueError(f"archive must contain exactly one data member: {path.name}")
+    return names[0]
+
+
 def _load_exact_minute_market(
     *, symbol: str, raw_kline_root: Path, start_at: datetime, end_at: datetime
 ) -> tuple[MarketSnapshot, list[dict[str, object]]]:
@@ -898,6 +954,8 @@ def _load_exact_minute_market(
             "path": path.as_posix(), "source_url": url, "sha256": sha256,
             "expected_sha256": expected_sha256, "checksum_url": checksum_url,
             "size": path.stat().st_size,
+            "byte_count": path.stat().st_size,
+            "member_name": _single_archive_member_name(path),
         })
         for candle in _archive_candles(path, symbol, start_at=start_at, end_at=end_at):
             if candle.opened_at != expected:
@@ -981,7 +1039,9 @@ def load_three_day_phase_evidence(
     if callable(close):
         close()
     return ThreeDayPhaseEvidence(
-        phase, tuple(rows), calendar, assignments, identity, ledger_path, ledger_hash
+        phase, tuple(rows), calendar, assignments, identity, ledger_path, ledger_hash,
+        tuple(archives), tuple(vector_provenance), dict(provider_provenance),
+        dict(provider_coverage), dict(unavailable),
     )
 
 
@@ -1016,12 +1076,25 @@ def _mapping_command(model, manifest, *bundles: ThreeDayPhaseEvidence):
     return BuildDailyStrategyMappingCommand(
         model_artifact_hash=model.artifact_hash,
         candidate_manifest=manifest.ordered_definition_hashes,
+        frozen_component_fingerprints=tuple(model.component_fingerprints),
         calendar=tuple(item.day for item in plan),
         component_assignments=tuple(
             None if item.role == "purge" else assignment_by_day[item.day]
             for item in plan
         ),
         evidence_rows=tuple(row for bundle in bundles for row in bundle.rows),
+        calendar_roles=tuple(item.role for item in plan),
+        evidence_intervals=tuple(
+            (
+                bundle.phase,
+                getattr(ThreeDayDailyResearchProfile().fold, bundle.phase),
+            )
+            for bundle in sorted(bundles, key=lambda item: item.phase)
+        ),
+        evidence_ledger_identities=tuple(
+            (bundle.phase, bundle.ledger_hash, bundle.run_identity.digest)
+            for bundle in sorted(bundles, key=lambda item: item.phase)
+        ),
     )
 
 
@@ -4041,9 +4114,17 @@ def _canonicalize_report(value: object) -> object:
     if isinstance(value, Mapping):
         if any(not isinstance(key, str) for key in value):
             raise ValueError("report object keys must be strings")
-        return {key: _canonicalize_report(item) for key, item in sorted(value.items())}
+        normalized = {
+            key: _canonicalize_report(item) for key, item in value.items()
+        }
+        if all(normalized[key] is item for key, item in value.items()):
+            return value
+        return {key: normalized[key] for key in sorted(normalized)}
     if isinstance(value, (tuple, list)):
-        return [_canonicalize_report(item) for item in value]
+        normalized = [_canonicalize_report(item) for item in value]
+        if all(left is right for left, right in zip(normalized, value)):
+            return value
+        return normalized
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError("report floats must be finite")
     if value is None or isinstance(value, (str, int, float, bool)):

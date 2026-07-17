@@ -227,6 +227,14 @@ def test_daily_evidence_binds_three_day_anchor_to_exact_one_day_outcome():
         item.candidate_id = "changed"
 
 
+def test_mapping_artifact_canonical_payload_binds_evidence_scope_and_ledgers() -> None:
+    payload = artifact().canonical_payload()
+
+    assert "evidence_intervals" in payload
+    assert "statistical_calendar" in payload
+    assert "evidence_ledger_identities" in payload
+
+
 def test_available_evidence_requires_an_exact_tuple_trade_ledger():
     with pytest.raises(ValueError, match="available evidence requires trade PnLs"):
         evidence(trade_pnls=None)
@@ -469,7 +477,7 @@ def test_artifact_hash_is_canonical_and_binds_the_payload():
     assert permuted.candidate_assessments == first.candidate_assessments
     assert daily_mapping_artifact_hash(first) == daily_mapping_artifact_hash(permuted)
     assert len(daily_mapping_artifact_hash(first)) == 64
-    assert daily_mapping_artifact_hash(first) == "85ea3693026dee3978b540191111cc1a95834fe155387a33af47af491499e719"
+    assert daily_mapping_artifact_hash(first) == "1408d62e2e06353457b2b73c1b4e4d84cf47e9fa46f397d6d694bacf7140fe00"
     assert daily_mapping_artifact_hash(first) != daily_mapping_artifact_hash(
         replace(first, model_artifact_hash=sha("different-model"))
     )

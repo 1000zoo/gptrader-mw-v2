@@ -426,6 +426,9 @@ class DailyStrategyMappingArtifact:
     risk_policy: DailyRiskPolicy
     cluster_fit: UtcInterval
     mapping_fit: UtcInterval
+    evidence_intervals: tuple[tuple[str, UtcInterval], ...] = ()
+    statistical_calendar: tuple[tuple[datetime, str, str | None], ...] = ()
+    evidence_ledger_identities: tuple[tuple[str, str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if self.artifact_version != DAILY_STRATEGY_MAPPING_ARTIFACT_VERSION:
@@ -541,13 +544,73 @@ class DailyStrategyMappingArtifact:
         if self.mapping_fit != default_fold.mapping_fit:
             raise ValueError("artifact Mapping Fit interval is incompatible")
 
+        evidence_intervals = tuple(self.evidence_intervals)
+        expected_intervals = {
+            "mapping_fit": default_fold.mapping_fit,
+            "validation": default_fold.validation,
+        }
+        if (
+            len({role for role, _ in evidence_intervals}) != len(evidence_intervals)
+            or any(expected_intervals.get(role) != interval for role, interval in evidence_intervals)
+        ):
+            raise ValueError("artifact evidence intervals are incompatible")
+        statistical_calendar = tuple(self.statistical_calendar)
+        previous_day = None
+        for day, role, component in statistical_calendar:
+            expected_role = (
+                "mapping_fit"
+                if default_fold.mapping_fit.start_at <= day < default_fold.mapping_fit.end_at
+                else "validation"
+                if default_fold.validation.start_at <= day < default_fold.validation.end_at
+                else "purge"
+            )
+            if (
+                not _midnight_utc(day)
+                or (previous_day is not None and day <= previous_day)
+                or role != expected_role
+                or (component is None) != (role == "purge")
+                or (component is not None and component not in components)
+            ):
+                raise ValueError("artifact statistical calendar is incompatible")
+            previous_day = day
+        ledger_identities = tuple(self.evidence_ledger_identities)
+        if len({phase for phase, _, _ in ledger_identities}) != len(ledger_identities):
+            raise ValueError("artifact evidence ledger phases must be unique")
+        for phase, ledger_hash, run_identity_hash in ledger_identities:
+            if phase not in expected_intervals:
+                raise ValueError("artifact evidence ledger phase is incompatible")
+            _hash(ledger_hash, "evidence ledger hash")
+            _hash(run_identity_hash, "evidence run identity hash")
+
         object.__setattr__(self, "candidate_ids", candidate_ids)
         object.__setattr__(self, "candidate_hashes", MappingProxyType(candidate_hashes))
         object.__setattr__(self, "component_fingerprints", components)
         object.__setattr__(self, "entries", entries)
         object.__setattr__(self, "candidate_assessments", assessments)
+        object.__setattr__(self, "evidence_intervals", evidence_intervals)
+        object.__setattr__(self, "statistical_calendar", statistical_calendar)
+        object.__setattr__(
+            self, "evidence_ledger_identities", ledger_identities
+        )
 
     def canonical_payload(self) -> dict[str, object]:
+        statistical_calendar = [
+            {
+                "day": day.isoformat().replace("+00:00", "Z"),
+                "role": role,
+                "component_fingerprint": component,
+            }
+            for day, role, component in self.statistical_calendar
+        ]
+        ledger_identities = [
+            {
+                "phase": phase,
+                "ledger_hash": ledger_hash,
+                "run_identity_hash": run_identity_hash,
+            }
+            for phase, ledger_hash, run_identity_hash
+            in self.evidence_ledger_identities
+        ]
         return {
             "artifact_version": self.artifact_version,
             "profile_id": self.profile_id,
@@ -601,6 +664,14 @@ class DailyStrategyMappingArtifact:
             "research_profile": ThreeDayDailyResearchProfile().canonical_payload(),
             "cluster_fit": _interval_payload(self.cluster_fit),
             "mapping_fit": _interval_payload(self.mapping_fit),
+            "evidence_intervals": [
+                {"role": role, **_interval_payload(interval)}
+                for role, interval in self.evidence_intervals
+            ],
+            "statistical_calendar": statistical_calendar,
+            "statistical_calendar_hash": _payload_hash(statistical_calendar),
+            "evidence_ledger_identities": ledger_identities,
+            "evidence_ledger_identity_hash": _payload_hash(ledger_identities),
         }
 
 
@@ -609,6 +680,17 @@ def daily_mapping_artifact_hash(artifact: DailyStrategyMappingArtifact) -> str:
         raise ValueError("daily mapping artifact is required")
     encoded = json.dumps(
         artifact.canonical_payload(),
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _payload_hash(payload: object) -> str:
+    encoded = json.dumps(
+        payload,
         allow_nan=False,
         ensure_ascii=True,
         separators=(",", ":"),
