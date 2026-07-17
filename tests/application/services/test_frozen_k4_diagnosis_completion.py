@@ -28,7 +28,7 @@ from src.domain.regime import (
 REGISTRY = THREE_DAY_CHART_FEATURE_REGISTRY_V1
 NAMES = tuple(spec.name for spec in REGISTRY)
 FINGERPRINT = "a" * 24
-SCOPE = "component_zero_strict_ood_feature_contribution"
+SCOPE = "primary-component-0-ood-exceedances"
 
 
 def _decomposition(
@@ -236,8 +236,18 @@ def test_registry_hash_is_canonical_stable_and_sensitive_only_to_admitted_payloa
     second = _registry_sha256(NAMES, REGISTRY, THREE_DAY_CHART_FEATURE_SCHEMA_VERSION)
     assert first == second
     assert first != _registry_sha256(NAMES, tuple(reversed(REGISTRY)), THREE_DAY_CHART_FEATURE_SCHEMA_VERSION)
-    changed = replace(REGISTRY[0], formula=REGISTRY[0].formula + " changed")
-    assert first != _registry_sha256(NAMES, (changed,) + REGISTRY[1:], THREE_DAY_CHART_FEATURE_SCHEMA_VERSION)
+    mutations = (
+        replace(REGISTRY[0], name=REGISTRY[0].name + "_changed"),
+        replace(REGISTRY[0], family=REGISTRY[0].family + "_changed"),
+        replace(REGISTRY[0], aggregation_minutes=REGISTRY[0].aggregation_minutes + 1),
+        replace(REGISTRY[0], lookback_minutes=REGISTRY[0].lookback_minutes + 1),
+        replace(REGISTRY[0], formula=REGISTRY[0].formula + " changed"),
+    )
+    assert all(
+        first
+        != _registry_sha256(NAMES, (changed,) + REGISTRY[1:], THREE_DAY_CHART_FEATURE_SCHEMA_VERSION)
+        for changed in mutations
+    )
     unrelated = MappingProxyType({"feature_schema_sha256": "ignored"})
     assert unrelated["feature_schema_sha256"] == "ignored"
     assert first == _registry_sha256(NAMES, REGISTRY, THREE_DAY_CHART_FEATURE_SCHEMA_VERSION)
@@ -251,6 +261,14 @@ def test_result_and_nested_contracts_are_frozen_and_validate_invariants() -> Non
     assert isinstance(result.family_rows[0], OODFamilySummaryRow)
     with pytest.raises(FrozenInstanceError):
         result.ood_sample_count = 2  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        result.feature_rows[0].rank = 2  # type: ignore[misc]
+    with pytest.raises(FrozenInstanceError):
+        result.family_rows[0].family_name = "changed"  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        result.feature_rows[0] = result.feature_rows[1]  # type: ignore[index]
+    with pytest.raises(TypeError):
+        result.family_rows[0] = result.family_rows[1]  # type: ignore[index]
     with pytest.raises(ValueError):
         replace(result.feature_rows[0], contribution_ratio=2.0)
     with pytest.raises(ValueError):

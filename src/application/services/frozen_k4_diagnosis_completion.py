@@ -16,7 +16,7 @@ from src.domain.regime import (
 )
 
 
-_ANALYSIS_SCOPE = "component_zero_strict_ood_feature_contribution"
+_ANALYSIS_SCOPE = "primary-component-0-ood-exceedances"
 _COMPONENT_INDEX = 0
 _ASSIGNED_SAMPLE_COUNT = 409
 _OOD_SAMPLE_COUNT = 24
