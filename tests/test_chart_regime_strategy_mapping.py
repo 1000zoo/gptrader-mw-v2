@@ -131,6 +131,16 @@ def test_three_day_profile_rejects_weekly_tuning_arguments() -> None:
         ])
 
 
+def test_three_day_profile_accepts_explicit_deferred_candidate_opt_in() -> None:
+    args = parse_walk_forward_args([
+        "--profile", "three-day-daily-k4-v1", "--symbol", "BTCUSDT",
+        "--include-deferred", "--dry-run",
+    ])
+
+    assert args.include_deferred is True
+    assert args.dry_run is True
+
+
 def test_pre_test_freeze_is_immutable_and_excludes_test_results() -> None:
     from scripts.chart_regime_strategy_mapping import create_pre_test_freeze
 

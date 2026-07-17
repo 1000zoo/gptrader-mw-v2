@@ -4950,7 +4950,7 @@ def parse_walk_forward_args(argv: Sequence[str] | None = None) -> argparse.Names
     args = parser.parse_args(argv)
     if getattr(args, "profile", None) == THREE_DAY_PROFILE_ID:
         weekly_only = (
-            tuple(args.candidate_group), args.include_deferred,
+            tuple(args.candidate_group),
             args.test_claim_status != "untouched", args.test_claim_reason,
             args.prior_run_timestamp, args.prior_run_hash,
         )
