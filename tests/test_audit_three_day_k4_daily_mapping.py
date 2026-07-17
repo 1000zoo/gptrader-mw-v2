@@ -394,6 +394,7 @@ def _write_bundle(tmp_path: Path) -> tuple[AuditInputs, dict[str, object]]:
         "mapping": hashlib.sha256(paths["mapping"].read_bytes()).hexdigest(),
         "markdown": hashlib.sha256(paths["markdown"].read_bytes()).hexdigest(),
     }
+    report["output_binding_schema_version"] = "legacy-output-hashes-v1"
     paths["report"].write_bytes(canonical_json_bytes(report))
     return AuditInputs(**paths), report
 
@@ -580,6 +581,7 @@ def test_auditor_accepts_actual_task7_publication_envelope_and_byte_formats(tmp_
 
     inputs, report = _write_bundle(tmp_path)
     report.pop("output_hashes")
+    report.pop("output_binding_schema_version")
     model = json.loads(inputs.model.read_text(encoding="utf-8"))
     mapping = json.loads(inputs.mapping.read_text(encoding="utf-8"))
     rendered = render_three_day_publication(
@@ -597,6 +599,184 @@ def test_auditor_accepts_actual_task7_publication_envelope_and_byte_formats(tmp_
     )
 
     assert result["passed"] is True, result["failures"]
+
+
+@pytest.mark.parametrize("mutation", ("missing", "ambiguous", "missing_key", "extra_key"))
+def test_output_binding_is_exact_and_fail_closed(tmp_path, mutation) -> None:
+    inputs, report = _write_bundle(tmp_path)
+    if mutation == "missing":
+        report.pop("output_hashes")
+        report.pop("output_binding_schema_version")
+    elif mutation == "ambiguous":
+        report["publication"] = {
+            "hash_definition": "ambiguous", "report_payload_hash": "0" * 64,
+            "model_byte_hash": "0" * 64, "mapping_byte_hash": "0" * 64,
+            "markdown_byte_hash": "0" * 64,
+        }
+    elif mutation == "missing_key":
+        report["output_hashes"].pop("markdown")
+    else:
+        report["output_hashes"]["unexpected"] = "0" * 64
+    inputs.report.write_bytes(canonical_json_bytes(report))
+
+    result = audit_three_day_k4_daily_mapping(
+        inputs, candidate_manifest_factory=_factory(report)
+    )
+
+    assert result["passed"] is False
+    assert any("output binding" in failure for failure in result["failures"])
+
+
+def test_deleted_publication_binding_cannot_hide_tampered_markdown(tmp_path) -> None:
+    from scripts.chart_regime_strategy_mapping import render_three_day_publication
+
+    inputs, report = _write_bundle(tmp_path)
+    report.pop("output_hashes")
+    report.pop("output_binding_schema_version")
+    rendered = render_three_day_publication(
+        report=report, model_json=inputs.model.read_bytes(),
+        mapping_json=inputs.mapping.read_bytes(),
+    )
+    envelope = json.loads(rendered.report_json)
+    envelope.pop("publication")
+    inputs.report.write_bytes(canonical_json_bytes(envelope))
+    inputs.markdown.write_bytes(rendered.report_markdown + b"\nforged\n")
+
+    result = audit_three_day_k4_daily_mapping(
+        inputs, candidate_manifest_factory=_factory(report)
+    )
+
+    assert result["passed"] is False
+    assert any("output binding" in failure for failure in result["failures"])
+
+
+@pytest.mark.parametrize("mutation", ("missing_key", "extra_key", "wrong_hash"))
+def test_publication_binding_rejects_malformed_or_wrong_companion_hash(
+    tmp_path, mutation,
+) -> None:
+    from scripts.chart_regime_strategy_mapping import render_three_day_publication
+
+    inputs, report = _write_bundle(tmp_path)
+    report.pop("output_hashes")
+    report.pop("output_binding_schema_version")
+    rendered = render_three_day_publication(
+        report=report, model_json=inputs.model.read_bytes(),
+        mapping_json=inputs.mapping.read_bytes(),
+    )
+    envelope = json.loads(rendered.report_json)
+    if mutation == "missing_key":
+        envelope["publication"].pop("markdown_byte_hash")
+    elif mutation == "extra_key":
+        envelope["publication"]["unexpected"] = "0" * 64
+    else:
+        envelope["publication"]["markdown_byte_hash"] = "0" * 64
+    inputs.report.write_bytes(canonical_json_bytes(envelope))
+    inputs.markdown.write_bytes(rendered.report_markdown)
+    inputs.model.write_bytes(rendered.model_json)
+    inputs.mapping.write_bytes(rendered.mapping_json)
+
+    result = audit_three_day_k4_daily_mapping(
+        inputs, candidate_manifest_factory=_factory(report)
+    )
+
+    assert result["passed"] is False
+    assert any(
+        "output binding" in failure or "output hash mismatch" in failure
+        for failure in result["failures"]
+    )
+
+
+def test_audit_reads_each_publication_input_once(monkeypatch, tmp_path) -> None:
+    inputs, report = _write_bundle(tmp_path)
+    paths = {path.resolve() for path in (
+        inputs.report, inputs.model, inputs.mapping, inputs.markdown,
+    )}
+    original = Path.read_bytes
+    counts = {path: 0 for path in paths}
+
+    def read_once(path):
+        resolved = path.resolve()
+        if resolved in counts:
+            counts[resolved] += 1
+            if counts[resolved] > 1:
+                raise OSError("publication input was re-read after the audit snapshot")
+        return original(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_once)
+
+    result = audit_three_day_k4_daily_mapping(
+        inputs, candidate_manifest_factory=_factory(report)
+    )
+
+    assert result["passed"] is True, result["failures"]
+    assert set(counts.values()) == {1}
+
+
+def test_mid_audit_file_replacement_cannot_change_bound_snapshot(
+    monkeypatch, tmp_path,
+) -> None:
+    import scripts.audit_three_day_k4_daily_mapping as module
+
+    inputs, report = _write_bundle(tmp_path)
+    original_markdown = inputs.markdown.read_bytes()
+    expected_hash = hashlib.sha256(original_markdown).hexdigest()
+    original_audit_model = module._audit_model
+
+    def replace_after_snapshot(*args, **kwargs):
+        inputs.markdown.write_bytes(b"forged after audit snapshot\n")
+        return original_audit_model(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_audit_model", replace_after_snapshot)
+
+    result = audit_three_day_k4_daily_mapping(
+        inputs, candidate_manifest_factory=_factory(report)
+    )
+
+    assert result["passed"] is True, result["failures"]
+    assert result["hashes"]["markdown_file_hash"] == expected_hash
+    assert hashlib.sha256(inputs.markdown.read_bytes()).hexdigest() != expected_hash
+
+
+def test_daily_market_slice_index_has_linear_phase_scan_and_bounded_windows() -> None:
+    from datetime import datetime, timedelta, timezone
+    from decimal import Decimal
+    import scripts.audit_three_day_k4_daily_mapping as module
+    from src.domain.market import Candle, MarketSnapshot, Symbol, Timeframe
+
+    start = datetime(2025, 7, 1, tzinfo=timezone.utc)
+    base = tuple(Candle(
+        symbol=Symbol("BTC", "USDT"), timeframe=Timeframe(1, "m"),
+        opened_at=start + timedelta(minutes=index),
+        closed_at=start + timedelta(minutes=index + 1),
+        open_price=Decimal("100"), high_price=Decimal("101"),
+        low_price=Decimal("99"), close_price=Decimal("100"), volume=Decimal("1"),
+    ) for index in range(15 * 24 * 60))
+
+    class CountedCandle:
+        accesses = 0
+
+        def __init__(self, candle):
+            self.candle = candle
+
+        @property
+        def opened_at(self):
+            type(self).accesses += 1
+            return self.candle.opened_at
+
+        def __getattr__(self, name):
+            return getattr(self.candle, name)
+
+    market = MarketSnapshot(tuple(CountedCandle(candle) for candle in base))
+    CountedCandle.accesses = 0
+    days = tuple(start + timedelta(days=index) for index in range(3, 15))
+    warmup = 1442
+
+    slices = module._build_daily_market_slices(market, days, warmup)
+
+    bounded = warmup + 1440
+    assert tuple(len(item.candles) for item in slices) == (bounded,) * len(days)
+    assert CountedCandle.accesses <= len(base) + len(days) * (2 * bounded + 4)
+    assert CountedCandle.accesses < len(days) * len(base) / 3
 
 
 def test_real_typed_task7_publication_raw_root_and_ledgers_flow_through_audit(

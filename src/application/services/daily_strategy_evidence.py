@@ -460,6 +460,7 @@ def run_daily_strategy_evidence(
     replay_contract: DailyEvidenceReplayContract,
     symbol: Symbol | None = None,
     candidate_ids: Sequence[str] = (),
+    verified_source_market_data_hash: str | None = None,
 ) -> tuple[DailyStrategyEvidence, ...]:
     """Run isolated one-day canonical evidence, resuming only an exact identity."""
     if outcome_start_at.tzinfo is not timezone.utc or outcome_start_at.time() != datetime.min.time():
@@ -472,6 +473,7 @@ def run_daily_strategy_evidence(
         manifest=manifest, phase=phase, outcome_start_at=outcome_start_at,
         outcome_end_at=outcome_end_at, market=market, provider_snapshot=provider_snapshot,
         identity=run_identity, selected_symbol=selected_symbol, replay_contract=replay_contract,
+        verified_source_market_data_hash=verified_source_market_data_hash,
     )
     if ledger.key_fields != DAILY_EVIDENCE_KEY_FIELDS:
         raise ValueError("daily evidence ledger uses an incompatible unique key")
@@ -665,7 +667,7 @@ def _validate_replay_provenance(replay, *, identity, provider_snapshot, replay_c
 
 def _validate_static_run_context(*, manifest, phase, outcome_start_at, outcome_end_at,
                                  market, provider_snapshot, identity, selected_symbol,
-                                 replay_contract):
+                                 replay_contract, verified_source_market_data_hash=None):
     if identity.engine_version != replay_contract.engine_version:
         raise ValueError("run identity engine version is not canonical")
     if _thaw(identity.cost_model) != _thaw(replay_contract.cost_model):
@@ -680,7 +682,15 @@ def _validate_static_run_context(*, manifest, phase, outcome_start_at, outcome_e
         raise ValueError("candidate manifest hash does not match run identity")
     if manifest.ordered_definition_hashes != identity.ordered_candidate_definition_hashes:
         raise ValueError("candidate definition hashes do not match run identity")
-    if market_snapshot_hash(market) != identity.market_data_hash:
+    observed_market_hash = (
+        market_snapshot_hash(market)
+        if verified_source_market_data_hash is None
+        else verified_source_market_data_hash
+    )
+    if (
+        _SHA256.fullmatch(str(observed_market_hash)) is None
+        or observed_market_hash != identity.market_data_hash
+    ):
         raise ValueError("market data hash does not match run identity")
     if selected_symbol != market.symbol or selected_symbol.pair != identity.symbol:
         raise ValueError("market symbol does not match run identity")

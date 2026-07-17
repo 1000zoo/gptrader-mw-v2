@@ -10,6 +10,7 @@ domain semantics as the researched system.
 from __future__ import annotations
 
 import argparse
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
@@ -68,6 +69,16 @@ def _hash(value: object) -> str:
 def _read_canonical_json(path: Path, failures: list[str], label: str) -> dict[str, object]:
     try:
         raw = path.read_bytes()
+    except OSError as error:
+        failures.append(f"{label} could not be read: {error}")
+        return {}
+    return _read_canonical_json_bytes(raw, failures, label)
+
+
+def _read_canonical_json_bytes(
+    raw: bytes, failures: list[str], label: str,
+) -> dict[str, object]:
+    try:
         value = json.loads(
             raw.decode("utf-8"), object_pairs_hook=_unique_pairs,
             parse_constant=lambda item: (_ for _ in ()).throw(ValueError(item)),
@@ -84,7 +95,7 @@ def _read_canonical_json(path: Path, failures: list[str], label: str) -> dict[st
         if raw not in accepted:
             failures.append(f"{label} bytes are not canonical JSON")
         return value
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         failures.append(f"{label} could not be read: {error}")
         return {}
 
@@ -509,6 +520,33 @@ def _load_verified_minute_market(
     return MarketSnapshot(tuple(candles))
 
 
+def _build_daily_market_slices(market, days: Sequence[datetime], warmup: int):
+    """Index a verified phase once and materialize only bounded daily replay windows."""
+    from datetime import timedelta
+    from src.domain.market import MarketSnapshot
+
+    if not isinstance(warmup, int) or isinstance(warmup, bool) or warmup < 0:
+        raise ValueError("daily market warmup must be a nonnegative integer")
+    candles = market.candles
+    opened_times = tuple(candle.opened_at for candle in candles)
+    slices = []
+    for day in days:
+        start = day - timedelta(minutes=warmup)
+        end = day + timedelta(days=1)
+        left = bisect_left(opened_times, start)
+        right = bisect_left(opened_times, end)
+        selected = candles[left:right]
+        expected = warmup + 24 * 60
+        if (
+            len(selected) != expected
+            or not selected or selected[0].opened_at != start
+            or selected[-1].closed_at != end
+        ):
+            raise ValueError("verified phase market cannot form an exact daily replay slice")
+        slices.append(MarketSnapshot(selected))
+    return tuple(slices)
+
+
 def _replay_phase_from_raw(
     *, phase: str, bundle: Mapping[str, object], report: Mapping[str, object],
     model_artifact: object, manifest: object, ledger_override: Path | None,
@@ -523,7 +561,8 @@ def _replay_phase_from_raw(
         )
         from scripts.scheduler_driven_scalping_backtest import required_warmup_candles
         from src.application.services.daily_strategy_evidence import (
-            DAILY_EVIDENCE_KEY_FIELDS, run_daily_strategy_evidence,
+            DAILY_EVIDENCE_KEY_FIELDS, market_snapshot_hash,
+            run_daily_strategy_evidence,
         )
         from src.domain.regime import ThreeDayDailyResearchProfile
 
@@ -559,6 +598,9 @@ def _replay_phase_from_raw(
         identity = _run_identity_from_payload(identity_payload)
         if identity.digest != bundle.get("run_identity_hash"):
             raise ValueError("phase run identity digest mismatch")
+        if market_snapshot_hash(market) != identity.market_data_hash:
+            raise ValueError("verified phase market hash does not match run identity")
+        daily_markets = _build_daily_market_slices(market, days, warmup)
         vector_start = min(days) - timedelta(days=3)
         vector_end = max(days) + timedelta(days=1)
         assignments = [
@@ -572,14 +614,17 @@ def _replay_phase_from_raw(
         memory = _MemoryEvidenceLedger(DAILY_EVIDENCE_KEY_FIELDS)
         replay_contract = canonical_daily_evidence_replay_contract()
         replayed = []
-        for index, (day, component) in enumerate(zip(days, assignments), start=1):
+        for index, (day, component, daily_market) in enumerate(
+            zip(days, assignments, daily_markets), start=1
+        ):
             if index == 1 or index % 10 == 0 or index == len(days):
                 _progress(f"{phase}: replaying day {index}/{len(days)} across 459 candidates")
             replayed.extend(run_daily_strategy_evidence(
                 manifest=manifest, phase=phase, outcome_start_at=day,
-                component_fingerprint=component, market=market,
+                component_fingerprint=component, market=daily_market,
                 market_feature_provider=provider, run_identity=identity,
                 ledger=memory, replay_contract=replay_contract,
+                verified_source_market_data_hash=identity.market_data_hash,
             ))
         replay_payloads = [item.canonical_payload() for item in replayed]
         _same(
@@ -1151,11 +1196,26 @@ def audit_three_day_k4_daily_mapping(
     candidate_manifest_factory: Callable[[], Mapping[str, object]] = _default_manifest,
 ) -> dict[str, object]:
     failures: list[str] = []
-    report = _read_canonical_json(inputs.report, failures, "report")
-    model = _read_canonical_json(inputs.model, failures, "model")
-    mapping = _read_canonical_json(inputs.mapping, failures, "mapping")
-    if not inputs.markdown.is_file():
-        failures.append("markdown output is missing")
+    paths = {
+        "report": inputs.report, "model": inputs.model,
+        "mapping": inputs.mapping, "markdown": inputs.markdown,
+    }
+    input_bytes: dict[str, bytes | None] = {}
+    for label, path in paths.items():
+        try:
+            input_bytes[label] = path.read_bytes()
+        except OSError as error:
+            input_bytes[label] = None
+            failures.append(f"{label} output could not be read: {error}")
+    report = _read_canonical_json_bytes(
+        input_bytes["report"] or b"", failures, "report"
+    )
+    model = _read_canonical_json_bytes(
+        input_bytes["model"] or b"", failures, "model"
+    )
+    mapping = _read_canonical_json_bytes(
+        input_bytes["mapping"] or b"", failures, "mapping"
+    )
 
     parsed_model = _audit_model(
         report.get("model_artifact", {}) if isinstance(report.get("model_artifact"), Mapping) else {},
@@ -1203,9 +1263,20 @@ def audit_three_day_k4_daily_mapping(
     if parsed_model is not None and rebuilt_mapping is not None:
         _replay_untouched_test(report, parsed_model, rebuilt_mapping, failures)
 
-    output_hashes = report.get("output_hashes")
     publication = report.get("publication")
-    if output_hashes is None and isinstance(publication, Mapping):
+    has_publication = "publication" in report
+    has_legacy = "output_hashes" in report
+    output_hashes: Mapping[str, object] | None = None
+    if has_publication and has_legacy:
+        failures.append("report output binding is ambiguous")
+    elif has_publication:
+        expected_publication_keys = {
+            "hash_definition", "report_payload_hash", "model_byte_hash",
+            "mapping_byte_hash", "markdown_byte_hash",
+        }
+        if not isinstance(publication, Mapping) or set(publication) != expected_publication_keys:
+            failures.append("report publication output binding is invalid")
+            publication = {}
         payload = {key: value for key, value in report.items() if key != "publication"}
         if publication.get("report_payload_hash") != _hash(payload):
             failures.append("report publication payload hash mismatch")
@@ -1214,26 +1285,32 @@ def audit_three_day_k4_daily_mapping(
             "mapping": publication.get("mapping_byte_hash"),
             "markdown": publication.get("markdown_byte_hash"),
         }
-    actual_files = {
-        "model": inputs.model, "mapping": inputs.mapping, "markdown": inputs.markdown,
-    }
-    if isinstance(output_hashes, Mapping):
-        for label, path in actual_files.items():
-            try:
-                actual = hashlib.sha256(path.read_bytes()).hexdigest()
-            except OSError as error:
-                failures.append(f"{label} output could not be read: {error}")
+        if "output_binding_schema_version" in report:
+            failures.append("publication output binding has legacy version metadata")
+    elif has_legacy:
+        output_hashes = report.get("output_hashes")
+        if report.get("output_binding_schema_version") != "legacy-output-hashes-v1":
+            failures.append("legacy report output binding version is invalid")
+        if not isinstance(output_hashes, Mapping) or set(output_hashes) != {"model", "mapping", "markdown"}:
+            failures.append("legacy report output binding is invalid")
+            output_hashes = {}
+    else:
+        failures.append("report output binding is missing")
+
+    if output_hashes is not None:
+        for label in ("model", "mapping", "markdown"):
+            raw = input_bytes[label]
+            if raw is None:
                 continue
+            actual = hashlib.sha256(raw).hexdigest()
             if output_hashes.get(label) != actual:
                 failures.append(f"{label} report output hash mismatch")
-    elif output_hashes is not None:
-        failures.append("report output hashes are invalid")
 
     hashes = {
-        "report_file_hash": hashlib.sha256(inputs.report.read_bytes()).hexdigest() if inputs.report.is_file() else None,
-        "model_file_hash": hashlib.sha256(inputs.model.read_bytes()).hexdigest() if inputs.model.is_file() else None,
-        "mapping_file_hash": hashlib.sha256(inputs.mapping.read_bytes()).hexdigest() if inputs.mapping.is_file() else None,
-        "markdown_file_hash": hashlib.sha256(inputs.markdown.read_bytes()).hexdigest() if inputs.markdown.is_file() else None,
+        "report_file_hash": hashlib.sha256(input_bytes["report"]).hexdigest() if input_bytes["report"] is not None else None,
+        "model_file_hash": hashlib.sha256(input_bytes["model"]).hexdigest() if input_bytes["model"] is not None else None,
+        "mapping_file_hash": hashlib.sha256(input_bytes["mapping"]).hexdigest() if input_bytes["mapping"] is not None else None,
+        "markdown_file_hash": hashlib.sha256(input_bytes["markdown"]).hexdigest() if input_bytes["markdown"] is not None else None,
         "pre_test_freeze_hash": report.get("pre_test_freeze_hash"),
         "model_artifact_hash": model.get("artifact_hash"),
         "mapping_artifact_hash": mapping.get("artifact_hash"),
