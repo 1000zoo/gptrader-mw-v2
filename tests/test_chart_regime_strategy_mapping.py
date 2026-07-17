@@ -1085,6 +1085,20 @@ def test_canonical_report_reuses_large_already_canonical_daily_grid() -> None:
     assert len(json.dumps(normalized, separators=(",", ":"))) < 12_000_000
 
 
+def test_canonical_report_converts_nested_immutable_mapping_to_json_types() -> None:
+    from types import MappingProxyType
+    from scripts.chart_regime_strategy_mapping import _canonicalize_report
+
+    source = {"archives": [MappingProxyType({"sha256": "a" * 64})]}
+
+    normalized = _canonicalize_report(source)
+
+    assert type(normalized) is dict
+    assert type(normalized["archives"]) is list
+    assert type(normalized["archives"][0]) is dict
+    assert json.loads(json.dumps(normalized)) == normalized
+
+
 def test_all_eight_walk_forward_fold_dates_are_accepted() -> None:
     args = parse_walk_forward_args([
         "--symbol", "BTCUSDT",

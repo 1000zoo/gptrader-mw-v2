@@ -4321,12 +4321,16 @@ def _canonicalize_report(value: object) -> object:
         normalized = {
             key: _canonicalize_report(item) for key, item in value.items()
         }
-        if all(normalized[key] is item for key, item in value.items()):
+        if type(value) is dict and all(
+            normalized[key] is item for key, item in value.items()
+        ):
             return value
         return {key: normalized[key] for key in sorted(normalized)}
     if isinstance(value, (tuple, list)):
         normalized = [_canonicalize_report(item) for item in value]
-        if all(left is right for left, right in zip(normalized, value)):
+        if type(value) is list and all(
+            left is right for left, right in zip(normalized, value)
+        ):
             return value
         return normalized
     if isinstance(value, float) and not math.isfinite(value):
