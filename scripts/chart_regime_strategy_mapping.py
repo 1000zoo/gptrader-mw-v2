@@ -24,6 +24,7 @@ from io import TextIOWrapper
 from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 from urllib.request import urlopen
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -235,7 +236,10 @@ def _reject_nested_test_material(value: object, path: tuple[str, ...] = ()) -> N
             normalized = str(key).strip().lower().replace("-", "_")
             if normalized in forbidden or normalized.startswith("test_"):
                 exact_path = (*path, str(key))
-                if exact_path == ("mapping", "research_profile", "fold", "test"):
+                if exact_path in {
+                    ("model", "research_profile", "fold", "test"),
+                    ("mapping", "research_profile", "fold", "test"),
+                }:
                     expected_interval = ThreeDayDailyResearchProfile().canonical_payload()[
                         "fold"
                     ]["test"]
@@ -252,19 +256,6 @@ def _reject_nested_test_material(value: object, path: tuple[str, ...] = ()) -> N
     elif isinstance(value, (tuple, list)):
         for index, item in enumerate(value):
             _reject_nested_test_material(item, (*path, str(index)))
-
-
-def _without_test_metadata(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {
-            key: _without_test_metadata(item)
-            for key, item in value.items()
-            if str(key).strip().lower().replace("-", "_") != "test"
-            and not str(key).strip().lower().replace("-", "_").startswith("test_")
-        }
-    if isinstance(value, (tuple, list)):
-        return [_without_test_metadata(item) for item in value]
-    return value
 
 
 @dataclass(frozen=True)
@@ -844,12 +835,29 @@ class ThreeDayPhaseEvidence:
 
     def __post_init__(self) -> None:
         for descriptor in self.archive_descriptors:
+            source_url = descriptor.get("source_url") if isinstance(descriptor, Mapping) else None
+            member_name = descriptor.get("member_name") if isinstance(descriptor, Mapping) else None
+            byte_count = descriptor.get("byte_count") if isinstance(descriptor, Mapping) else None
+            sha256 = descriptor.get("sha256") if isinstance(descriptor, Mapping) else None
+            parsed_url = urlparse(source_url) if isinstance(source_url, str) else None
             if (
                 not isinstance(descriptor, Mapping)
                 or not {"source_url", "member_name", "byte_count", "sha256"}
                 <= set(descriptor)
+                or parsed_url is None
+                or parsed_url.scheme != "https"
+                or not parsed_url.netloc
+                or not isinstance(member_name, str)
+                or not member_name
+                or member_name != member_name.strip()
+                or not isinstance(byte_count, int)
+                or isinstance(byte_count, bool)
+                or byte_count < 0
+                or not isinstance(sha256, str)
+                or len(sha256) != 64
+                or any(character not in "0123456789abcdef" for character in sha256)
             ):
-                raise ValueError("archive descriptor requires URL, member, bytes, and SHA256")
+                raise ValueError("archive descriptor URL, member, bytes, or SHA256 is invalid")
         expected_hashes = {
             "feature_provenance_hash": self.feature_provenance,
             "feature_source_coverage_hash": self.feature_source_coverage,
@@ -857,7 +865,7 @@ class ThreeDayPhaseEvidence:
         }
         for name, payload in expected_hashes.items():
             expected = getattr(self.run_identity, name, None)
-            if payload and expected != _canonical_hash(payload):
+            if expected != _canonical_hash(payload):
                 raise ValueError(f"phase evidence {name} is inconsistent")
 
     def canonical_payload(self) -> dict[str, object]:
@@ -1539,7 +1547,7 @@ def run_three_day_daily_k4_experiment(
     if hasattr(final_mapping, "candidate_assessments"):
         freeze_mapping_payload["artifact_hash"] = daily_mapping_artifact_hash(final_mapping)
     freeze = create_pre_test_freeze(
-        model=_without_test_metadata(_freeze_boundary_payload(model)),
+        model=_freeze_boundary_payload(model),
         candidate_manifest=_freeze_boundary_payload(manifest),
         evidence={
             "mapping": _freeze_boundary_payload(mapping_evidence),

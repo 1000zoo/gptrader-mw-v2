@@ -388,6 +388,64 @@ def test_three_day_orchestrator_enforces_exact_pretest_order_and_strict_test_pol
     assert calls[-1][2]["report"] == result
 
 
+def _narrow_orchestration_dependencies(model, calls):
+    from scripts.chart_regime_strategy_mapping import ThreeDayExperimentDependencies
+
+    def called(name, result):
+        def invoke(*args, **kwargs):
+            calls.append(name)
+            return result
+        return invoke
+
+    return ThreeDayExperimentDependencies(
+        verify_sources=called("verify", {}),
+        fit_and_freeze_model=called("model", model),
+        freeze_candidates=called("manifest", {"manifest_hash": "b" * 64}),
+        load_mapping_evidence=called("mapping-evidence", {}),
+        build_strict_mapping=called("initial-mapping", {"artifact_hash": "c" * 64}),
+        load_validation_evidence=called("validation-evidence", {}),
+        report_validation_sensitivity=called("sensitivity", {}),
+        rebuild_final_strict_mapping=called("final-mapping", {"artifact_hash": "d" * 64}),
+        select_global_fixed_baseline=called("baseline", {"decision": "cash"}),
+        load_test=lambda freeze: (
+            calls.append("load-test")
+            or {"provenance": _required_test_provenance(freeze)}
+        ),
+        run_test_comparisons=called("comparisons", {}),
+        publish=called("publish", None),
+    )
+
+
+def test_orchestrator_rejects_model_test_results_before_test_read() -> None:
+    from scripts.chart_regime_strategy_mapping import run_three_day_daily_k4_experiment
+
+    calls = []
+    dependencies = _narrow_orchestration_dependencies(
+        {"artifact_hash": "a" * 64, "nested": {"test_results": {"return": "1"}}},
+        calls,
+    )
+
+    with pytest.raises(ValueError, match="Test"):
+        run_three_day_daily_k4_experiment(dependencies=dependencies)
+
+    assert "load-test" not in calls
+
+
+def test_orchestrator_allows_exact_canonical_model_profile_test_interval() -> None:
+    from scripts.chart_regime_strategy_mapping import run_three_day_daily_k4_experiment
+    from src.domain.regime import ThreeDayDailyResearchProfile
+
+    calls = []
+    dependencies = _narrow_orchestration_dependencies({
+        "artifact_hash": "a" * 64,
+        "research_profile": ThreeDayDailyResearchProfile().canonical_payload(),
+    }, calls)
+
+    run_three_day_daily_k4_experiment(dependencies=dependencies)
+
+    assert "load-test" in calls
+
+
 def test_identical_orchestration_runs_have_identical_canonical_reports() -> None:
     from scripts.chart_regime_strategy_mapping import (
         ThreeDayExperimentDependencies, run_three_day_daily_k4_experiment,
@@ -884,6 +942,52 @@ def test_phase_evidence_payload_embeds_rows_assignments_and_recomputable_hash() 
         row["component_fingerprint"] for row in payload["calendar_rows"]
     ]
     assert independently_reconstructed == payload["component_assignments"]
+
+
+def _empty_phase_evidence(*, identity_hash: str, archive_descriptors=()):
+    from scripts.chart_regime_strategy_mapping import ThreeDayPhaseEvidence
+
+    identity = SimpleNamespace(
+        canonical_payload=lambda: {}, digest="1" * 64,
+        feature_provenance_hash=identity_hash,
+        feature_source_coverage_hash=identity_hash,
+        feature_unavailable_counts_hash=identity_hash,
+    )
+    return ThreeDayPhaseEvidence(
+        phase="mapping_fit", rows=(), calendar=(), assignments=(),
+        run_identity=identity, ledger_path=Path("mapping.jsonl"),
+        ledger_hash="2" * 64, archive_descriptors=archive_descriptors,
+        feature_provenance={}, feature_source_coverage={},
+        feature_unavailable_counts={},
+    )
+
+
+def test_empty_phase_provenance_still_requires_exact_identity_hash() -> None:
+    with pytest.raises(ValueError, match="feature_provenance_hash"):
+        _empty_phase_evidence(identity_hash="f" * 64)
+
+
+def test_empty_phase_provenance_accepts_canonical_empty_hash() -> None:
+    evidence = _empty_phase_evidence(identity_hash=_canonical_hash({}))
+
+    assert evidence.canonical_payload()["feature_provenance_hash"] == _canonical_hash({})
+
+
+@pytest.mark.parametrize("descriptor", (
+    {"source_url": "", "member_name": "data.csv", "byte_count": 1, "sha256": "a" * 64},
+    {"source_url": "not-a-url", "member_name": "data.csv", "byte_count": 1, "sha256": "a" * 64},
+    {"source_url": "https://example.com/a.zip", "member_name": "", "byte_count": 1, "sha256": "a" * 64},
+    {"source_url": "https://example.com/a.zip", "member_name": "data.csv", "byte_count": -1, "sha256": "a" * 64},
+    {"source_url": "https://example.com/a.zip", "member_name": "data.csv", "byte_count": "1", "sha256": "a" * 64},
+    {"source_url": "https://example.com/a.zip", "member_name": "data.csv", "byte_count": True, "sha256": "a" * 64},
+    {"source_url": "https://example.com/a.zip", "member_name": "data.csv", "byte_count": 1, "sha256": "A" * 64},
+    {"source_url": "https://example.com/a.zip", "member_name": "data.csv", "byte_count": 1, "sha256": "short"},
+))
+def test_phase_archive_descriptor_rejects_unverifiable_fields(descriptor) -> None:
+    with pytest.raises(ValueError, match="archive descriptor"):
+        _empty_phase_evidence(
+            identity_hash=_canonical_hash({}), archive_descriptors=(descriptor,)
+        )
 
 
 def test_canonical_report_reuses_large_already_canonical_daily_grid() -> None:
