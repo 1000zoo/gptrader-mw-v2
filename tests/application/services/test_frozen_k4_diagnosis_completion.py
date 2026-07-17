@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
+from datetime import datetime, timedelta, timezone
 import math
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
@@ -13,17 +15,26 @@ from src.application.services.frozen_k4_failure_decomposition import (
 )
 from src.application.services.frozen_k4_diagnosis_completion import (
     ComponentZeroOODAnalysis,
+    EmpiricalCentroidRow,
+    EmpiricalFeatureContributionRow,
+    EmpiricalScopeSummary,
     OODFamilySummaryRow,
     OODFeatureSummaryRow,
     _canonical_registry_payload,
     _canonical_registry_sha256,
     _meets_threshold,
+    build_full_sample_empirical_reference,
     summarize_component_zero_ood,
+)
+from src.application.services.frozen_k4_failure_replay import (
+    FrozenK4HalfReplay,
+    FrozenK4Replay,
 )
 from src.domain.regime import (
     THREE_DAY_CHART_FEATURE_REGISTRY_V1,
     THREE_DAY_CHART_FEATURE_SCHEMA_VERSION,
 )
+from src.domain.regime.frozen_k4_failure_diagnostics import MatchedPair
 
 
 REGISTRY = THREE_DAY_CHART_FEATURE_REGISTRY_V1
@@ -398,3 +409,278 @@ def test_analysis_rejects_forged_registry_hash_feature_and_family_provenance() -
     )
     with pytest.raises(ValueError, match="family"):
         replace(result, family_rows=(wrong_members,) + result.family_rows[1:])
+
+
+EMPIRICAL_NAMES = NAMES[:6]
+
+
+def _empirical_vector(index: int, scaled: tuple[float, ...]) -> SimpleNamespace:
+    anchor = datetime(2021, 1, 1, tzinfo=timezone.utc) + timedelta(days=index)
+    medians = (1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
+    scales = (1.0, 2.0, 1.0, 2.0, 1.0, 2.0)
+    values = MappingProxyType(
+        {
+            name: median_value + scale * coordinate
+            for name, median_value, scale, coordinate in zip(
+                EMPIRICAL_NAMES, medians, scales, scaled
+            )
+        }
+    )
+    return SimpleNamespace(anchor_at=anchor, values=values)
+
+
+def _empirical_fixture() -> tuple[FrozenK4Replay, SimpleNamespace, tuple[SimpleNamespace, ...]]:
+    primary_fit = SimpleNamespace(
+        feature_names=EMPIRICAL_NAMES,
+        lower_bounds=(0.0,) * 6,
+        upper_bounds=(5.0, 10.0, 7.0, 12.0, 9.0, 14.0),
+        medians=(1.0, 2.0, 3.0, 4.0, 5.0, 6.0),
+        scales=(1.0, 2.0, 1.0, 2.0, 1.0, 2.0),
+        fingerprints=("1" * 24, "2" * 24),
+        means=((0.0,) * 6, (1.0,) * 6),
+    )
+
+    def half(label: str, count: int, assignments: tuple[int, ...], prefix: str) -> FrozenK4HalfReplay:
+        half_fit = SimpleNamespace(
+            feature_names=EMPIRICAL_NAMES,
+            fingerprints=(prefix * 24, chr(ord(prefix) + 1) * 24),
+            means=((9.0,) * 6, (8.0,) * 6),
+        )
+        primary_indices = (1, 0) if label == "A" else (0, 1)
+        pairs = tuple(
+            MatchedPair(
+                half_label=label,
+                primary_component_fingerprint=primary_fit.fingerprints[primary_index],
+                half_component_fingerprint=half_fit.fingerprints[half_index],
+                primary_component_index=primary_index,
+                half_component_index=half_index,
+                matching_cost=float(half_index),
+                euclidean_distance=float(half_index),
+            )
+            for half_index, primary_index in enumerate(primary_indices)
+        )
+        return FrozenK4HalfReplay(
+            receipt=SimpleNamespace(half_label=label, anchor_count=count),
+            fit=half_fit,
+            assignments=assignments,
+            posterior_probabilities=(),
+            projected_centroids=(),
+            projected_covariances=(),
+            precisions=(),
+            precisions_cholesky=(),
+            cost_matrix=(),
+            hungarian_assignment=(),
+            matched_pairs=pairs,
+            pair_euclidean_distances=(),
+            component_weights=(),
+        )
+
+    halves = (
+        half("A", 4, (0, 1, 1, 1), "3"),
+        half("B", 3, (0, 0, 0), "5"),
+    )
+    vectors = (
+        _empirical_vector(0, (3.0, 3.0, 0.0, 0.0, 0.0, 0.0)),
+        _empirical_vector(1, (0.0,) * 6),
+        _empirical_vector(2, (0.0,) * 6),
+        _empirical_vector(3, (0.0,) * 6),
+        _empirical_vector(4, (2.0,) * 6),
+        _empirical_vector(5, (2.0,) * 6),
+        _empirical_vector(6, (20.0,) * 6),  # proves frozen upper clipping is used
+    )
+    replay = FrozenK4Replay(
+        input_identity=SimpleNamespace(),
+        dependency_metadata={},
+        status=SimpleNamespace(status="reproduced"),
+        half_replays=halves,
+        # Deliberately disagrees with both half assignment arrays.
+        primary_assignments=(0, 0, 0, 0, 1, 1, 1),
+        primary_ood_rows=tuple(
+            SimpleNamespace(
+                anchor_at=row.anchor_at.isoformat().replace("+00:00", "Z"),
+                assigned_component_index=component,
+                assigned_component_fingerprint=primary_fit.fingerprints[component],
+            )
+            for row, component in zip(vectors, (0, 0, 0, 0, 1, 1, 1))
+        ),
+    )
+    return replay, primary_fit, vectors
+
+
+def test_full_sample_empirical_reference_uses_frozen_half_membership_and_primary_coordinates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replay, primary_fit, vectors = _empirical_fixture()
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("fit, matching, and rematching are forbidden")
+
+    monkeypatch.setattr(
+        "src.application.services.frozen_k4_failure_replay.SklearnClusterDiagnostic.fit",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        "src.application.services.frozen_k4_failure_replay.linear_sum_assignment",
+        forbidden,
+    )
+    monkeypatch.setattr("sklearn.preprocessing.RobustScaler.fit", forbidden)
+
+    result = build_full_sample_empirical_reference(replay, primary_fit, vectors)
+
+    assert isinstance(result, EmpiricalScopeSummary)
+    assert result.sample_scope == "full_sample"
+    assert result.spacing_days is None and result.offset is None
+    assert result.selected_sample_count == 7
+    assert result.maximum_drift_half_label == "B"
+    assert result.maximum_drift_primary_component_index == 0
+    assert result.maximum_drift_half_component_index == 0
+    assert result.maximum_drift_primary_component_fingerprint == "1" * 24
+    assert result.maximum_drift_half_component_fingerprint == "5" * 24
+    assert result.maximum_drift_distance == pytest.approx(math.sqrt(128.0 / 3.0))
+    assert result.top_five_drift_features == EMPIRICAL_NAMES[:5]
+
+    rows = {(row.half_label, row.half_component_index): row for row in result.centroid_rows}
+    assert rows[("A", 0)].sample_count == 1
+    assert rows[("A", 0)].sample_share == pytest.approx(0.25)
+    assert rows[("A", 0)].empirical_centroid == (3.0, 3.0, 0.0, 0.0, 0.0, 0.0)
+    assert rows[("A", 0)].distance == pytest.approx(math.sqrt(12.0))
+    assert rows[("A", 1)].sample_count == 3
+    assert rows[("A", 1)].sample_share == pytest.approx(0.75)
+    assert rows[("A", 1)].distance == 0.0
+    assert rows[("B", 1)].sample_count == 0
+    assert rows[("B", 1)].sample_share == 0.0
+    assert rows[("B", 1)].centroid_status == "insufficient_sample"
+    assert rows[("B", 1)].empirical_centroid is None and rows[("B", 1)].distance is None
+    assert all(
+        row.metric_name == "full_sample_empirical_centroid_distance"
+        and row.assignment_source == "frozen_reproduced_half_assignment"
+        and row.refit_performed is False
+        and row.rematch_performed is False
+        and row.diagnostic_only is True
+        for row in rows.values()
+    )
+    assert sum(row.sample_count for row in rows.values()) == 7
+
+    winner_features = tuple(
+        row for row in result.feature_rows if row.half_label == "B" and row.half_component_index == 0
+    )
+    assert tuple(row.feature_name for row in winner_features) == EMPIRICAL_NAMES
+    assert tuple(row.rank for row in winner_features) == (1, 2, 3, 4, 5, 6)
+    assert tuple(row.squared_distance for row in winner_features) == pytest.approx((64.0 / 9.0,) * 6)
+    assert tuple(row.contribution_ratio for row in winner_features) == pytest.approx((1 / 6,) * 6)
+    zero_features = tuple(
+        row for row in result.feature_rows if row.half_label == "A" and row.half_component_index == 1
+    )
+    assert all(row.contribution_ratio == 0.0 for row in zero_features)
+    assert all(isinstance(row, EmpiricalFeatureContributionRow) for row in result.feature_rows)
+    with pytest.raises(FrozenInstanceError):
+        result.selected_sample_count = 1  # type: ignore[misc]
+
+
+def test_empirical_contract_rejects_forged_rows_and_summary() -> None:
+    replay, primary_fit, vectors = _empirical_fixture()
+    result = build_full_sample_empirical_reference(replay, primary_fit, vectors)
+    computed = result.centroid_rows[0]
+    empty = result.centroid_rows[-1]
+    feature = result.feature_rows[0]
+
+    with pytest.raises(ValueError, match="full-sample"):
+        replace(computed, spacing_days=3)
+    with pytest.raises(ValueError, match="status"):
+        replace(computed, centroid_status="insufficient_sample")
+    with pytest.raises(ValueError, match="status"):
+        replace(empty, distance=0.0)
+    with pytest.raises(ValueError, match="fingerprint"):
+        replace(computed, primary_component_fingerprint="BAD")
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        replace(feature, squared_distance=float("nan"))
+    with pytest.raises(ValueError, match="rank"):
+        replace(feature, rank=0)
+    with pytest.raises(ValueError, match="maximum"):
+        replace(result, maximum_drift_distance=0.0)
+    with pytest.raises(ValueError, match="top-five"):
+        replace(result, top_five_drift_features=tuple(reversed(result.top_five_drift_features)))
+    with pytest.raises(ValueError, match="feature"):
+        replace(result, feature_rows=result.feature_rows[:-1])
+    missing_zero_feature = tuple(
+        row for row in result.feature_rows if row.feature_name != "rv_4h"
+    )
+    with pytest.raises(ValueError, match="feature"):
+        replace(
+            result,
+            feature_rows=missing_zero_feature,
+            top_five_drift_features=result.top_five_drift_features,
+        )
+    mixed_origin = replace(result.centroid_rows[0], offset_origin_anchor="2021-01-02T00:00:00Z")
+    with pytest.raises(ValueError, match="origin"):
+        replace(result, centroid_rows=(mixed_origin,) + result.centroid_rows[1:])
+    forged_share = replace(result.centroid_rows[0], sample_share=0.5)
+    with pytest.raises(ValueError, match="share"):
+        replace(result, centroid_rows=(forged_share,) + result.centroid_rows[1:])
+    duplicate_identity = replace(
+        result.centroid_rows[1],
+        primary_component_index=result.centroid_rows[0].primary_component_index,
+        half_component_index=result.centroid_rows[0].half_component_index,
+        primary_component_fingerprint=result.centroid_rows[0].primary_component_fingerprint,
+        half_component_fingerprint=result.centroid_rows[0].half_component_fingerprint,
+    )
+    with pytest.raises(ValueError, match="unique"):
+        replace(result, centroid_rows=(result.centroid_rows[0], duplicate_identity) + result.centroid_rows[2:])
+
+
+def test_empirical_maximum_ties_use_half_then_primary_then_half_component_order() -> None:
+    replay, primary_fit, vectors = _empirical_fixture()
+    half_tie_vectors = vectors[:4] + tuple(
+        _empirical_vector(index, (2.0, 2.0, 1.0, 1.0, 1.0, 1.0))
+        for index in range(4, 7)
+    )
+    half_tie = build_full_sample_empirical_reference(replay, primary_fit, half_tie_vectors)
+    assert half_tie.maximum_drift_half_label == "A"
+    assert half_tie.maximum_drift_primary_component_index == 1
+    assert half_tie.maximum_drift_half_component_index == 0
+
+    component_tie_vectors = (
+        _empirical_vector(0, (2.0, 1.0, 1.0, 1.0, 1.0, 1.0)),
+        _empirical_vector(1, (1.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+        _empirical_vector(2, (1.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+        _empirical_vector(3, (1.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+    ) + tuple(_empirical_vector(index, (0.0,) * 6) for index in range(4, 7))
+    component_tie = build_full_sample_empirical_reference(replay, primary_fit, component_tie_vectors)
+    assert component_tie.maximum_drift_half_label == "A"
+    assert component_tie.maximum_drift_primary_component_index == 0
+    assert component_tie.maximum_drift_half_component_index == 1
+
+
+def _namespace_replace(value: SimpleNamespace, **changes) -> SimpleNamespace:
+    return SimpleNamespace(**(vars(value) | changes))
+
+
+def _forge_replay_status(replay: FrozenK4Replay, status: str) -> FrozenK4Replay:
+    object.__setattr__(replay, "status", SimpleNamespace(status=status))
+    return replay
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda replay, fit, vectors: (replay, fit, list(vectors)), "immutable"),
+        (lambda replay, fit, vectors: (replay, fit, vectors[:-1]), "length"),
+        (lambda replay, fit, vectors: (_forge_replay_status(replay, "mismatch"), fit, vectors), "reproduced"),
+        (lambda replay, fit, vectors: (replace(replay, primary_ood_rows=replay.primary_ood_rows[:-1]), fit, vectors), "length"),
+        (lambda replay, fit, vectors: (replace(replay, primary_ood_rows=(SimpleNamespace(**(vars(replay.primary_ood_rows[0]) | {"assigned_component_index": 1})),) + replay.primary_ood_rows[1:]), fit, vectors), "OOD"),
+        (lambda replay, fit, vectors: (replay, _namespace_replace(fit, scales=(1.0, 0.0, 1.0, 2.0, 1.0, 2.0)), vectors), "scales"),
+        (lambda replay, fit, vectors: (replay, _namespace_replace(fit, lower_bounds=(11.0,) + fit.lower_bounds[1:]), vectors), "bounds"),
+        (lambda replay, fit, vectors: (replay, _namespace_replace(fit, means=((0.0,), fit.means[1])), vectors), "dimensions"),
+        (lambda replay, fit, vectors: (replay, fit, vectors[:1] + (_empirical_vector(1, (float("nan"),) * 6),) + vectors[2:]), "finite"),
+        (lambda replay, fit, vectors: (replace(replay, half_replays=(replace(replay.half_replays[0], matched_pairs=replay.half_replays[0].matched_pairs[:1]), replay.half_replays[1])), fit, vectors), "complete"),
+        (lambda replay, fit, vectors: (replace(replay, half_replays=(replace(replay.half_replays[0], matched_pairs=(replay.half_replays[0].matched_pairs[0], replay.half_replays[0].matched_pairs[0])), replay.half_replays[1])), fit, vectors), "one-to-one"),
+        (lambda replay, fit, vectors: (replace(replay, half_replays=(replace(replay.half_replays[0], matched_pairs=(replace(replay.half_replays[0].matched_pairs[0], primary_component_fingerprint="1" * 24), replay.half_replays[0].matched_pairs[1])), replay.half_replays[1])), fit, vectors), "index-fingerprint"),
+        (lambda replay, fit, vectors: (replace(replay, half_replays=(replace(replay.half_replays[0], assignments=(9,) + replay.half_replays[0].assignments[1:]), replay.half_replays[1])), fit, vectors), "assignment index"),
+        (lambda replay, fit, vectors: (replace(replay, half_replays=(replace(replay.half_replays[0], receipt=SimpleNamespace(half_label="A", anchor_count=3)), replay.half_replays[1])), fit, vectors), "receipt count"),
+    ],
+)
+def test_full_sample_empirical_reference_rejects_invalid_frozen_inputs(mutate, message: str) -> None:
+    replay, primary_fit, vectors = _empirical_fixture()
+    bad_replay, bad_fit, bad_vectors = mutate(replay, primary_fit, vectors)
+    with pytest.raises(ValueError, match=message):
+        build_full_sample_empirical_reference(bad_replay, bad_fit, bad_vectors)
