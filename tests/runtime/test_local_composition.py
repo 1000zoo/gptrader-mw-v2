@@ -47,6 +47,43 @@ def test_enabled_regime_selection_fails_fast_when_artifact_files_are_missing(tmp
         create_local_runtime(settings)
 
 
+@pytest.mark.parametrize("three_day_model", ["valid", "invalid"])
+def test_three_day_research_model_is_never_auto_loaded_and_legacy_opt_in_rejects_it(
+    tmp_path, three_day_model
+) -> None:
+    from tests.infrastructure.regime.test_three_day_k4_model_artifact import _artifact
+
+    model_path = tmp_path / "chart-regime-strategy-mapping-btcusdt-3d-k4-daily-model.json"
+    mapping_path = tmp_path / "chart-regime-strategy-mapping-btcusdt-3d-k4-daily-mapping.json"
+    model_path.write_text(
+        _artifact().to_json() if three_day_model == "valid" else "{invalid-json",
+        encoding="utf-8",
+    )
+    mapping_path.write_text("{invalid-three-day-mapping", encoding="utf-8")
+    disabled = RuntimeSettings(
+        database_url=str(tmp_path / f"disabled-{three_day_model}.sqlite3"),
+        regime_model_artifact_path=str(model_path),
+        regime_mapping_artifact_path=str(mapping_path),
+    )
+
+    runtime = create_local_runtime(disabled)
+
+    assert runtime.regime_selection_scheduler is None
+    assert runtime.regime_model_artifact is None
+    assert runtime.regime_mapping_artifact is None
+
+    enabled = replace(
+        disabled,
+        database_url=str(tmp_path / f"enabled-{three_day_model}.sqlite3"),
+        regime_selection_enabled=True,
+        regime_candidate_definition_hash="a" * 64,
+        regime_candidate_universe_hash="b" * 64,
+        regime_data_provenance_hash="c" * 64,
+    )
+    with pytest.raises(ValueError, match="artifact|JSON|fields"):
+        create_local_runtime(enabled)
+
+
 def test_enabled_regime_selection_loads_frozen_artifacts_without_changing_trade_strategy(tmp_path) -> None:
     artifact_dir = tmp_path / "artifacts"
     original_model = _model()

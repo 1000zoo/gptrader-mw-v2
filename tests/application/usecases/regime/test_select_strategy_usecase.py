@@ -203,6 +203,39 @@ def test_new_cluster_requires_two_consecutive_observations():
     )
 
 
+def test_legacy_selector_keeps_seven_day_windows_four_hour_cadence_and_two_confirmations():
+    from src.domain.regime import feature_window
+
+    first_boundary = START + timedelta(hours=4)
+    second_boundary = first_boundary + timedelta(hours=4)
+
+    assert feature_window(first_boundary) == (
+        first_boundary - timedelta(days=7),
+        first_boundary,
+    )
+    first = _select(
+        previous=_state(),
+        assignment=_assignment("b"),
+        boundary=first_boundary,
+    )
+    assert first.state.current_cluster_fingerprint == "a"
+    assert first.state.pending_cluster_fingerprint == "b"
+    assert first.state.pending_confirmation_count == 1
+
+    assert feature_window(second_boundary) == (
+        second_boundary - timedelta(days=7),
+        second_boundary,
+    )
+    second = _select(
+        previous=first.state,
+        assignment=_assignment("b"),
+        boundary=second_boundary,
+    )
+    assert second.state.current_cluster_fingerprint == "b"
+    assert second.state.active_strategy_profile_id == "strategy-y"
+    assert second.state.pending_confirmation_count == 0
+
+
 def test_different_candidate_resets_normal_confirmation():
     pending_b = _select(previous=_state(), assignment=_assignment("b")).state
 

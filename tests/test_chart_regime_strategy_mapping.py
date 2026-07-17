@@ -2916,6 +2916,69 @@ def test_three_day_research_manifest_does_not_mutate_deferred_registry() -> None
     assert REGISTRY_PATH.read_bytes() == before
 
 
+def test_minimal_complete_three_day_research_run_does_not_mutate_deferred_registry() -> None:
+    from scripts.chart_regime_strategy_mapping import (
+        ThreeDayExperimentDependencies,
+        build_three_day_daily_candidate_manifest,
+        run_three_day_daily_k4_experiment,
+    )
+    from scripts.deferred_strategy_registry import REGISTRY_PATH
+
+    before = REGISTRY_PATH.read_bytes()
+    calls = []
+
+    def stage(name, value):
+        def invoke(*args, **kwargs):
+            calls.append(name)
+            return value
+
+        return invoke
+
+    model = {"artifact_hash": "a" * 64}
+    dependencies = ThreeDayExperimentDependencies(
+        verify_sources=stage("verify_sources", {"source_hash": "b" * 64}),
+        fit_and_freeze_model=stage("fit_and_freeze_model", model),
+        freeze_candidates=lambda: (
+            calls.append("freeze_candidates")
+            or build_three_day_daily_candidate_manifest(expected_count=459)
+        ),
+        load_mapping_evidence=stage("load_mapping_evidence", {"ledger_hash": "c" * 64}),
+        build_strict_mapping=stage("build_strict_mapping", {"artifact_hash": "d" * 64}),
+        load_validation_evidence=stage("load_validation_evidence", {"ledger_hash": "e" * 64}),
+        report_validation_sensitivity=stage("report_validation_sensitivity", {"strict": {}}),
+        rebuild_final_strict_mapping=stage(
+            "rebuild_final_strict_mapping", {"artifact_hash": "f" * 64}
+        ),
+        select_global_fixed_baseline=stage(
+            "select_global_fixed_baseline", {"decision": "cash"}
+        ),
+        load_test=lambda freeze: (
+            calls.append("load_test")
+            or {"provenance": _required_test_provenance(freeze)}
+        ),
+        run_test_comparisons=stage("run_test_comparisons", {"cash": {"status": "ok"}}),
+        publish=stage("publish", None),
+    )
+
+    run_three_day_daily_k4_experiment(dependencies=dependencies)
+
+    assert calls == [
+        "verify_sources",
+        "fit_and_freeze_model",
+        "freeze_candidates",
+        "load_mapping_evidence",
+        "build_strict_mapping",
+        "load_validation_evidence",
+        "report_validation_sensitivity",
+        "rebuild_final_strict_mapping",
+        "select_global_fixed_baseline",
+        "load_test",
+        "run_test_comparisons",
+        "publish",
+    ]
+    assert REGISTRY_PATH.read_bytes() == before
+
+
 def test_three_day_research_artifacts_are_not_implicitly_loaded_by_local_runtime(
     tmp_path,
 ) -> None:
