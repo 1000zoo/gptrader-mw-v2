@@ -10,7 +10,7 @@ domain semantics as the researched system.
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
@@ -19,6 +19,11 @@ import math
 from pathlib import Path
 import sys
 from typing import Callable, Mapping, Sequence
+
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+from scipy.stats import chi2
+from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -115,7 +120,9 @@ def _default_manifest() -> Mapping[str, object]:
     )
 
     return _freeze_boundary_payload(
-        build_three_day_daily_candidate_manifest(expected_count=459)
+        build_three_day_daily_candidate_manifest(
+            include_deferred=True, expected_count=459
+        )
     )
 
 
@@ -269,6 +276,280 @@ def _fit_cluster_model(vectors, provenance, code_hash: str):
     )
 
 
+_INDEPENDENT_GATE_THRESHOLDS = {
+    "minimum_adjusted_rand_index": 0.8,
+    "minimum_normalized_mutual_information": 0.8,
+    "maximum_matched_centroid_distance": 0.5,
+    "maximum_prevalence_drift": 0.2,
+    "maximum_low_confidence_rate": 0.25,
+    "maximum_distance_exceedance_rate": 0.02,
+}
+
+
+def _independent_vector_hash(vectors) -> str:
+    from src.domain.regime import THREE_DAY_CHART_FEATURE_REGISTRY_V1
+
+    return _hash({
+        "schema_version": vectors[0].schema_version if vectors else None,
+        "registry_names": [spec.name for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1],
+        "vectors": [{
+            "symbol": vector.symbol,
+            "anchor_at": vector.anchor_at.isoformat(),
+            "window_start_at": vector.window_start_at.isoformat(),
+            "values": list(vector.values.items()),
+        } for vector in vectors],
+    })
+
+
+def _independent_project_centroids(block_fit, primary) -> np.ndarray:
+    if block_fit.feature_names != primary.feature_names:
+        raise ValueError("independent centroid projection feature mismatch")
+    raw = (
+        np.asarray(block_fit.means, dtype=float)
+        * np.asarray(block_fit.scales, dtype=float)
+        + np.asarray(block_fit.medians, dtype=float)
+    )
+    clipped = np.clip(
+        raw, np.asarray(primary.lower_bounds, dtype=float),
+        np.asarray(primary.upper_bounds, dtype=float),
+    )
+    return (
+        clipped - np.asarray(primary.medians, dtype=float)
+    ) / np.asarray(primary.scales, dtype=float)
+
+
+def _independent_technical_reason(error: BaseException) -> str:
+    message = str(error).lower()
+    for token, reason in (
+        ("clipping bound", "invalid_clipping_bounds"),
+        ("robust scaler", "invalid_scaler"),
+        ("converg", "nonconvergence"),
+        ("covariance", "invalid_covariance"),
+        ("mahalanobis", "invalid_assignment_distance"),
+        ("fingerprint", "invalid_component_fingerprint"),
+        ("probabil", "invalid_assignment_probability"),
+    ):
+        if token in message:
+            return reason
+    return "model_fit_type_error" if isinstance(error, TypeError) else "model_fit_value_error"
+
+
+def _independent_attempt_base(vectors, provenance, code_hash: str) -> dict[str, object]:
+    from src.domain.regime import ThreeDayDailyResearchProfile
+
+    profile = ThreeDayDailyResearchProfile()
+    return {
+        "profile_id": profile.profile_id,
+        "model_config": {
+            "model_type": "gmm", "cluster_count": 4,
+            "covariance_type": "diag", "random_seed": profile.random_seed,
+            "regularization": profile.regularization,
+        },
+        "fit_interval": {
+            "start_at": profile.fold.cluster_fit.start_at.isoformat(),
+            "end_at": profile.fold.cluster_fit.end_at.isoformat(),
+        },
+        "fit_input_anchor_count": len(vectors),
+        "first_usable_anchor_at": vectors[0].anchor_at.isoformat(),
+        "last_usable_anchor_at": vectors[-1].anchor_at.isoformat(),
+        "fit_input_vector_hash": _independent_vector_hash(vectors),
+        "source_provenance": list(provenance),
+        "source_provenance_hash": _hash(list(provenance)),
+        "code_provenance_hash": code_hash,
+    }
+
+
+def _independently_recompute_model_attempt(vectors, provenance, code_hash: str):
+    from src.domain.regime import (
+        RegimeModelConfig, THREE_DAY_CHART_FEATURE_REGISTRY_V1,
+        ThreeDayDailyResearchProfile,
+    )
+    from src.infrastructure.regime.sklearn_cluster_diagnostic import (
+        SklearnClusterDiagnostic,
+    )
+
+    profile = ThreeDayDailyResearchProfile()
+    config = RegimeModelConfig(
+        "gmm", 4, profile.random_seed, "diag", profile.regularization
+    )
+    engine = SklearnClusterDiagnostic()
+    base = _independent_attempt_base(vectors, provenance, code_hash)
+    try:
+        primary = engine.fit(config, vectors, THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+        assignments = engine.assign(primary, vectors, THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+        labels = tuple(item.fingerprint for item in assignments)
+        represented = set(labels) == set(primary.fingerprints)
+        midpoint = len(vectors) // 2
+        blocks = (vectors[:midpoint], vectors[midpoint:])
+        block_represented = all(
+            set(item.fingerprint for item in engine.assign(
+                primary, block, THREE_DAY_CHART_FEATURE_REGISTRY_V1
+            )) == set(primary.fingerprints)
+            for block in blocks
+        )
+        seed_scores = []
+        for seed in (profile.random_seed + 1, profile.random_seed + 2):
+            refit = engine.fit(
+                replace(config, random_seed=seed), vectors,
+                THREE_DAY_CHART_FEATURE_REGISTRY_V1,
+                retained_feature_names=primary.feature_names,
+            )
+            compared = tuple(
+                item.fingerprint for item in engine.assign(
+                    refit, vectors, THREE_DAY_CHART_FEATURE_REGISTRY_V1
+                )
+            )
+            seed_scores.append((
+                float(adjusted_rand_score(labels, compared)),
+                float(normalized_mutual_info_score(labels, compared)),
+            ))
+        minimum_ari = min(item[0] for item in seed_scores)
+        minimum_nmi = min(item[1] for item in seed_scores)
+        maximum_centroid_distance = 0.0
+        block_shares = []
+        for block in blocks:
+            block_fit = engine.fit(
+                config, block, THREE_DAY_CHART_FEATURE_REGISTRY_V1,
+                retained_feature_names=primary.feature_names,
+            )
+            projected = _independent_project_centroids(block_fit, primary)
+            distances = np.linalg.norm(
+                np.asarray(primary.means)[:, None, :] - projected[None, :, :], axis=2
+            )
+            rows, columns = linear_sum_assignment(distances)
+            maximum_centroid_distance = max(
+                maximum_centroid_distance,
+                max(float(distances[row, column]) for row, column in zip(rows, columns)),
+            )
+            mapping = {
+                block_fit.fingerprints[column]: primary.fingerprints[row]
+                for row, column in zip(rows, columns)
+            }
+            block_labels = tuple(
+                mapping[item.fingerprint] for item in engine.assign(
+                    block_fit, block, THREE_DAY_CHART_FEATURE_REGISTRY_V1
+                )
+            )
+            block_shares.append({
+                fingerprint: block_labels.count(fingerprint) / len(block_labels)
+                for fingerprint in primary.fingerprints
+            })
+        maximum_prevalence_drift = max(
+            abs(block_shares[0][fingerprint] - block_shares[1][fingerprint])
+            for fingerprint in primary.fingerprints
+        )
+        low_confidence_rate = sum(
+            item.dominant_probability < 0.65
+            or item.dominant_probability - item.second_probability < 0.10
+            for item in assignments
+        ) / len(assignments)
+        distance_threshold = float(chi2.ppf(0.995, df=len(primary.feature_names)))
+        if any(item.distance is None or not math.isfinite(item.distance) for item in assignments):
+            raise ValueError("diagonal GMM assignments require finite squared Mahalanobis distance")
+        distance_exceedance_rate = sum(
+            item.distance > distance_threshold for item in assignments
+        ) / len(assignments)
+        checks = {
+            "all_components_represented": represented,
+            "all_chronological_blocks_represented": block_represented,
+            "minimum_adjusted_rand_index": minimum_ari >= 0.8,
+            "minimum_normalized_mutual_information": minimum_nmi >= 0.8,
+            "maximum_matched_centroid_distance": maximum_centroid_distance <= 0.5,
+            "maximum_prevalence_drift": maximum_prevalence_drift <= 0.2,
+            "maximum_low_confidence_rate": low_confidence_rate <= 0.25,
+            "maximum_distance_exceedance_rate": distance_exceedance_rate <= 0.02,
+        }
+        passed = all(checks.values())
+        gates = {
+            "convergence_required": True, "converged": primary.converged,
+            "iterations": primary.iterations, "lower_bound": primary.lower_bound,
+            "finite_scaler_required": True,
+            "finite_scaler": all(math.isfinite(value) for values in (
+                primary.lower_bounds, primary.upper_bounds, primary.medians, primary.scales
+            ) for value in values),
+            "finite_model_parameters_required": True,
+            "finite_model_parameters": all(math.isfinite(value) for values in (
+                *primary.means, primary.weights, *primary.covariances
+            ) for value in values),
+            "positive_weights_required": True, "minimum_weight": min(primary.weights),
+            "weight_sum_expected": 1.0, "weight_sum_tolerance": 1e-8,
+            "weight_sum": math.fsum(primary.weights),
+            "covariance_floor_threshold": profile.regularization,
+            "minimum_covariance": min(value for row in primary.covariances for value in row),
+            "component_count_expected": 4, "component_count": len(primary.fingerprints),
+            "all_components_represented_required": True,
+            "minimum_adjusted_rand_index": minimum_ari,
+            "minimum_adjusted_rand_index_threshold": 0.8,
+            "minimum_normalized_mutual_information": minimum_nmi,
+            "minimum_normalized_mutual_information_threshold": 0.8,
+            "maximum_matched_centroid_distance": maximum_centroid_distance,
+            "maximum_matched_centroid_distance_threshold": 0.5,
+            "maximum_prevalence_drift": maximum_prevalence_drift,
+            "maximum_prevalence_drift_threshold": 0.2,
+            "low_confidence_rate": low_confidence_rate,
+            "maximum_low_confidence_rate_threshold": 0.25,
+            "gmm_probability_threshold": 0.65, "gmm_margin_threshold": 0.10,
+            "minimum_observed_dominant_probability": min(item.dominant_probability for item in assignments),
+            "minimum_observed_probability_margin": min(item.dominant_probability - item.second_probability for item in assignments),
+            "distance_threshold": distance_threshold,
+            "distance_result": checks["maximum_distance_exceedance_rate"],
+            "distance_threshold_policy": "maximum_chi_square_995_squared_mahalanobis",
+            "distance_exceedance_rate": distance_exceedance_rate,
+            "maximum_distance_exceedance_rate_threshold": 0.02,
+            "feature_registry_version_expected": "three-day-chart-feature-registry-v1",
+            "feature_registry_exact": True,
+            "feature_family_cap_maximum_count": 5,
+            "feature_family_cap_maximum_share": 0.5,
+            "feature_family_observed_maximum_count": max(
+                sum(spec.family == family and spec.name in primary.feature_names for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+                for family in {spec.family for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1}
+            ),
+            "feature_family_observed_maximum_share": max(
+                sum(spec.family == family and spec.name in primary.feature_names for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1) / len(primary.feature_names)
+                for family in {spec.family for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1}
+            ),
+            "feature_family_cap_passed": True,
+            "all_components_represented": represented,
+            "all_chronological_blocks_represented_required": True,
+            "all_chronological_blocks_represented": block_represented,
+            "nondegenerate_confidence": checks["maximum_low_confidence_rate"],
+            "passed": passed,
+            "all_components_represented_threshold": True,
+            "all_chronological_blocks_represented_threshold": True,
+            "maximum_low_confidence_rate": low_confidence_rate,
+            "maximum_distance_exceedance_rate": distance_exceedance_rate,
+        }
+        gates.update({f"{name}_passed": value for name, value in checks.items()})
+        failed = sorted(name for name, value in checks.items() if not value)
+        payload = {
+            "schema_version": "three-day-k4-model-attempt-v1",
+            "status": "failed-model-gates", **base,
+            "feature_names": list(primary.feature_names),
+            "model_parameters": {
+                "converged": primary.converged, "iterations": primary.iterations,
+                "lower_bound": primary.lower_bound,
+                "lower_bounds": list(primary.lower_bounds),
+                "upper_bounds": list(primary.upper_bounds),
+                "medians": list(primary.medians), "scales": list(primary.scales),
+                "weights": list(primary.weights),
+                "means": [list(row) for row in primary.means],
+                "covariances": [list(row) for row in primary.covariances],
+                "component_fingerprints": list(primary.fingerprints),
+            },
+            "model_gates": gates, "failed_gate_names": failed,
+        }
+    except (TypeError, ValueError) as error:
+        payload = {
+            "schema_version": "three-day-k4-technical-failure-v1",
+            "status": "technical_failure", **base,
+            "technical_failure": {
+                "stage": "fit_and_gate",
+                "reason_code": _independent_technical_reason(error),
+            },
+        }
+    return {**payload, "attempt_hash": _hash(payload)}
+
+
 def _reconstruct_cluster_fit(
     report: Mapping[str, object], published_model: Mapping[str, object],
     failures: list[str],
@@ -318,14 +599,9 @@ def _reconstruct_failed_model_attempt(
         code_hash = hashlib.sha256(
             (ROOT / "scripts" / "chart_regime_strategy_mapping.py").read_bytes()
         ).hexdigest()
-        outcome = _fit_cluster_model(vectors, rebuilt_provenance, code_hash)
-        if getattr(outcome, "artifact", None) is not None:
-            failures.append("raw-refitted K4 unexpectedly passed frozen gates")
-            return None
-        rebuilt = getattr(outcome, "model_attempt", None)
-        if not isinstance(rebuilt, Mapping):
-            failures.append("raw-refitted K4 did not emit a model attempt")
-            return None
+        rebuilt = _independently_recompute_model_attempt(
+            vectors, rebuilt_provenance, code_hash
+        )
         _same(rebuilt, published_model, failures, "raw-refitted failed K4 model attempt")
         return rebuilt
     except (OSError, RuntimeError, TypeError, ValueError) as error:
@@ -333,11 +609,85 @@ def _reconstruct_failed_model_attempt(
         return None
 
 
+def _failed_markdown_bytes(report: Mapping[str, object]) -> bytes:
+    attempt = report["model_attempt"]
+    gates = attempt.get("model_gates", {})
+    failed = attempt.get("failed_gate_names", ())
+    lines = [
+        "# BTCUSDT three-day K4 daily strategy mapping", "",
+        "The frozen K4 model gates failed, so the experiment stopped at cash before candidate, evidence, mapping, or Test access.",
+        "", f"- Status: `{report['status']}`",
+        f"- Model attempt: `{attempt['attempt_hash']}`",
+        f"- Cluster Fit anchors: `{attempt['fit_input_anchor_count']}`",
+        f"- Failed gates: `{', '.join(str(item) for item in failed) or 'technical_failure'}`",
+    ]
+    if failed:
+        lines.extend(("", "## Fixed model gates", "", "| Gate | Value | Threshold | Passed |", "|---|---:|---:|---:|"))
+        for name in failed:
+            lines.append(
+                f"| `{name}` | {gates.get(name, 'missing')} | "
+                f"{gates.get(f'{name}_threshold', 'missing')} | {gates.get(f'{name}_passed', False)} |"
+            )
+    else:
+        technical = attempt["technical_failure"]
+        lines.extend((
+            "", "## Technical model failure", "",
+            f"- Stage: `{technical['stage']}`",
+            f"- Reason code: `{technical['reason_code']}`",
+        ))
+    lines.extend((
+        "", "## Leakage and execution boundary", "",
+        "- Candidate manifest frozen: `false`",
+        "- Evidence ledger opened: `false`",
+        "- Strategy mapping built: `false`",
+        "- Untouched Test loaded: `false`",
+        "- Resulting action: `cash-only`", "",
+        "No strategy performance or backtest result exists for this stopped run.", "",
+    ))
+    return "\n".join(lines).encode("utf-8")
+
+
+def _exact_failed_attempt_schema(model: Mapping[str, object], failures: list[str]) -> None:
+    common = {
+        "schema_version", "status", "profile_id", "model_config", "fit_interval",
+        "fit_input_anchor_count", "first_usable_anchor_at", "last_usable_anchor_at",
+        "fit_input_vector_hash", "source_provenance", "source_provenance_hash",
+        "code_provenance_hash", "attempt_hash",
+    }
+    schema = model.get("schema_version")
+    expected = (
+        common | {"feature_names", "model_parameters", "model_gates", "failed_gate_names"}
+        if schema == "three-day-k4-model-attempt-v1"
+        else common | {"technical_failure"}
+    )
+    if set(model) != expected:
+        failures.append("failed-model attempt exact schema mismatch")
+    if set(model.get("model_config", {})) != {
+        "model_type", "cluster_count", "covariance_type", "random_seed", "regularization"
+    }:
+        failures.append("failed-model config exact schema mismatch")
+    if set(model.get("fit_interval", {})) != {"start_at", "end_at"}:
+        failures.append("failed-model interval exact schema mismatch")
+    if schema == "three-day-k4-model-attempt-v1":
+        if set(model.get("model_parameters", {})) != {
+            "converged", "iterations", "lower_bound", "lower_bounds", "upper_bounds",
+            "medians", "scales", "weights", "means", "covariances",
+            "component_fingerprints",
+        }:
+            failures.append("failed-model parameters exact schema mismatch")
+    elif schema == "three-day-k4-technical-failure-v1":
+        if set(model.get("technical_failure", {})) != {"stage", "reason_code"}:
+            failures.append("technical failure exact schema mismatch")
+        if "model_gates" in model or "model_parameters" in model:
+            failures.append("technical failure must not contain fabricated model results")
+    else:
+        failures.append("failed-model attempt schema is invalid")
 def _audit_failed_model_terminal(
     *, report: Mapping[str, object], model: Mapping[str, object],
     mapping: Mapping[str, object], inputs: AuditInputs,
     input_bytes: Mapping[str, bytes | None], failures: list[str],
 ) -> dict[str, object]:
+    _exact_failed_attempt_schema(model, failures)
     if report.get("status") != "failed-model-cash":
         failures.append("failed-model terminal status is invalid")
     if report.get("test_comparisons") != {}:
@@ -349,19 +699,29 @@ def _audit_failed_model_terminal(
     _same(model, report.get("model_attempt"), failures, "report/model attempt binding")
     if report.get("model_attempt_hash") != attempt_hash:
         failures.append("report model attempt hash mismatch")
-    if model.get("schema_version") != "three-day-k4-model-attempt-v1":
-        failures.append("failed-model attempt schema is invalid")
-    if model.get("status") != "failed-model-gates":
-        failures.append("failed-model attempt status is invalid")
-    failed_names = model.get("failed_gate_names")
+    schema = model.get("schema_version")
+    is_gate = schema == "three-day-k4-model-attempt-v1"
+    expected_terminal = "model_gate_failed" if is_gate else "model_technical_failure"
+    expected_mapping_status = (
+        "cash-only-model-gate-failure" if is_gate
+        else "cash-only-model-technical-failure"
+    )
+    expected_status = "failed-model-gates" if is_gate else "technical_failure"
+    if report.get("terminal_stage") != expected_terminal or model.get("status") != expected_status:
+        failures.append("failed-model terminal/attempt status is invalid")
+    technical = model.get("technical_failure", {})
+    failed_names = (
+        model.get("failed_gate_names") if is_gate
+        else [technical.get("reason_code")] if isinstance(technical, Mapping) else []
+    )
     gates = model.get("model_gates")
-    if (
+    if is_gate and (
         not isinstance(failed_names, list) or not failed_names
         or failed_names != sorted(set(failed_names))
         or not isinstance(gates, Mapping) or gates.get("passed") is not False
     ):
         failures.append("failed-model gate result is invalid")
-    elif any(
+    elif is_gate and any(
         name not in gates or f"{name}_threshold" not in gates
         or gates.get(f"{name}_passed") is not False
         for name in failed_names
@@ -397,12 +757,39 @@ def _audit_failed_model_terminal(
     if mapping_hash != _hash(unhashed_mapping):
         failures.append("cash sentinel artifact hash mismatch")
     if (
-        mapping.get("schema_version") != "three-day-k4-cash-sentinel-v1"
-        or mapping.get("status") != "cash-only-model-gate-failure"
+        set(mapping) != {
+            "schema_version", "status", "model_attempt_hash",
+            "rejection_reasons", "artifact_hash",
+        }
+        or mapping.get("schema_version") != "three-day-k4-cash-sentinel-v1"
+        or mapping.get("status") != expected_mapping_status
         or mapping.get("model_attempt_hash") != attempt_hash
         or mapping.get("rejection_reasons") != failed_names
     ):
         failures.append("cash sentinel model-gate binding is invalid")
+
+    source_verification = report.get("source_verification", {})
+    if not isinstance(source_verification, Mapping) or set(source_verification) != {
+        "raw_kline_root", "raw_inputs", "fit_input_vector_hash", "evidence_rows_path"
+    }:
+        failures.append("failed-model source verification exact schema mismatch")
+        source_verification = {}
+    expected_report = {
+        "schema_version": "three-day-daily-k4-report-v1",
+        "status": "failed-model-cash", "terminal_stage": expected_terminal,
+        "rejection_reasons": failed_names,
+        "source_verification": dict(source_verification),
+        "model_attempt": dict(model), "model_attempt_hash": attempt_hash,
+        "cash_only_mapping": dict(mapping),
+        "pipeline_access": expected_access,
+        "test_comparisons": {},
+        "leakage_audit": {
+            "test_loader_called": False, "first_test_read": None,
+            "adoption_status": "inconclusive", "test_policy": "strict",
+        },
+    }
+    report_payload = {key: value for key, value in report.items() if key != "publication"}
+    _same(expected_report, report_payload, failures, "failed-model exact report payload")
 
     raw_count = _audit_raw_inputs(model, report, failures)
     rebuilt = _reconstruct_failed_model_attempt(report, model, failures)
@@ -439,6 +826,9 @@ def _audit_failed_model_terminal(
         raw = input_bytes.get(label)
         if raw is not None and publication.get(f"{label}_byte_hash") != hashlib.sha256(raw).hexdigest():
             failures.append(f"{label} report output hash mismatch")
+    markdown_raw = input_bytes.get("markdown")
+    if markdown_raw is not None and markdown_raw != _failed_markdown_bytes(expected_report):
+        failures.append("failed-model Markdown independent rerender mismatch")
 
     return {
         "schema_version": "three-day-k4-daily-independent-audit-v1",
@@ -1277,7 +1667,9 @@ def _replay_untouched_test(
             sources.get("feature_cache_root"), required_start=context_start,
             required_end=interval.end_at, verify_full_file=True,
         )
-        manifest = build_three_day_daily_candidate_manifest(expected_count=459)
+        manifest = build_three_day_daily_candidate_manifest(
+            include_deferred=True, expected_count=459
+        )
         candidates = tuple(entry.candidate for entry in manifest.entries)
         by_id = {item.candidate_id: item for item in candidates}
         initial = Decimal("10000")
@@ -1352,7 +1744,7 @@ def audit_three_day_k4_daily_mapping(
         input_bytes["mapping"] or b"", failures, "mapping"
     )
 
-    if report.get("terminal_stage") == "model_gate_failed":
+    if report.get("terminal_stage") in {"model_gate_failed", "model_technical_failure"}:
         return _audit_failed_model_terminal(
             report=report, model=model, mapping=mapping, inputs=inputs,
             input_bytes=input_bytes, failures=failures,
@@ -1376,7 +1768,9 @@ def audit_three_day_k4_daily_mapping(
                 build_three_day_daily_candidate_manifest,
             )
 
-            typed_manifest = build_three_day_daily_candidate_manifest(expected_count=459)
+            typed_manifest = build_three_day_daily_candidate_manifest(
+                include_deferred=True, expected_count=459
+            )
             independent_evidence_rows = []
             evidence_root = report.get("evidence", {})
             for phase in ("mapping_fit", "validation"):

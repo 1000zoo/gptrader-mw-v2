@@ -104,7 +104,7 @@ def test_no_walk_forward_fold_dates_keeps_default_selection_available() -> None:
 def test_three_day_profile_has_frozen_default_outputs_and_requires_explicit_profile() -> None:
     args = parse_walk_forward_args([
         "--profile", "three-day-daily-k4-v1", "--symbol", "BTCUSDT",
-        "--evidence-rows-path", "evidence.jsonl", "--resume",
+        "--include-deferred", "--evidence-rows-path", "evidence.jsonl", "--resume",
     ])
 
     root = Path("docs/backtests/chart-regime-strategy-mapping-btcusdt-3d-k4-daily")
@@ -139,6 +139,16 @@ def test_three_day_profile_accepts_explicit_deferred_candidate_opt_in() -> None:
 
     assert args.include_deferred is True
     assert args.dry_run is True
+
+
+def test_three_day_profile_requires_explicit_deferred_candidate_opt_in() -> None:
+    with pytest.raises(SystemExit) as error:
+        parse_walk_forward_args([
+            "--profile", "three-day-daily-k4-v1", "--symbol", "BTCUSDT",
+            "--dry-run",
+        ])
+
+    assert error.value.code == 2
 
 
 def test_pre_test_freeze_is_immutable_and_excludes_test_results() -> None:
@@ -743,6 +753,7 @@ def test_three_day_main_composes_concrete_stages_and_publishes_last(monkeypatch,
     manifest = SimpleNamespace(entries=(object(),) * 459)
     args = SimpleNamespace(
         profile="three-day-daily-k4-v1", symbol="BTCUSDT",
+        include_deferred=True,
         raw_kline_root=tmp_path, feature_cache_root=None,
         evidence_rows_path=tmp_path / "evidence.jsonl", resume=True,
         output_json=tmp_path / "report.json", output_markdown=tmp_path / "report.md",
@@ -2991,6 +3002,62 @@ def test_three_day_k4_rejects_provenance_before_diagnostic_fit() -> None:
         )
 
 
+def test_three_day_k4_fit_error_becomes_hash_bound_technical_terminal(
+    monkeypatch, tmp_path,
+) -> None:
+    import scripts.chart_regime_strategy_mapping as module
+    from src.domain.regime import THREE_DAY_CHART_FEATURE_REGISTRY_V1, ThreeDayChartFeatureVector
+
+    class BrokenDiagnostic:
+        def fit(self, *args, **kwargs):
+            raise ValueError("fitted robust scaler has invalid parameters")
+
+    start = datetime(2021, 1, 1, tzinfo=timezone.utc)
+    values = {spec.name: float(index + 1) for index, spec in enumerate(THREE_DAY_CHART_FEATURE_REGISTRY_V1)}
+    vectors = tuple(
+        ThreeDayChartFeatureVector(
+            "BTCUSDT", start + timedelta(days=index),
+            start + timedelta(days=index - 3), values,
+        )
+        for index in range(1641)
+    )
+    provenance = ({"source_url": "https://example.invalid/a.zip"},)
+    monkeypatch.setattr(
+        module, "_validate_three_day_fit_provenance", lambda supplied, code: provenance
+    )
+
+    outcome = module.fit_fold_local_three_day_k4_model(
+        vectors, source_provenance=provenance,
+        code_provenance_hash="a" * 64, diagnostic=BrokenDiagnostic(),
+    )
+
+    assert outcome.status == "failed-model-cash"
+    assert outcome.artifact is None
+    assert outcome.rejection_reasons == ("invalid_scaler",)
+    assert outcome.model_attempt["schema_version"] == "three-day-k4-technical-failure-v1"
+    assert outcome.model_attempt["technical_failure"] == {
+        "stage": "fit_and_gate", "reason_code": "invalid_scaler"
+    }
+    payload = dict(outcome.model_attempt)
+    assert payload.pop("attempt_hash") == module._canonical_hash(payload)
+    args = SimpleNamespace(
+        raw_kline_root=tmp_path / "raw", evidence_rows_path=tmp_path / "evidence.jsonl",
+        output_json=tmp_path / "report.json", output_markdown=tmp_path / "report.md",
+        output_model=tmp_path / "model.json", output_mapping=tmp_path / "mapping.json",
+    )
+    module._publish_model_failure(
+        args, module.ThreeDayModelGateFailure(outcome)
+    )
+    report = json.loads(args.output_json.read_bytes())
+    assert report["terminal_stage"] == "model_technical_failure"
+    assert json.loads(args.output_mapping.read_bytes())["status"] == (
+        "cash-only-model-technical-failure"
+    )
+    assert all(path.exists() for path in (
+        args.output_json, args.output_markdown, args.output_model, args.output_mapping
+    ))
+
+
 def test_three_day_research_manifest_does_not_mutate_deferred_registry() -> None:
     from scripts.chart_regime_strategy_mapping import (
         build_three_day_daily_candidate_manifest,
@@ -2999,7 +3066,14 @@ def test_three_day_research_manifest_does_not_mutate_deferred_registry() -> None
 
     before = REGISTRY_PATH.read_bytes()
 
-    manifest = build_three_day_daily_candidate_manifest(expected_count=459)
+    with pytest.raises(ValueError, match="explicit deferred"):
+        build_three_day_daily_candidate_manifest(
+            include_deferred=False, expected_count=459
+        )
+
+    manifest = build_three_day_daily_candidate_manifest(
+        include_deferred=True, expected_count=459
+    )
 
     assert len(manifest.entries) == 459
     assert REGISTRY_PATH.read_bytes() == before
@@ -3029,7 +3103,9 @@ def test_minimal_complete_three_day_research_run_does_not_mutate_deferred_regist
         fit_and_freeze_model=stage("fit_and_freeze_model", model),
         freeze_candidates=lambda: (
             calls.append("freeze_candidates")
-            or build_three_day_daily_candidate_manifest(expected_count=459)
+            or build_three_day_daily_candidate_manifest(
+                include_deferred=True, expected_count=459
+            )
         ),
         load_mapping_evidence=stage("load_mapping_evidence", {"ledger_hash": "c" * 64}),
         build_strict_mapping=stage("build_strict_mapping", {"artifact_hash": "d" * 64}),

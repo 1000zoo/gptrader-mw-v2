@@ -364,7 +364,7 @@ class ThreeDayPublication:
 
 
 def render_three_day_markdown(report: Mapping[str, object]) -> str:
-    if report.get("terminal_stage") == "model_gate_failed":
+    if report.get("terminal_stage") in {"model_gate_failed", "model_technical_failure"}:
         attempt = report.get("model_attempt", {})
         gates = attempt.get("model_gates", {}) if isinstance(attempt, Mapping) else {}
         failed = attempt.get("failed_gate_names", ()) if isinstance(attempt, Mapping) else ()
@@ -376,19 +376,23 @@ def render_three_day_markdown(report: Mapping[str, object]) -> str:
             f"- Status: `{report.get('status')}`",
             f"- Model attempt: `{attempt.get('attempt_hash', 'missing') if isinstance(attempt, Mapping) else 'missing'}`",
             f"- Cluster Fit anchors: `{attempt.get('fit_input_anchor_count', 'missing') if isinstance(attempt, Mapping) else 'missing'}`",
-            f"- Failed gates: `{', '.join(str(item) for item in failed)}`",
-            "",
-            "## Fixed model gates",
-            "",
-            "| Gate | Value | Threshold | Passed |",
-            "|---|---:|---:|---:|",
+            f"- Failed gates: `{', '.join(str(item) for item in failed) or 'technical_failure'}`",
         ]
-        for name in failed if isinstance(failed, (tuple, list)) else ():
-            threshold_name = f"{name}_threshold"
-            lines.append(
-                f"| `{name}` | {gates.get(name, 'missing')} | "
-                f"{gates.get(threshold_name, 'missing')} | {gates.get(f'{name}_passed', False)} |"
-            )
+        if failed:
+            lines.extend(("", "## Fixed model gates", "", "| Gate | Value | Threshold | Passed |", "|---|---:|---:|---:|"))
+            for name in failed if isinstance(failed, (tuple, list)) else ():
+                threshold_name = f"{name}_threshold"
+                lines.append(
+                    f"| `{name}` | {gates.get(name, 'missing')} | "
+                    f"{gates.get(threshold_name, 'missing')} | {gates.get(f'{name}_passed', False)} |"
+                )
+        else:
+            failure = attempt.get("technical_failure", {}) if isinstance(attempt, Mapping) else {}
+            lines.extend((
+                "", "## Technical model failure", "",
+                f"- Stage: `{failure.get('stage', 'missing') if isinstance(failure, Mapping) else 'missing'}`",
+                f"- Reason code: `{failure.get('reason_code', 'missing') if isinstance(failure, Mapping) else 'missing'}`",
+            ))
         lines.extend((
             "", "## Leakage and execution boundary", "",
             "- Candidate manifest frozen: `false`",
@@ -1388,7 +1392,9 @@ def build_three_day_experiment_dependencies(args) -> ThreeDayExperimentDependenc
         return outcome.artifact
 
     def manifest():
-        value = build_three_day_daily_candidate_manifest(expected_count=459)
+        value = build_three_day_daily_candidate_manifest(
+            include_deferred=args.include_deferred, expected_count=459
+        )
         if len(value.entries) != 459:
             raise ValueError("three-day candidate manifest must contain exactly 459 candidates")
         manifest_holder["value"] = value
@@ -1423,12 +1429,24 @@ def _publish_model_failure(args, failure: ThreeDayModelGateFailure) -> None:
     supplied_attempt_hash = attempt_payload.pop("attempt_hash", None)
     if supplied_attempt_hash != _canonical_hash(attempt_payload):
         raise ValueError("failed K4 model attempt hash is invalid")
+    schema = attempt.get("schema_version")
+    if schema == "three-day-k4-model-attempt-v1":
+        expected_reasons = list(attempt.get("failed_gate_names", ()))
+        terminal_stage = "model_gate_failed"
+        mapping_status = "cash-only-model-gate-failure"
+    elif schema == "three-day-k4-technical-failure-v1":
+        technical = attempt.get("technical_failure", {})
+        expected_reasons = [technical.get("reason_code")] if isinstance(technical, Mapping) else []
+        terminal_stage = "model_technical_failure"
+        mapping_status = "cash-only-model-technical-failure"
+    else:
+        raise ValueError("failed K4 model attempt schema is invalid")
     reason = list(failure.outcome.rejection_reasons)
-    if reason != list(attempt.get("failed_gate_names", ())):
+    if reason != expected_reasons:
         raise ValueError("failed K4 rejection reasons do not match model attempt")
     mapping_payload = {
         "schema_version": "three-day-k4-cash-sentinel-v1",
-        "status": "cash-only-model-gate-failure",
+        "status": mapping_status,
         "model_attempt_hash": supplied_attempt_hash,
         "rejection_reasons": reason,
     }
@@ -1438,7 +1456,7 @@ def _publish_model_failure(args, failure: ThreeDayModelGateFailure) -> None:
     }
     report = {
         "schema_version": "three-day-daily-k4-report-v1",
-        "status": "failed-model-cash", "terminal_stage": "model_gate_failed",
+        "status": "failed-model-cash", "terminal_stage": terminal_stage,
         "rejection_reasons": reason,
         "source_verification": {
             "raw_kline_root": Path(args.raw_kline_root).as_posix(),
@@ -1483,7 +1501,9 @@ def _publish_model_failure(args, failure: ThreeDayModelGateFailure) -> None:
 def run_three_day_profile_main(args) -> int:
     if args.dry_run or args.manifest_only:
         plan = verify_three_day_experiment_sources(args)
-        manifest = build_three_day_daily_candidate_manifest(expected_count=459)
+        manifest = build_three_day_daily_candidate_manifest(
+            include_deferred=args.include_deferred, expected_count=459
+        )
         print(json.dumps({
             "profile": THREE_DAY_PROFILE_ID,
             "candidate_count": len(manifest.entries),
@@ -1795,12 +1815,18 @@ def _canonical_daily_candidate_groups():
     }
 
 
-def build_three_day_daily_candidate_manifest(*, candidate_groups=None, expected_count=459):
+def build_three_day_daily_candidate_manifest(
+    *, include_deferred: bool, candidate_groups=None, expected_count=459
+):
+    if include_deferred is not True:
+        raise ValueError("three-day candidate manifest requires explicit deferred opt-in")
     groups = _canonical_daily_candidate_groups() if candidate_groups is None else candidate_groups
     catalog = DailyCandidateCatalog(
         candidate_groups=groups,
         deferred_registry=load_deferred_strategy_registry(),
-        candidate_id_validator=lambda ids: ensure_candidate_ids_allowed(ids, include_deferred=True),
+        candidate_id_validator=lambda ids: ensure_candidate_ids_allowed(
+            ids, include_deferred=include_deferred
+        ),
         candidate_payload_builder=candidate_payload,
     )
     return _build_daily_candidate_manifest(catalog=catalog, expected_count=expected_count)
@@ -2498,6 +2524,53 @@ class ThreeDayK4FitOutcome:
     model_attempt: Mapping[str, object] | None = None
 
 
+def _technical_model_failure_reason(error: BaseException) -> str:
+    message = str(error).lower()
+    rules = (
+        ("clipping bound", "invalid_clipping_bounds"),
+        ("robust scaler", "invalid_scaler"),
+        ("converg", "nonconvergence"),
+        ("covariance", "invalid_covariance"),
+        ("mahalanobis", "invalid_assignment_distance"),
+        ("fingerprint", "invalid_component_fingerprint"),
+        ("probabil", "invalid_assignment_probability"),
+    )
+    for token, reason in rules:
+        if token in message:
+            return reason
+    return "model_fit_type_error" if isinstance(error, TypeError) else "model_fit_value_error"
+
+
+def _technical_three_day_k4_model_attempt(
+    *, error: BaseException, fit_vectors, source_provenance,
+    code_provenance_hash: str, profile: ThreeDayDailyResearchProfile,
+) -> dict[str, object]:
+    reason = _technical_model_failure_reason(error)
+    payload = {
+        "schema_version": "three-day-k4-technical-failure-v1",
+        "status": "technical_failure",
+        "profile_id": profile.profile_id,
+        "model_config": {
+            "model_type": "gmm", "cluster_count": 4,
+            "covariance_type": "diag", "random_seed": profile.random_seed,
+            "regularization": profile.regularization,
+        },
+        "fit_interval": {
+            "start_at": profile.fold.cluster_fit.start_at.isoformat(),
+            "end_at": profile.fold.cluster_fit.end_at.isoformat(),
+        },
+        "fit_input_anchor_count": len(fit_vectors),
+        "first_usable_anchor_at": fit_vectors[0].anchor_at.isoformat(),
+        "last_usable_anchor_at": fit_vectors[-1].anchor_at.isoformat(),
+        "fit_input_vector_hash": _three_day_vector_hash(fit_vectors),
+        "source_provenance": list(source_provenance),
+        "source_provenance_hash": _canonical_hash(list(source_provenance)),
+        "code_provenance_hash": code_provenance_hash,
+        "technical_failure": {"stage": "fit_and_gate", "reason_code": reason},
+    }
+    return {**payload, "attempt_hash": _canonical_hash(payload)}
+
+
 def _failed_three_day_k4_model_attempt(
     *, primary, gates: Mapping[str, object], fit_vectors, source_provenance,
     code_provenance_hash: str, profile: ThreeDayDailyResearchProfile,
@@ -2809,7 +2882,15 @@ def fit_fold_local_three_day_k4_model(
             model_gates=gates,
         )
     except (TypeError, ValueError) as error:
-        return ThreeDayK4FitOutcome("failed-model-cash", None, (str(error),))
+        attempt = _technical_three_day_k4_model_attempt(
+            error=error, fit_vectors=fit_vectors,
+            source_provenance=validated_provenance,
+            code_provenance_hash=code_provenance_hash, profile=profile,
+        )
+        reason = attempt["technical_failure"]["reason_code"]
+        return ThreeDayK4FitOutcome(
+            "failed-model-cash", None, (reason,), attempt,
+        )
     return ThreeDayK4FitOutcome("model-fit", artifact)
 
 
@@ -5123,6 +5204,8 @@ def parse_walk_forward_args(argv: Sequence[str] | None = None) -> argparse.Names
     parser.add_argument("--output-mapping", type=Path)
     args = parser.parse_args(argv)
     if getattr(args, "profile", None) == THREE_DAY_PROFILE_ID:
+        if not args.include_deferred:
+            parser.error("three-day profile requires explicit --include-deferred")
         weekly_only = (
             tuple(args.candidate_group),
             args.test_claim_status != "untouched", args.test_claim_reason,

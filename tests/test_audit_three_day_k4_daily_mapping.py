@@ -158,7 +158,9 @@ def test_real_one_day_459_candidate_phase_replay_reconstructs_published_ledger(t
 
     day = datetime(2025, 7, 7, tzinfo=timezone.utc)
     model = _artifact()
-    manifest = build_three_day_daily_candidate_manifest(expected_count=459)
+    manifest = build_three_day_daily_candidate_manifest(
+        include_deferred=True, expected_count=459
+    )
     raw_root = tmp_path / "raw"
     archive = raw_root / "BTCUSDT" / "BTCUSDT-1m-2025-07.zip"
     descriptor = _write_minute_zip(archive, day - timedelta(days=3), 4 * 24 * 60)
@@ -611,8 +613,27 @@ def test_auditor_independently_accepts_exact_model_gate_terminal_branch(
         "schema_version": "three-day-k4-model-attempt-v1",
         "status": "failed-model-gates",
         "profile_id": "three-day-daily-k4-v1",
+        "model_config": {
+            "model_type": "gmm", "cluster_count": 4, "covariance_type": "diag",
+            "random_seed": 20260714, "regularization": "0.000001",
+        },
+        "fit_interval": {
+            "start_at": "2021-01-01T00:00:00+00:00",
+            "end_at": "2025-06-30T00:00:00+00:00",
+        },
         "source_provenance": [], "fit_input_vector_hash": "b" * 64,
         "fit_input_anchor_count": 1641, "code_provenance_hash": "c" * 64,
+        "first_usable_anchor_at": "2021-01-01T00:00:00+00:00",
+        "last_usable_anchor_at": "2025-06-29T00:00:00+00:00",
+        "source_provenance_hash": _hash([]),
+        "feature_names": ["feature"],
+        "model_parameters": {
+            "converged": True, "iterations": 1, "lower_bound": 0.0,
+            "lower_bounds": [0.0], "upper_bounds": [1.0], "medians": [0.5],
+            "scales": [1.0], "weights": [0.25] * 4,
+            "means": [[0.0]] * 4, "covariances": [[1.0]] * 4,
+            "component_fingerprints": [str(index) * 24 for index in range(4)],
+        },
         "model_gates": {
             "maximum_matched_centroid_distance": 2.35,
             "maximum_matched_centroid_distance_threshold": 0.5,
@@ -655,6 +676,26 @@ def test_auditor_independently_accepts_exact_model_gate_terminal_branch(
     }
     assert result["hashes"]["model_attempt_hash"] == attempt["attempt_hash"]
 
+    original_report = args.output_json.read_bytes()
+    original_markdown = args.output_markdown.read_bytes()
+    forged_markdown = original_markdown + b"forged but self-hashed\n"
+    forged_report = json.loads(original_report)
+    forged_report["publication"]["markdown_byte_hash"] = hashlib.sha256(
+        forged_markdown
+    ).hexdigest()
+    args.output_json.write_bytes(
+        (json.dumps(forged_report, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode()
+    )
+    args.output_markdown.write_bytes(forged_markdown)
+    forged_result = audit_three_day_k4_daily_mapping(
+        AuditInputs(args.output_json, args.output_markdown, args.output_model, args.output_mapping),
+        candidate_manifest_factory=lambda: {},
+    )
+    assert forged_result["passed"] is False
+    assert any("Markdown independent rerender" in item for item in forged_result["failures"])
+    args.output_json.write_bytes(original_report)
+    args.output_markdown.write_bytes(original_markdown)
+
     unexpected_ledger = audit_module._phase_ledger_override(
         args.evidence_rows_path, "mapping_fit"
     )
@@ -679,11 +720,15 @@ def test_failed_model_refit_rejects_self_consistent_attempt_forgery(
         module, "_load_cluster_fit_vectors", lambda *args: ((object(),), ({},))
     )
 
-    class Outcome:
-        artifact = None
-        model_attempt = original
-
-    monkeypatch.setattr(module, "_fit_cluster_model", lambda *args: Outcome())
+    monkeypatch.setattr(
+        module, "_fit_cluster_model",
+        lambda *args: (_ for _ in ()).throw(
+            AssertionError("production fit conclusion must not be called")
+        ),
+    )
+    monkeypatch.setattr(
+        module, "_independently_recompute_model_attempt", lambda *args: original
+    )
     failures: list[str] = []
 
     rebuilt = module._reconstruct_failed_model_attempt(
@@ -693,6 +738,31 @@ def test_failed_model_refit_rejects_self_consistent_attempt_forgery(
 
     assert rebuilt == original
     assert any("raw-refitted failed K4 model attempt" in item for item in failures)
+
+
+def test_failed_model_attempt_exact_schema_rejects_recursive_extra_field() -> None:
+    import scripts.audit_three_day_k4_daily_mapping as module
+
+    failures: list[str] = []
+    module._exact_failed_attempt_schema({
+        "schema_version": "three-day-k4-technical-failure-v1",
+        "status": "technical_failure", "profile_id": "three-day-daily-k4-v1",
+        "model_config": {
+            "model_type": "gmm", "cluster_count": 4, "covariance_type": "diag",
+            "random_seed": 20260714, "regularization": "0.000001",
+        },
+        "fit_interval": {"start_at": "a", "end_at": "b"},
+        "fit_input_anchor_count": 1, "first_usable_anchor_at": "a",
+        "last_usable_anchor_at": "b", "fit_input_vector_hash": "a" * 64,
+        "source_provenance": [], "source_provenance_hash": "b" * 64,
+        "code_provenance_hash": "c" * 64, "attempt_hash": "d" * 64,
+        "technical_failure": {
+            "stage": "fit_and_gate", "reason_code": "invalid_scaler",
+            "test_results": "forged",
+        },
+    }, failures)
+
+    assert any("technical failure exact schema" in item for item in failures)
 
 
 @pytest.mark.parametrize("mutation", ("missing", "ambiguous", "missing_key", "extra_key"))
@@ -873,7 +943,9 @@ def test_production_daily_evidence_path_indexes_phase_once_and_passes_bounded_wi
     warmup = 1442
 
     _timeline, slices = module._build_verified_phase_daily_slices(market, days, warmup)
-    manifest = module.build_three_day_daily_candidate_manifest(expected_count=459)
+    manifest = module.build_three_day_daily_candidate_manifest(
+        include_deferred=True, expected_count=459
+    )
     observed = []
 
     def run_daily(**values):
