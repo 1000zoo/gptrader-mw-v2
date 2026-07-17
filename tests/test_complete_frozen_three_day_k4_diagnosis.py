@@ -303,6 +303,28 @@ def test_noncanonical_parent_json_is_rejected_even_when_manifest_hash_matches(
         _load_parent_provenance(parent)
 
 
+@pytest.mark.parametrize(
+    "omitted",
+    (
+        ("diagnostic_only",),
+        ("primary_replacement_allowed",),
+        ("diagnostic_only", "primary_replacement_allowed"),
+    ),
+)
+def test_parent_manifest_rejects_omitted_default_policy_fields(
+    tmp_path: Path, omitted: tuple[str, ...]
+) -> None:
+    parent = _write_parent(tmp_path)
+    manifest_path = parent / MANIFEST
+    manifest = json.loads(manifest_path.read_bytes())
+    for field in omitted:
+        manifest.pop(field)
+    manifest_path.write_bytes(_canonical_bytes(manifest))
+
+    with pytest.raises(PublicationError):
+        _load_parent_provenance(parent)
+
+
 def test_output_root_cannot_be_inside_parent(tmp_path: Path) -> None:
     parent = _load_parent_provenance(_write_parent(tmp_path))
     with pytest.raises(PublicationError):

@@ -173,6 +173,8 @@ def _load_parent_provenance(parent_dir: Path) -> ParentProvenance:
             manifest = FrozenK4DiagnosisManifest(**manifest_payload)
         except (TypeError, ValueError) as error:
             raise PublicationError("parent manifest contract is invalid") from error
+        if _canonical_json_bytes(manifest.canonical_payload()) != manifest_bytes:
+            raise PublicationError("parent manifest payload must be complete and exact")
 
         if manifest.run_id != parent_dir.name:
             raise PublicationError("parent run ID does not match directory name")
