@@ -118,15 +118,21 @@ projection exactly:
 
 ```text
 raw_mean[h,j] = half_mean[h,j] * half_scale[j] + half_median[j]
+primary_clipped_mean[h,j] = clip(
+    raw_mean[h,j], primary_lower_bound[j], primary_upper_bound[j]
+)
 primary_projected_mean[h,j] =
-    (raw_mean[h,j] - primary_median[j]) / primary_scale[j]
+    (primary_clipped_mean[h,j] - primary_median[j]) / primary_scale[j]
 ```
 
-The original implementation projects component parameters. It does not clip
-the inverse-transformed centroid again. This exact projected parameter centroid
-is the only value used to reproduce `2.3526219570607076`.
+The original implementation projects component parameters and clips the
+inverse-transformed centroid to the frozen primary bounds before applying the
+primary RobustScaler. This exact clipped parameter projection is the only value
+used to reproduce `2.3526219570607076`. Record a per-feature flag whenever this
+projection clips a half centroid.
 
-Projected diagonal variance is:
+For reference, the linear diagonal variance projection before considering the
+nonlinear clipping boundary is:
 
 ```text
 raw_variance[h,j] = half_variance[h,j] * half_scale[j]^2
@@ -134,10 +140,15 @@ primary_projected_variance[h,j] =
     raw_variance[h,j] / primary_scale[j]^2
 ```
 
-As a descriptive comparison only, also transform the half's actual observations
-with frozen primary clipping and scaling and compute an empirical primary-space
-centroid for each reproduced half assignment. Differences between empirical and
-parameter projections must be reported and must not alter reproduction status.
+This linear variance is diagnostic metadata only. If a projected parameter
+centroid is clipped, it is not a complete covariance transform through the
+nonlinear clipping operation. Therefore, also transform the half's actual
+observations with frozen primary clipping and scaling and compute an empirical
+primary-space centroid and diagonal covariance for each reproduced half
+assignment. Differences between empirical and parameter projections must be
+reported and must not alter reproduction status. Covariance-aware descriptive
+distances use this empirical clipped primary-space covariance, while the exact
+gate replay continues to use only the clipped parameter centroid above.
 
 ## Component identity and matching
 
@@ -287,6 +298,11 @@ For each matched diagonal-Gaussian pair compute:
 - symmetric KL divergence;
 - Bhattacharyya distance;
 - diagonal Gaussian Wasserstein-2 distance.
+
+The primary side uses its frozen component parameters. The half side uses the
+empirical mean and diagonal covariance of the fixed half assignment after
+frozen-primary clipping and scaling. This makes the covariance-aware comparison
+well-defined even when the parameter centroid crosses a clipping boundary.
 
 For pooled Mahalanobis, floor every pooled variance at the frozen model's
 regularization `1e-6` and report per-feature
