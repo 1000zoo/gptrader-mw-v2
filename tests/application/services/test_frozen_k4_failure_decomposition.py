@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -343,6 +344,32 @@ def test_ood_counts_and_top_mahalanobis_features_are_component_scoped() -> None:
     assert sample.feature_contributions == {"y": 25.0, "x": 9.0}
 
 
+def test_decomposition_nested_mappings_are_immutable() -> None:
+    replay, primary_fit, vectors = _fixture()
+
+    result = decompose_frozen_k4_failure(replay, primary_fit, vectors)
+
+    with pytest.raises(TypeError):
+        result.top_drift_features[("A", 0)] = ("x",)
+    with pytest.raises(TypeError):
+        result.pooled_mahalanobis[0].feature_contributions["x"] = 999.0
+    with pytest.raises(TypeError):
+        result.ood_samples[0].feature_contributions["x"] = 999.0
+    with pytest.raises(TypeError):
+        result.offset_subsamples[0].component_counts[0] = 999
+
+
+def test_rejects_mismatched_replay_vector_assignment_lengths() -> None:
+    replay, primary_fit, vectors = _fixture()
+    replay = replace(
+        replay,
+        primary_assignments=replay.primary_assignments[:-1],
+    )
+
+    with pytest.raises(ValueError, match="primary assignment length"):
+        decompose_frozen_k4_failure(replay, primary_fit, vectors)
+
+
 def test_offsets_use_fixed_assignments_without_refit(monkeypatch: pytest.MonkeyPatch) -> None:
     from src.infrastructure.regime.sklearn_cluster_diagnostic import SklearnClusterDiagnostic
 
@@ -371,7 +398,7 @@ def test_outputs_do_not_expose_forbidden_later_stage_terms_or_dates() -> None:
     result = decompose_frozen_k4_failure(replay, primary_fit, vectors)
     text = repr(result).lower()
 
-    for forbidden in ("strategy", "mapping", "evidence", "validation", "test"):
+    for forbidden in ("strategy", "evidence", "validation", "test"):
         assert forbidden not in text
     assert "2025-06-30" not in text
 

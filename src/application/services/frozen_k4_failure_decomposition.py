@@ -60,6 +60,13 @@ class PooledMahalanobisRow:
     squared_distance: float
     feature_contributions: Mapping[str, float]
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "feature_contributions",
+            MappingProxyType(dict(self.feature_contributions)),
+        )
+
 
 @dataclass(frozen=True)
 class ComponentDistanceRow:
@@ -87,6 +94,13 @@ class OODSampleContributionRow:
     squared_mahalanobis: float
     threshold: float
     feature_contributions: Mapping[str, float]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "feature_contributions",
+            MappingProxyType(dict(self.feature_contributions)),
+        )
 
 
 @dataclass(frozen=True)
@@ -123,6 +137,13 @@ class OffsetSubsampleRow:
     refit_after_exclusion: bool = False
     diagnostic_only: bool = True
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "component_counts",
+            MappingProxyType(dict(self.component_counts)),
+        )
+
 
 @dataclass(frozen=True)
 class FrozenK4Decomposition:
@@ -139,6 +160,13 @@ class FrozenK4Decomposition:
     ood_samples: tuple[OODSampleContributionRow, ...]
     offset_subsamples: tuple[OffsetSubsampleRow, ...]
     diagnostic_only: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "top_drift_features",
+            MappingProxyType(dict(self.top_drift_features)),
+        )
 
 
 def decompose_frozen_k4_failure(
@@ -162,6 +190,7 @@ def decompose_frozen_k4_failure(
         or getattr(status, "decomposition_allowed", None) is not True
     ):
         raise ValueError("decomposition requires reproduced replay")
+    _validate_replay_lengths(replay, vectors)
 
     feature_names = tuple(primary_fit.feature_names)
     raw = _raw_matrix(vectors, feature_names)
@@ -336,6 +365,17 @@ def _isolation_guard(value: object, path: str) -> None:
         for key, item in vars(value).items():
             _isolation_guard(str(key), f"{path}.key")
             _isolation_guard(item, f"{path}.{key}")
+
+
+def _validate_replay_lengths(replay: FrozenK4Replay, vectors: tuple[object, ...]) -> None:
+    expected = len(vectors)
+    if len(replay.primary_assignments) != expected:
+        raise ValueError("primary assignment length must match input vectors")
+    if len(replay.primary_ood_rows) != expected:
+        raise ValueError("primary OOD row length must match input vectors")
+    for half in replay.half_replays:
+        if len(half.assignments) != expected:
+            raise ValueError("half assignment length must match input vectors")
 
 
 def _raw_matrix(vectors: Sequence[object], feature_names: tuple[str, ...]) -> np.ndarray:
