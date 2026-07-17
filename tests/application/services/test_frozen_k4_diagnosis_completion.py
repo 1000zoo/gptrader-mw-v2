@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
 import math
-from types import MappingProxyType
 
 import pytest
 
@@ -16,7 +15,9 @@ from src.application.services.frozen_k4_diagnosis_completion import (
     ComponentZeroOODAnalysis,
     OODFamilySummaryRow,
     OODFeatureSummaryRow,
-    _registry_sha256,
+    _canonical_registry_payload,
+    _canonical_registry_sha256,
+    _meets_threshold,
     summarize_component_zero_ood,
 )
 from src.domain.regime import (
@@ -151,12 +152,17 @@ def test_single_feature_concentration_uses_inclusive_half_boundary(share: float,
 
 
 @pytest.mark.parametrize(
-    ("share", "expected"),
-    ((0.69, False), (0.70, True), (0.71, True)),
+    ("volatility_units", "range_units", "expected"),
+    ((69.0, 31.0, False), (7.0, 3.0, True), (71.0, 29.0, True)),
 )
-def test_volatility_family_concentration_uses_registry_and_inclusive_boundary(share: float, expected: bool) -> None:
+def test_volatility_family_concentration_uses_registry_and_inclusive_boundary(
+    volatility_units: float, range_units: float, expected: bool
+) -> None:
     result = summarize_component_zero_ood(
-        _decomposition(_rows(("rv_4h", share), ("range_ratio_3d", 1 - share))),
+        _decomposition(
+            _rows(("rv_4h", volatility_units), ("range_ratio_3d", range_units)),
+            threshold=0.5,
+        ),
         retained_feature_names=NAMES,
     )
     assert result.volatility_family_concentration is expected
@@ -232,10 +238,11 @@ def test_rejects_missing_or_extra_sample_contribution_keys_and_wrong_registry_co
 
 
 def test_registry_hash_is_canonical_stable_and_sensitive_only_to_admitted_payload() -> None:
-    first = _registry_sha256(NAMES, REGISTRY, THREE_DAY_CHART_FEATURE_SCHEMA_VERSION)
-    second = _registry_sha256(NAMES, REGISTRY, THREE_DAY_CHART_FEATURE_SCHEMA_VERSION)
+    first = _canonical_registry_sha256(NAMES, REGISTRY, THREE_DAY_CHART_FEATURE_SCHEMA_VERSION)
+    second = _canonical_registry_sha256(NAMES, REGISTRY, THREE_DAY_CHART_FEATURE_SCHEMA_VERSION)
+    assert first == "cf0b92c6d01a04e79a4b0510ee123ab42401576fe00cc6e6e83acec1e313b4ba"
     assert first == second
-    assert first != _registry_sha256(NAMES, tuple(reversed(REGISTRY)), THREE_DAY_CHART_FEATURE_SCHEMA_VERSION)
+    assert first != _canonical_registry_sha256(NAMES, tuple(reversed(REGISTRY)), THREE_DAY_CHART_FEATURE_SCHEMA_VERSION)
     mutations = (
         replace(REGISTRY[0], name=REGISTRY[0].name + "_changed"),
         replace(REGISTRY[0], family=REGISTRY[0].family + "_changed"),
@@ -245,12 +252,38 @@ def test_registry_hash_is_canonical_stable_and_sensitive_only_to_admitted_payloa
     )
     assert all(
         first
-        != _registry_sha256(NAMES, (changed,) + REGISTRY[1:], THREE_DAY_CHART_FEATURE_SCHEMA_VERSION)
+        != _canonical_registry_sha256(NAMES, (changed,) + REGISTRY[1:], THREE_DAY_CHART_FEATURE_SCHEMA_VERSION)
         for changed in mutations
     )
-    unrelated = MappingProxyType({"feature_schema_sha256": "ignored"})
-    assert unrelated["feature_schema_sha256"] == "ignored"
-    assert first == _registry_sha256(NAMES, REGISTRY, THREE_DAY_CHART_FEATURE_SCHEMA_VERSION)
+    policy_changed = replace(
+        REGISTRY[0],
+        null_policy="changed",
+        clipping_policy="changed",
+        scale_invariant=not REGISTRY[0].scale_invariant,
+    )
+    assert first == _canonical_registry_sha256(
+        NAMES, (policy_changed,) + REGISTRY[1:], THREE_DAY_CHART_FEATURE_SCHEMA_VERSION
+    )
+    payload = _canonical_registry_payload(NAMES, REGISTRY, THREE_DAY_CHART_FEATURE_SCHEMA_VERSION)
+    assert tuple(payload) == ("registry_schema_version", "retained_feature_names", "registry")
+    assert set(payload["registry"][0]) == {
+        "name", "family", "aggregation_minutes", "lookback_minutes", "formula"
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "threshold", "expected"),
+    (
+        (0.5 - 5e-13, 0.5, False),
+        (0.5, 0.5, True),
+        (0.7 - 5e-13, 0.7, False),
+        (0.7, 0.7, True),
+    ),
+)
+def test_concentration_thresholds_are_literal_without_tolerance(
+    value: float, threshold: float, expected: bool
+) -> None:
+    assert _meets_threshold(value, threshold) is expected
 
 
 def test_result_and_nested_contracts_are_frozen_and_validate_invariants() -> None:
@@ -285,3 +318,83 @@ def test_result_and_nested_contracts_are_frozen_and_validate_invariants() -> Non
     )
     with pytest.raises(ValueError):
         replace(result, family_rows=(result.family_rows[0], duplicated_family) + result.family_rows[2:])
+
+
+def test_analysis_rejects_forged_feature_order_and_impossible_frequency_totals() -> None:
+    result = summarize_component_zero_ood(_decomposition(), retained_feature_names=NAMES)
+    first, second = result.feature_rows[:2]
+    reordered = (
+        replace(second, rank=1),
+        replace(first, rank=2),
+    ) + result.feature_rows[2:]
+    with pytest.raises(ValueError, match="order"):
+        replace(result, feature_rows=reordered, top_five_features=tuple(row.feature_name for row in reordered[:5]))
+
+    zero_top1 = tuple(
+        replace(row, top1_count=0, top1_ratio=0.0) for row in result.feature_rows
+    )
+    with pytest.raises(ValueError, match="top-1"):
+        replace(result, feature_rows=zero_top1)
+    excess_top1 = (
+        replace(result.feature_rows[0], top1_count=24, top1_ratio=1.0),
+        replace(result.feature_rows[1], top1_count=24, top1_ratio=1.0),
+    ) + result.feature_rows[2:]
+    with pytest.raises(ValueError, match="top-1"):
+        replace(result, feature_rows=excess_top1)
+    excess_top5 = tuple(
+        replace(row, top5_count=24, top5_ratio=1.0) for row in result.feature_rows
+    )
+    with pytest.raises(ValueError, match="top-5"):
+        replace(result, feature_rows=excess_top5)
+
+    tied = summarize_component_zero_ood(
+        _decomposition(_rows(("return_4h", 1.0), ("rv_4h", 1.0))),
+        retained_feature_names=NAMES,
+    )
+    assert tied.feature_rows[:2][0].feature_name == "return_4h"
+    tied_reordered = (
+        replace(tied.feature_rows[1], rank=1),
+        replace(tied.feature_rows[0], rank=2),
+    ) + tied.feature_rows[2:]
+    with pytest.raises(ValueError, match="canonical registry tie order"):
+        replace(
+            tied,
+            feature_rows=tied_reordered,
+            top_five_features=tuple(row.feature_name for row in tied_reordered[:5]),
+        )
+
+
+def test_analysis_rejects_forged_registry_hash_feature_and_family_provenance() -> None:
+    result = summarize_component_zero_ood(_decomposition(), retained_feature_names=NAMES)
+    fake_hash = "f" * 64
+    forged_features = tuple(replace(row, registry_sha256=fake_hash) for row in result.feature_rows)
+    forged_families = tuple(replace(row, registry_sha256=fake_hash) for row in result.family_rows)
+    with pytest.raises(ValueError, match="canonical registry hash"):
+        replace(
+            result,
+            registry_sha256=fake_hash,
+            feature_rows=forged_features,
+            family_rows=forged_families,
+        )
+
+    bad_family_feature = replace(result.feature_rows[0], registry_family="forged")
+    with pytest.raises(ValueError, match="registry family"):
+        replace(result, feature_rows=(bad_family_feature,) + result.feature_rows[1:])
+
+    unknown = replace(result.feature_rows[0], feature_name="unknown_feature")
+    with pytest.raises(ValueError, match="canonical registry"):
+        replace(
+            result,
+            feature_rows=(unknown,) + result.feature_rows[1:],
+            top_five_features=("unknown_feature",) + result.top_five_features[1:],
+        )
+
+    wrong_family_order = (result.family_rows[1], result.family_rows[0]) + result.family_rows[2:]
+    with pytest.raises(ValueError, match="family order"):
+        replace(result, family_rows=wrong_family_order)
+
+    wrong_members = replace(
+        result.family_rows[0], family_feature_names=result.family_rows[0].family_feature_names[:-1]
+    )
+    with pytest.raises(ValueError, match="family"):
+        replace(result, family_rows=(wrong_members,) + result.family_rows[1:])

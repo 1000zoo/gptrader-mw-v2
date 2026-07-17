@@ -34,8 +34,8 @@ def _is_finite_nonnegative(value: object) -> bool:
     )
 
 
-def _at_least(value: float, threshold: float) -> bool:
-    return value >= threshold or math.isclose(value, threshold, rel_tol=0, abs_tol=1e-12)
+def _meets_threshold(value: float, threshold: float) -> bool:
+    return value >= threshold
 
 
 def _validate_scope_identity(scope: str, component_index: int, fingerprint: str) -> None:
@@ -163,7 +163,7 @@ class OODFamilySummaryRow:
         if self.concentration_threshold != _VOLATILITY_FAMILY_THRESHOLD:
             raise ValueError("family concentration threshold is not canonical")
         expected_applies = self.family_name == "volatility"
-        expected_result = expected_applies and _at_least(
+        expected_result = expected_applies and _meets_threshold(
             self.contribution_ratio, self.concentration_threshold
         )
         if self.concentration_rule_applies is not expected_applies or self.concentration_result is not expected_result:
@@ -211,19 +211,65 @@ class ComponentZeroOODAnalysis:
             raise ValueError("analysis row identities must be unique")
         if tuple(row.rank for row in self.feature_rows) != tuple(range(1, len(self.feature_rows) + 1)):
             raise ValueError("feature rows must be in rank order")
+        canonical_by_name = {
+            spec.name: spec for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1
+        }
+        if any(name not in canonical_by_name for name in feature_names):
+            raise ValueError("feature rows do not identify a canonical registry subset")
+        retained_names = tuple(
+            spec.name
+            for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1
+            if spec.name in set(feature_names)
+        )
+        retained_position = {name: index for index, name in enumerate(retained_names)}
+        expected_feature_order = tuple(
+            sorted(
+                retained_names,
+                key=lambda name: (
+                    -next(
+                        row.contribution_sum
+                        for row in self.feature_rows
+                        if row.feature_name == name
+                    ),
+                    retained_position[name],
+                ),
+            )
+        )
+        if feature_names != expected_feature_order:
+            raise ValueError(
+                "feature row order must be contribution descending with canonical registry tie order"
+            )
+        if any(
+            row.registry_family != canonical_by_name[row.feature_name].family
+            for row in self.feature_rows
+        ):
+            raise ValueError("feature row registry family is not canonical")
         if self.top_five_features != feature_names[:5]:
             raise ValueError("top-five features must reproduce feature rank order")
         if any(
             row.analysis_scope != self.analysis_scope
             or row.primary_component_fingerprint != self.primary_component_fingerprint
+            or row.registry_schema_version != self.registry_schema_version
             or row.registry_sha256 != self.registry_sha256
             for row in (*self.feature_rows, *self.family_rows)
         ):
             raise ValueError("nested analysis provenance is inconsistent")
+        expected_registry_hash = _canonical_registry_sha256(
+            retained_names,
+            THREE_DAY_CHART_FEATURE_REGISTRY_V1,
+            self.registry_schema_version,
+        )
+        if self.registry_sha256 != expected_registry_hash:
+            raise ValueError("analysis does not carry the canonical registry hash")
         if not math.isclose(sum(row.contribution_ratio for row in self.feature_rows), 1.0, abs_tol=1e-12):
             raise ValueError("feature contribution ratios do not reconcile")
         if not math.isclose(sum(row.contribution_ratio for row in self.family_rows), 1.0, abs_tol=1e-12):
             raise ValueError("family contribution ratios do not reconcile")
+        if sum(row.top1_count for row in self.feature_rows) != self.ood_sample_count:
+            raise ValueError("top-1 counts must select exactly one feature per OOD sample")
+        expected_top5_total = self.ood_sample_count * min(5, len(self.feature_rows))
+        if sum(row.top5_count for row in self.feature_rows) != expected_top5_total:
+            raise ValueError("top-5 counts must select the canonical number of features per OOD sample")
         total_sum = sum(row.contribution_sum for row in self.feature_rows)
         if total_sum <= 0 or any(
             not math.isclose(
@@ -240,6 +286,24 @@ class ComponentZeroOODAnalysis:
         )
         if len(family_features) != len(set(family_features)) or set(family_features) != set(feature_names):
             raise ValueError("family rows must partition all retained features")
+        expected_family_names = tuple(
+            dict.fromkeys(canonical_by_name[name].family for name in retained_names)
+        )
+        if family_names != expected_family_names:
+            raise ValueError("family order must follow canonical registry first appearance")
+        expected_family_features = {
+            family: tuple(
+                name
+                for name in retained_names
+                if canonical_by_name[name].family == family
+            )
+            for family in expected_family_names
+        }
+        if any(
+            row.family_feature_names != expected_family_features[row.family_name]
+            for row in self.family_rows
+        ):
+            raise ValueError("family feature partition must exactly reproduce the canonical registry")
         feature_by_name = {row.feature_name: row for row in self.feature_rows}
         for family in self.family_rows:
             family_sum = sum(
@@ -262,16 +326,16 @@ class ComponentZeroOODAnalysis:
                 )
             ):
                 raise ValueError("family membership and contribution statistics do not reconcile")
-        expected_single = _at_least(
+        expected_single = _meets_threshold(
             max(row.contribution_ratio for row in self.feature_rows),
             _SINGLE_FEATURE_THRESHOLD,
         )
         volatility = next((row for row in self.family_rows if row.family_name == "volatility"), None)
-        expected_volatility = volatility is not None and _at_least(
+        expected_volatility = volatility is not None and _meets_threshold(
             volatility.contribution_ratio, _VOLATILITY_FAMILY_THRESHOLD
         )
         expected_recurrent = any(
-            _at_least(row.top1_ratio, _RECURRENT_FEATURE_THRESHOLD)
+            _meets_threshold(row.top1_ratio, _RECURRENT_FEATURE_THRESHOLD)
             for row in self.feature_rows
         )
         if (
@@ -282,12 +346,12 @@ class ComponentZeroOODAnalysis:
             raise ValueError("analysis concentration flags are inconsistent")
 
 
-def _registry_sha256(
+def _canonical_registry_payload(
     retained_feature_names: Sequence[str],
     registry: Sequence[object],
     registry_schema_version: str,
-) -> str:
-    payload = {
+) -> dict[str, object]:
+    return {
         "registry_schema_version": registry_schema_version,
         "retained_feature_names": list(retained_feature_names),
         "registry": [
@@ -301,6 +365,16 @@ def _registry_sha256(
             for spec in registry
         ],
     }
+
+
+def _canonical_registry_sha256(
+    retained_feature_names: Sequence[str],
+    registry: Sequence[object],
+    registry_schema_version: str,
+) -> str:
+    payload = _canonical_registry_payload(
+        retained_feature_names, registry, registry_schema_version
+    )
     encoded = json.dumps(
         payload,
         sort_keys=True,
@@ -385,7 +459,7 @@ def summarize_component_zero_ood(
     totals = {name: sum(contributions_by_feature[name]) for name in names}
     ranked_names = tuple(sorted(names, key=lambda name: (-totals[name], registry_position[name])))
     registry_by_name = {spec.name: spec for spec in registry}
-    registry_hash = _registry_sha256(names, registry, registry_schema_version)
+    registry_hash = _canonical_registry_sha256(names, registry, registry_schema_version)
     feature_rows = tuple(
         OODFeatureSummaryRow(
             _ANALYSIS_SCOPE,
@@ -428,7 +502,7 @@ def summarize_component_zero_ood(
                 _VOLATILITY_FAMILY_THRESHOLD,
                 family_name == "volatility",
                 family_name == "volatility"
-                and _at_least(family_ratio, _VOLATILITY_FAMILY_THRESHOLD),
+                and _meets_threshold(family_ratio, _VOLATILITY_FAMILY_THRESHOLD),
             )
         )
     frozen_families = tuple(family_rows)
@@ -444,10 +518,13 @@ def summarize_component_zero_ood(
         feature_rows,
         frozen_families,
         ranked_names[:5],
-        _at_least(feature_rows[0].contribution_ratio, _SINGLE_FEATURE_THRESHOLD),
+        _meets_threshold(feature_rows[0].contribution_ratio, _SINGLE_FEATURE_THRESHOLD),
         volatility is not None
-        and _at_least(volatility.contribution_ratio, _VOLATILITY_FAMILY_THRESHOLD),
-        any(_at_least(row.top1_ratio, _RECURRENT_FEATURE_THRESHOLD) for row in feature_rows),
+        and _meets_threshold(volatility.contribution_ratio, _VOLATILITY_FAMILY_THRESHOLD),
+        any(
+            _meets_threshold(row.top1_ratio, _RECURRENT_FEATURE_THRESHOLD)
+            for row in feature_rows
+        ),
     )
 
 
