@@ -434,6 +434,7 @@ def test_cluster_fit_is_reconstructed_from_raw_root_not_published_parameters(
     monkeypatch, tmp_path
 ) -> None:
     import scripts.audit_three_day_k4_daily_mapping as module
+    import scripts.chart_regime_strategy_mapping as production
 
     published = json.loads(_artifact().to_json())
     calls = []
@@ -444,15 +445,19 @@ def test_cluster_fit_is_reconstructed_from_raw_root_not_published_parameters(
         lambda raw_root, provenance=(): calls.append(("load", raw_root)) or (sentinel_vectors, sentinel_provenance),
     )
 
-    class Outcome:
-        artifact = type("Artifact", (), {"canonical_payload": lambda self: published})()
-        rejection_reasons = ()
+    artifact = type("Artifact", (), {"canonical_payload": lambda self: published})()
 
     def refit(vectors, provenance, code_hash):
         calls.append(("fit", vectors, provenance, code_hash))
-        return Outcome()
+        return artifact, None
 
-    monkeypatch.setattr(module, "_fit_cluster_model", refit)
+    monkeypatch.setattr(module, "_independently_recompute_k4", refit)
+    monkeypatch.setattr(
+        production, "fit_fold_local_three_day_k4_model",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("production fit/gate conclusion must be ignored")
+        ),
+    )
     failures: list[str] = []
 
     rebuilt = _reconstruct_cluster_fit(
@@ -478,11 +483,10 @@ def test_cluster_fit_rejects_self_consistent_published_parameter_forgery(
     forged["artifact_hash"] = _hash({key: value for key, value in forged.items() if key != "artifact_hash"})
     monkeypatch.setattr(module, "_load_cluster_fit_vectors", lambda raw_root, provenance=(): ((object(),), ({},)))
 
-    class Outcome:
-        artifact = type("Artifact", (), {"canonical_payload": lambda self: original})()
-        rejection_reasons = ()
-
-    monkeypatch.setattr(module, "_fit_cluster_model", lambda *args: Outcome())
+    artifact = type("Artifact", (), {"canonical_payload": lambda self: original})()
+    monkeypatch.setattr(
+        module, "_independently_recompute_k4", lambda *args: (artifact, None)
+    )
     failures: list[str] = []
 
     _reconstruct_cluster_fit(
@@ -720,12 +724,7 @@ def test_failed_model_refit_rejects_self_consistent_attempt_forgery(
         module, "_load_cluster_fit_vectors", lambda *args: ((object(),), ({},))
     )
 
-    monkeypatch.setattr(
-        module, "_fit_cluster_model",
-        lambda *args: (_ for _ in ()).throw(
-            AssertionError("production fit conclusion must not be called")
-        ),
-    )
+    assert not hasattr(module, "_fit_cluster_model")
     monkeypatch.setattr(
         module, "_independently_recompute_model_attempt", lambda *args: original
     )
@@ -1105,8 +1104,7 @@ def test_real_typed_task7_publication_raw_root_and_ledgers_flow_through_audit(
 
     monkeypatch.setattr(module, "_load_cluster_fit_vectors", lambda root, frozen=(): ((object(),), tuple(provenance)))
     monkeypatch.setattr(
-        module, "_fit_cluster_model",
-        lambda *args: type("Outcome", (), {"artifact": model, "rejection_reasons": ()})(),
+        module, "_independently_recompute_k4", lambda *args: (model, None)
     )
     monkeypatch.setattr(
         module, "_load_phase_vectors",

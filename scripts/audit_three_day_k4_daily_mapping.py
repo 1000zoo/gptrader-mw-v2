@@ -268,14 +268,6 @@ def _load_cluster_fit_vectors(raw_root: Path, provenance=()):
     )
 
 
-def _fit_cluster_model(vectors, provenance, code_hash: str):
-    from scripts.chart_regime_strategy_mapping import fit_fold_local_three_day_k4_model
-
-    return fit_fold_local_three_day_k4_model(
-        vectors, source_provenance=provenance, code_provenance_hash=code_hash
-    )
-
-
 _INDEPENDENT_GATE_THRESHOLDS = {
     "minimum_adjusted_rand_index": 0.8,
     "minimum_normalized_mutual_information": 0.8,
@@ -359,7 +351,7 @@ def _independent_attempt_base(vectors, provenance, code_hash: str) -> dict[str, 
     }
 
 
-def _independently_recompute_model_attempt(vectors, provenance, code_hash: str):
+def _independently_recompute_k4(vectors, provenance, code_hash: str):
     from src.domain.regime import (
         RegimeModelConfig, THREE_DAY_CHART_FEATURE_REGISTRY_V1,
         ThreeDayDailyResearchProfile,
@@ -521,6 +513,26 @@ def _independently_recompute_model_attempt(vectors, provenance, code_hash: str):
         }
         gates.update({f"{name}_passed": value for name, value in checks.items()})
         failed = sorted(name for name, value in checks.items() if not value)
+        if passed:
+            from src.infrastructure.regime.three_day_k4_model_artifact import (
+                ThreeDayK4ModelArtifact,
+            )
+
+            vector_hash = base["fit_input_vector_hash"]
+            artifact = ThreeDayK4ModelArtifact.from_fit(
+                primary,
+                training_start_at=profile.fold.cluster_fit.start_at,
+                training_end_at=profile.fold.cluster_fit.end_at,
+                first_usable_anchor_at=vectors[0].anchor_at,
+                last_usable_anchor_at=vectors[-1].anchor_at,
+                usable_anchor_count=len(vectors),
+                source_provenance=provenance,
+                feature_history_hash=vector_hash,
+                fit_input_vector_hash=vector_hash,
+                code_provenance_hash=code_hash,
+                model_gates=gates,
+            )
+            return artifact, None
         payload = {
             "schema_version": "three-day-k4-model-attempt-v1",
             "status": "failed-model-gates", **base,
@@ -547,7 +559,14 @@ def _independently_recompute_model_attempt(vectors, provenance, code_hash: str):
                 "reason_code": _independent_technical_reason(error),
             },
         }
-    return {**payload, "attempt_hash": _hash(payload)}
+    return None, {**payload, "attempt_hash": _hash(payload)}
+
+
+def _independently_recompute_model_attempt(vectors, provenance, code_hash: str):
+    artifact, attempt = _independently_recompute_k4(vectors, provenance, code_hash)
+    if artifact is not None or attempt is None:
+        raise ValueError("independent K4 unexpectedly passed while auditing failure")
+    return attempt
 
 
 def _reconstruct_cluster_fit(
@@ -567,11 +586,12 @@ def _reconstruct_cluster_fit(
         )
         chart_script = ROOT / "scripts" / "chart_regime_strategy_mapping.py"
         code_hash = hashlib.sha256(chart_script.read_bytes()).hexdigest()
-        outcome = _fit_cluster_model(vectors, provenance, code_hash)
-        artifact = getattr(outcome, "artifact", None)
+        artifact, attempt = _independently_recompute_k4(
+            vectors, provenance, code_hash
+        )
         if artifact is None:
-            reasons = getattr(outcome, "rejection_reasons", ())
-            failures.append(f"raw-refitted K4 failed gates: {list(reasons)}")
+            reasons = attempt.get("failed_gate_names", ()) if isinstance(attempt, Mapping) else ()
+            failures.append(f"independently raw-refitted K4 failed gates: {list(reasons)}")
             return None
         rebuilt = artifact.canonical_payload()
         _same(rebuilt, published_model, failures, "raw-refitted K4 artifact")
