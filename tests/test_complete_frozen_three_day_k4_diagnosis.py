@@ -499,14 +499,14 @@ def _completion_fixture() -> SimpleNamespace:
     component = SimpleNamespace(analysis_scope="primary-component-0-ood-exceedances", primary_component_index=0, primary_component_fingerprint=fingerprint, assigned_sample_count=409, ood_sample_count=24, registry_schema_version="registry-v1", registry_sha256="d" * 64, feature_rows=feature_rows, family_rows=family_rows, top_five_features=("rv_4h", "range_ratio_3d"), single_feature_concentration=True, volatility_family_concentration=True, recurrent_feature_dominance=True, diagnostic_only=True)
     def empirical(scope: str, spacing: int | None, offset: int | None) -> SimpleNamespace:
         metric = "full_sample_empirical_centroid_distance" if spacing is None else "offset_empirical_centroid_distance"
-        centroid = SimpleNamespace(sample_scope=scope, spacing_days=spacing, offset=offset, offset_origin_anchor="2021-01-01T00:00:00Z", half_label="A", primary_component_index=3, half_component_index=1, primary_component_fingerprint=fingerprint, half_component_fingerprint=half_fingerprint, sample_count=1, sample_share=1.0, centroid_status="available", metric_name=metric, empirical_centroid=(1.0, 2.0), distance=2.0, assignment_source="frozen_reproduced_half_assignment", refit_performed=False, rematch_performed=False, diagnostic_only=True)
+        centroid = SimpleNamespace(sample_scope=scope, spacing_days=spacing, offset=offset, offset_origin_anchor="anchor-0000", half_label="A", primary_component_index=3, half_component_index=1, primary_component_fingerprint=fingerprint, half_component_fingerprint=half_fingerprint, sample_count=1, sample_share=1.0, centroid_status="available", metric_name=metric, empirical_centroid=(1.0, 2.0), distance=2.0, assignment_source="frozen_reproduced_half_assignment", refit_performed=False, rematch_performed=False, diagnostic_only=True)
         contribution = SimpleNamespace(sample_scope=scope, spacing_days=spacing, offset=offset, half_label="A", primary_component_index=3, half_component_index=1, primary_component_fingerprint=fingerprint, half_component_fingerprint=half_fingerprint, feature_name="rv_4h", registry_family="volatility", squared_distance=4.0, contribution_ratio=1.0, rank=1)
         return SimpleNamespace(sample_scope=scope, spacing_days=spacing, offset=offset, selected_sample_count=1, centroid_rows=(centroid,), feature_rows=(contribution,), maximum_drift_half_label="A", maximum_drift_primary_component_index=3, maximum_drift_half_component_index=1, maximum_drift_primary_component_fingerprint=fingerprint, maximum_drift_half_component_fingerprint=half_fingerprint, maximum_drift_distance=2.0, top_five_drift_features=("rv_4h",))
     offsets = tuple(empirical("offset_subsample", spacing, offset) for spacing in (3, 7) for offset in range(spacing))
     conclusions = tuple(SimpleNamespace(spacing_days=row.spacing_days, offset=row.offset, maximum_drift_half_label="A", maximum_drift_primary_component_index=3, maximum_drift_primary_component_fingerprint=fingerprint, maximum_drift_half_component_index=1, maximum_drift_half_component_fingerprint=half_fingerprint, maximum_ood_primary_component_index=0, maximum_ood_primary_component_fingerprint=fingerprint, top_five_drift_features=("rv_4h",), drift_component_matches_full_sample=True, ood_component_matches_full_sample=(row.offset % 2 == 0), ordered_top5_matches_full_sample=True, top5_set_matches_full_sample=True) for row in offsets)
     full_ood = (SimpleNamespace(sample_scope="full_sample", spacing_days=None, offset=None, primary_component_index=0, primary_component_fingerprint=fingerprint, numerator=24, denominator=409, rate=24 / 409, distance_source="frozen_primary_ood_row", threshold_source="frozen_primary_component_threshold"),)
     offset_ood = tuple(SimpleNamespace(sample_scope="offset_subsample", spacing_days=row.spacing_days, offset=row.offset, primary_component_index=0, primary_component_fingerprint=fingerprint, numerator=1, denominator=10, rate=.1, distance_source="frozen_primary_ood_row", threshold_source="frozen_primary_component_threshold") for row in offsets)
-    receipts = (SimpleNamespace(global_index=0, anchor_at="2021-01-01T00:00:00Z", half_label="A", half_component_index=1, half_component_fingerprint=half_fingerprint, matched_primary_component_index=3, matched_primary_component_fingerprint=fingerprint, primary_component_index=0, primary_component_fingerprint=fingerprint, squared_mahalanobis=1.0, ood_threshold=2.0, ood_exceeds=False, assignment_source="frozen_reproduced_assignments_and_ood_rows"),)
+    receipts = tuple(SimpleNamespace(global_index=index, anchor_at=f"anchor-{index:04d}", half_label="A" if index < 820 else "B", half_component_index=1, half_component_fingerprint=half_fingerprint, matched_primary_component_index=3, matched_primary_component_fingerprint=fingerprint, primary_component_index=0, primary_component_fingerprint=fingerprint, squared_mahalanobis=1.0, ood_threshold=2.0, ood_exceeds=False, assignment_source="frozen_reproduced_assignments_and_ood_rows") for index in range(1641))
     return SimpleNamespace(completion_scope=COMPLETION_SCOPE, component_zero_ood=component, full_sample_empirical=empirical("full_sample", None, None), full_sample_ood=full_ood, offset_empirical=offsets, offset_ood=offset_ood, offset_conclusions=conclusions, sample_receipts=receipts, diagnostic_only=True)
 
 
@@ -533,6 +533,9 @@ def test_rendered_completion_has_exact_artifacts_scopes_and_metric_names() -> No
     assert "full_sample_empirical_centroid_distance" in text
     assert "offset_empirical_centroid_distance" in text
     assert "mixed" in text
+    assert text.count("offset_empirical_centroid_distance:") == 10
+    assert "maximum_ood_primary_component=0" in text
+    assert "primary_fingerprint=" in text and "half_fingerprint=" in text
     assert "gate pass" not in text.lower() and "gate fail" not in text.lower()
     for name, data in artifacts.items():
         assert b"None" not in data
@@ -548,9 +551,33 @@ def test_rendered_completion_has_exact_artifacts_scopes_and_metric_names() -> No
     diagnostics = list(csv.DictReader(artifacts["frozen_k4_offset_empirical_diagnostics.csv"].decode().splitlines()))
     assert {row["record_type"] for row in diagnostics} == {"centroid", "ood", "conclusion"}
     assert all(row["spacing_days"] == "" and row["offset"] == "" for row in diagnostics if row["sample_scope"] == "full_sample")
+    assert all(row["offset_origin_anchor"] == "anchor-0000" for row in diagnostics)
+    assert all(row["maximum_drift_primary_component_fingerprint"] for row in diagnostics if row["record_type"] in {"centroid", "ood"})
+    full_rows = [row for row in diagnostics if row["sample_scope"] == "full_sample"]
+    assert {row["maximum_drift_primary_component_index"] for row in full_rows} == {"3"}
+    assert {row["maximum_ood_primary_component_index"] for row in full_rows} == {"0"}
     empirical_features = list(csv.DictReader(artifacts["frozen_k4_offset_feature_contributions.csv"].decode().splitlines()))
     assert tuple(empirical_features[0]) == completion_script._EMPIRICAL_FEATURE_HEADERS
     assert {row["metric_name"] for row in diagnostics if row["record_type"] == "centroid"} == {"full_sample_empirical_centroid_distance", "offset_empirical_centroid_distance"}
+
+
+@pytest.mark.parametrize("failure", ("scope", "receipt_count", "receipt_order"))
+def test_renderer_rejects_invalid_nested_scope_or_sample_receipt_ledger(failure: str) -> None:
+    completion = _completion_fixture()
+    if failure == "scope":
+        completion.component_zero_ood.analysis_scope = "wrong"
+    elif failure == "receipt_count":
+        completion.sample_receipts = completion.sample_receipts[:-1]
+    else:
+        completion.sample_receipts = tuple(reversed(completion.sample_receipts))
+    with pytest.raises(PublicationError):
+        completion_script._render_completion_artifacts(
+            completion,
+            parent=SimpleNamespace(run_id="a" * 64, manifest_sha256="b" * 64, input_identity_sha256="c" * 64, replay=SimpleNamespace()),
+            implementation=SimpleNamespace(file_sha256={name: "e" * 64 for name in COMPLETION_IMPLEMENTATION_FILES}, implementation_sha256="f" * 64),
+            replay_validation={"parent_receipt": {}, "new_replay_receipt": {}, "match_verified": True},
+            fitted_parameter_summary={"metric_name": "fitted_parameter_centroid_distance", "distance": TEMPORAL},
+        )
 
 
 @pytest.mark.parametrize(
@@ -675,3 +702,35 @@ def test_atomic_replace_failure_cleans_temp_and_preserves_parent(tmp_path: Path)
         )
     assert list(output.iterdir()) == []
     assert _tree_state(parent_dir) == before
+
+
+def test_atomic_replace_bad_partial_target_is_removed(tmp_path: Path) -> None:
+    output = tmp_path / "out"
+    final = output / ("a" * 64)
+    def partial(_source: Path, target: Path) -> None:
+        target.mkdir()
+        (target / "bad").write_text("partial")
+        raise OSError("partial")
+    with pytest.raises(PublicationError, match="partial final"):
+        completion_script._publish_atomically(output, final, {"one": b"1"}, partial)
+    assert not final.exists()
+    assert list(output.iterdir()) == []
+
+
+def test_outer_parent_guard_covers_unwrapped_late_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "parent-root").mkdir()
+    parent_dir = _write_parent(tmp_path / "parent-root")
+    source = SimpleNamespace(identity=SimpleNamespace(canonical_payload=lambda: {"fixture": "frozen-source", "version": 1}), primary_fit=object(), vectors=())
+    def mutate_then_fail(_parent: object, _replay: object) -> object:
+        (parent_dir / "frozen_k4_ood_samples.csv").write_text("mutated")
+        raise RuntimeError("late seam")
+    monkeypatch.setattr(completion_script, "_validate_replay_matches_parent", mutate_then_fail)
+    with pytest.raises(PublicationError, match="immutable parent changed"):
+        completion_script.publish_frozen_k4_diagnosis_completion(
+            parent_run=parent_dir, model_attempt=tmp_path / "model.json",
+            raw_kline_root=tmp_path / "raw", output_root=tmp_path / "children",
+            source_loader=lambda *_: source, replay_runner=lambda _: _matching_replay(),
+            decomposition_runner=lambda *_: object(), completion_runner=lambda *_: _completion_fixture(),
+        )

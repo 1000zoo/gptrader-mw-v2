@@ -32,6 +32,7 @@ from src.domain.regime.frozen_k4_diagnosis_completion import (  # noqa: E402
     COMPLETION_ARTIFACT_FILENAMES,
     COMPLETION_IMPLEMENTATION_FILES,
     COMPLETION_SCOPE,
+    COMPONENT_ZERO_ANALYSIS_SCOPE,
     DIAGNOSTIC_SCHEMA_VERSION,
     RECURRENT_TOP1_THRESHOLD,
     SINGLE_FEATURE_THRESHOLD,
@@ -190,6 +191,35 @@ def publish_frozen_k4_diagnosis_completion(
 ) -> Path:
     """Publish one deterministic child while keeping the parent byte-identical."""
     parent = _load_parent_provenance(Path(parent_run))
+    try:
+        return _publish_loaded_completion(
+            parent=parent,
+            model_attempt=model_attempt,
+            raw_kline_root=raw_kline_root,
+            output_root=output_root,
+            source_loader=source_loader,
+            replay_runner=replay_runner,
+            decomposition_runner=decomposition_runner,
+            completion_runner=completion_runner,
+            replace_directory=replace_directory,
+        )
+    finally:
+        if _directory_bytes(parent.parent_dir) != dict(parent.directory_snapshot):
+            raise PublicationError("immutable parent changed during completion publication")
+
+
+def _publish_loaded_completion(
+    *,
+    parent: ParentProvenance,
+    model_attempt: Path,
+    raw_kline_root: Path,
+    output_root: Path,
+    source_loader: Callable[[Path, Path], object],
+    replay_runner: Callable[[object], object],
+    decomposition_runner: Callable[[object, object, tuple[object, ...]], object],
+    completion_runner: Callable[[object, object, tuple[object, ...], object], object],
+    replace_directory: Callable[[Path, Path], None],
+) -> Path:
     output_root = Path(output_root)
     if _is_within(output_root, parent.parent_dir):
         raise PublicationError("completion output root cannot be inside parent run")
@@ -734,21 +764,60 @@ def _ood_family_rows(completion: object) -> list[dict[str, object]]:
 def _empirical_diagnostic_rows(completion: object) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     scopes = (completion.full_sample_empirical, *completion.offset_empirical)
+    scope_by_key = {
+        (scope.sample_scope, scope.spacing_days, scope.offset): scope for scope in scopes
+    }
+    ood_groups: dict[tuple[object, object, object], list[object]] = {}
+    for ood_row in (*completion.full_sample_ood, *completion.offset_ood):
+        ood_groups.setdefault(
+            (ood_row.sample_scope, ood_row.spacing_days, ood_row.offset), []
+        ).append(ood_row)
+
+    def decorate(payload: dict[str, object], key: tuple[object, object, object]) -> None:
+        scope = scope_by_key[key]
+        origins = {row.offset_origin_anchor for row in scope.centroid_rows}
+        if len(origins) != 1:
+            raise PublicationError("empirical scope has inconsistent offset origin")
+        maximum_ood = min(
+            (row for row in ood_groups[key] if row.denominator > 0),
+            key=lambda row: (
+                -float(row.rate),
+                -row.numerator,
+                -row.denominator,
+                row.primary_component_index,
+            ),
+        )
+        payload.update(
+            {
+                "offset_origin_anchor": next(iter(origins)),
+                "maximum_drift_half_label": scope.maximum_drift_half_label,
+                "maximum_drift_primary_component_index": scope.maximum_drift_primary_component_index,
+                "maximum_drift_primary_component_fingerprint": scope.maximum_drift_primary_component_fingerprint,
+                "maximum_drift_half_component_index": scope.maximum_drift_half_component_index,
+                "maximum_drift_half_component_fingerprint": scope.maximum_drift_half_component_fingerprint,
+                "maximum_ood_primary_component_index": maximum_ood.primary_component_index,
+                "maximum_ood_primary_component_fingerprint": maximum_ood.primary_component_fingerprint,
+            }
+        )
+
     for scope in scopes:
         for row in scope.centroid_rows:
             payload = _plain(row)
             payload["record_type"] = "centroid"
             payload["empirical_centroid"] = ";".join(_float(value) for value in row.empirical_centroid) if row.empirical_centroid is not None else None
+            decorate(payload, (scope.sample_scope, scope.spacing_days, scope.offset))
             rows.append(payload)
     for row in (*completion.full_sample_ood, *completion.offset_ood):
         payload = _plain(row)
         payload.update({"record_type": "ood", "ood_numerator": row.numerator, "ood_denominator": row.denominator, "ood_rate": row.rate})
+        decorate(payload, (row.sample_scope, row.spacing_days, row.offset))
         rows.append(payload)
     for row in completion.offset_conclusions:
         payload = _plain(row)
         payload["record_type"] = "conclusion"
         payload["sample_scope"] = "offset_subsample"
         payload["top_five_drift_features"] = ";".join(row.top_five_drift_features)
+        decorate(payload, ("offset_subsample", row.spacing_days, row.offset))
         rows.append(payload)
     return rows
 
@@ -774,6 +843,22 @@ def _render_completion_artifacts(
     if completion.completion_scope != COMPLETION_SCOPE:
         raise PublicationError("completion object has the wrong top-level scope")
     component = completion.component_zero_ood
+    receipts = completion.sample_receipts
+    if (
+        component.analysis_scope != COMPONENT_ZERO_ANALYSIS_SCOPE
+        or component.primary_component_index != 0
+    ):
+        raise PublicationError("Component 0 analysis has the wrong nested scope")
+    if (
+        not isinstance(receipts, tuple)
+        or len(receipts) != 1641
+        or tuple(row.global_index for row in receipts) != tuple(range(1641))
+        or tuple(row.anchor_at for row in receipts)
+        != tuple(sorted({row.anchor_at for row in receipts}))
+    ):
+        raise PublicationError("fixed sample receipt ledger must be 1,641 ordered rows")
+    if replay_validation.get("match_verified") is not True:
+        raise PublicationError("renderer requires a verified parent replay match")
     payload = {
         "diagnostic_schema_version": DIAGNOSTIC_SCHEMA_VERSION,
         "completion_scope": COMPLETION_SCOPE,
@@ -845,6 +930,24 @@ def _completion_markdown(completion: object, fitted: Mapping[str, object]) -> by
         ("ordered top five", "ordered_top5_matches_full_sample"),
         ("top-five set", "top5_set_matches_full_sample"),
     )
+    scope_by_key = {
+        (scope.spacing_days, scope.offset): scope for scope in completion.offset_empirical
+    }
+    for conclusion in completion.offset_conclusions:
+        scope = scope_by_key[(conclusion.spacing_days, conclusion.offset)]
+        origin = scope.centroid_rows[0].offset_origin_anchor
+        lines.append(
+            f"- {conclusion.spacing_days}-day offset={conclusion.offset} origin={origin} "
+            f"offset_empirical_centroid_distance: max={_float(scope.maximum_drift_distance)} "
+            f"half={scope.maximum_drift_half_label} "
+            f"primary_component={scope.maximum_drift_primary_component_index} "
+            f"primary_fingerprint={scope.maximum_drift_primary_component_fingerprint} "
+            f"half_component={scope.maximum_drift_half_component_index} "
+            f"half_fingerprint={scope.maximum_drift_half_component_fingerprint} "
+            f"maximum_ood_primary_component={conclusion.maximum_ood_primary_component_index} "
+            f"maximum_ood_fingerprint={conclusion.maximum_ood_primary_component_fingerprint} "
+            f"top_five={','.join(conclusion.top_five_drift_features)}"
+        )
     for spacing in (3, 7):
         rows = [row for row in completion.offset_conclusions if row.spacing_days == spacing]
         for label, field in flags:
@@ -949,9 +1052,14 @@ def _publish_atomically(
     except Exception:
         shutil.rmtree(temp_dir, ignore_errors=True)
         if final_dir.exists():
-            if _directory_bytes(final_dir) != dict(artifacts):
+            try:
+                partial_differs = _directory_bytes(final_dir) != dict(artifacts)
+            except PublicationError:
+                partial_differs = True
+            finally:
+                shutil.rmtree(final_dir, ignore_errors=True)
+            if partial_differs:
                 raise PublicationError("partial final completion run detected")
-            shutil.rmtree(final_dir)
         raise
 
 
