@@ -31,6 +31,11 @@ _RECURRENT_FEATURE_THRESHOLD = 0.50
 _FULL_SAMPLE_SCOPE = "full_sample"
 _FULL_SAMPLE_METRIC = "full_sample_empirical_centroid_distance"
 _ASSIGNMENT_SOURCE = "frozen_reproduced_half_assignment"
+_COMPLETION_SCOPE = "frozen-k4-diagnosis-completion"
+_OFFSET_SPACINGS = (3, 7)
+_OOD_DISTANCE_SOURCE = "existing_primary_ood_row"
+_OOD_THRESHOLD_SOURCE = "frozen_component_chi_square_threshold"
+_RECEIPT_ASSIGNMENT_SOURCE = "existing_reproduced_assignments"
 
 
 def _is_finite_nonnegative(value: object) -> bool:
@@ -115,6 +120,174 @@ def _validate_empirical_scope(
         or not 0 <= offset < spacing_days
     ):
         raise ValueError("empirical sample scope is not canonical")
+
+
+def _global_offset_indices(
+    sample_count: int, spacing_days: int, offset: int
+) -> tuple[int, ...]:
+    """Select a descriptive subsample by immutable global array position."""
+    if (
+        not isinstance(sample_count, int)
+        or isinstance(sample_count, bool)
+        or sample_count < 0
+        or spacing_days not in _OFFSET_SPACINGS
+        or not isinstance(offset, int)
+        or isinstance(offset, bool)
+        or not 0 <= offset < spacing_days
+    ):
+        raise ValueError("global offset selection is not canonical")
+    return tuple(range(offset, sample_count, spacing_days))
+
+
+@dataclass(frozen=True)
+class OffsetOODRow:
+    sample_scope: str
+    spacing_days: int | None
+    offset: int | None
+    primary_component_index: int
+    primary_component_fingerprint: str
+    numerator: int
+    denominator: int
+    rate: float | None
+    distance_source: str = _OOD_DISTANCE_SOURCE
+    threshold_source: str = _OOD_THRESHOLD_SOURCE
+
+    def __post_init__(self) -> None:
+        if self.sample_scope == _FULL_SAMPLE_SCOPE:
+            if self.spacing_days is not None or self.offset is not None:
+                raise ValueError("full-sample OOD row cannot carry an offset")
+        elif (
+            self.sample_scope != "offset_subsample"
+            or self.spacing_days not in _OFFSET_SPACINGS
+            or not isinstance(self.offset, int)
+            or isinstance(self.offset, bool)
+            or not 0 <= self.offset < self.spacing_days
+        ):
+            raise ValueError("OOD sample scope is not canonical")
+        _component_index(self.primary_component_index, "primary component index")
+        _canonical_fingerprint(self.primary_component_fingerprint, "primary component")
+        if (
+            not isinstance(self.numerator, int)
+            or isinstance(self.numerator, bool)
+            or not isinstance(self.denominator, int)
+            or isinstance(self.denominator, bool)
+            or not 0 <= self.numerator <= self.denominator
+        ):
+            raise ValueError("OOD numerator and denominator are incoherent")
+        expected = None if self.denominator == 0 else self.numerator / self.denominator
+        if (expected is None and self.rate is not None) or (
+            expected is not None
+            and (
+                not isinstance(self.rate, float)
+                or not math.isfinite(self.rate)
+                or not math.isclose(self.rate, expected, rel_tol=1e-15, abs_tol=1e-15)
+            )
+        ):
+            raise ValueError("OOD rate does not reconcile with counts")
+        if (
+            self.distance_source != _OOD_DISTANCE_SOURCE
+            or self.threshold_source != _OOD_THRESHOLD_SOURCE
+        ):
+            raise ValueError("OOD provenance is not frozen")
+
+
+@dataclass(frozen=True)
+class FixedSampleReceipt:
+    global_index: int
+    anchor_at: str
+    half_label: str
+    half_component_index: int
+    half_component_fingerprint: str
+    matched_primary_component_index: int
+    matched_primary_component_fingerprint: str
+    primary_component_index: int
+    primary_component_fingerprint: str
+    squared_mahalanobis: float
+    ood_threshold: float
+    ood_exceeds: bool
+    assignment_source: str = _RECEIPT_ASSIGNMENT_SOURCE
+
+    def __post_init__(self) -> None:
+        _component_index(self.global_index, "global index")
+        _canonical_anchor(self.anchor_at)
+        if self.half_label not in ("A", "B"):
+            raise ValueError("half label is not canonical")
+        for name in (
+            "half_component_index",
+            "matched_primary_component_index",
+            "primary_component_index",
+        ):
+            _component_index(getattr(self, name), name)
+        for name in (
+            "half_component_fingerprint",
+            "matched_primary_component_fingerprint",
+            "primary_component_fingerprint",
+        ):
+            _canonical_fingerprint(getattr(self, name), name)
+        if not _is_finite_nonnegative(self.squared_mahalanobis) or not _is_finite_nonnegative(
+            self.ood_threshold
+        ):
+            raise ValueError("OOD receipt distance and threshold must be finite")
+        if (
+            not isinstance(self.ood_exceeds, bool)
+            or self.ood_exceeds is not (self.squared_mahalanobis > self.ood_threshold)
+        ):
+            raise ValueError("OOD receipt must use the strict > flag")
+        if self.assignment_source != _RECEIPT_ASSIGNMENT_SOURCE:
+            raise ValueError("sample receipt assignment provenance is not frozen")
+
+
+@dataclass(frozen=True)
+class OffsetConclusion:
+    spacing_days: int
+    offset: int
+    maximum_drift_half_label: str
+    maximum_drift_primary_component_index: int
+    maximum_drift_primary_component_fingerprint: str
+    maximum_drift_half_component_index: int
+    maximum_drift_half_component_fingerprint: str
+    maximum_ood_primary_component_index: int
+    maximum_ood_primary_component_fingerprint: str
+    top_five_drift_features: tuple[str, ...]
+    drift_component_matches_full_sample: bool
+    ood_component_matches_full_sample: bool
+    ordered_top5_matches_full_sample: bool
+    top5_set_matches_full_sample: bool
+
+    def __post_init__(self) -> None:
+        if (
+            self.spacing_days not in _OFFSET_SPACINGS
+            or not isinstance(self.offset, int)
+            or isinstance(self.offset, bool)
+            or not 0 <= self.offset < self.spacing_days
+        ):
+            raise ValueError("offset conclusion key is not canonical")
+        if self.maximum_drift_half_label not in ("A", "B"):
+            raise ValueError("offset conclusion half is not canonical")
+        for name in (
+            "maximum_drift_primary_component_index",
+            "maximum_drift_half_component_index",
+            "maximum_ood_primary_component_index",
+        ):
+            _component_index(getattr(self, name), name)
+        for name in (
+            "maximum_drift_primary_component_fingerprint",
+            "maximum_drift_half_component_fingerprint",
+            "maximum_ood_primary_component_fingerprint",
+        ):
+            _canonical_fingerprint(getattr(self, name), name)
+        if (
+            not isinstance(self.top_five_drift_features, tuple)
+            or not self.top_five_drift_features
+            or len(set(self.top_five_drift_features)) != len(self.top_five_drift_features)
+            or any(not isinstance(value, bool) for value in (
+                self.drift_component_matches_full_sample,
+                self.ood_component_matches_full_sample,
+                self.ordered_top5_matches_full_sample,
+                self.top5_set_matches_full_sample,
+            ))
+        ):
+            raise ValueError("offset conclusion fields are not canonical")
 
 
 @dataclass(frozen=True)
@@ -1294,9 +1467,394 @@ def summarize_component_zero_ood(
     )
 
 
+def _maximum_ood(rows: Sequence[OffsetOODRow]) -> OffsetOODRow:
+    represented = tuple(row for row in rows if row.denominator > 0)
+    if not represented:
+        raise ValueError("OOD maximum requires at least one represented component")
+    return min(
+        represented,
+        key=lambda row: (
+            -float(row.rate),
+            -row.numerator,
+            -row.denominator,
+            row.primary_component_index,
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class FrozenK4DiagnosisCompletion:
+    completion_scope: str
+    component_zero_ood: ComponentZeroOODAnalysis
+    full_sample_empirical: EmpiricalScopeSummary
+    full_sample_ood: tuple[OffsetOODRow, ...]
+    offset_empirical: tuple[EmpiricalScopeSummary, ...]
+    offset_ood: tuple[OffsetOODRow, ...]
+    offset_conclusions: tuple[OffsetConclusion, ...]
+    sample_receipts: tuple[FixedSampleReceipt, ...]
+    diagnostic_only: bool = True
+
+    def __post_init__(self) -> None:
+        if self.completion_scope != _COMPLETION_SCOPE or self.diagnostic_only is not True:
+            raise ValueError("completion scope must be canonical diagnostic-only")
+        collections = (
+            self.full_sample_ood,
+            self.offset_empirical,
+            self.offset_ood,
+            self.offset_conclusions,
+            self.sample_receipts,
+        )
+        if any(not isinstance(rows, tuple) for rows in collections):
+            raise ValueError("completion collections must be immutable tuples")
+        if self.full_sample_empirical.sample_scope != _FULL_SAMPLE_SCOPE:
+            raise ValueError("full empirical scope is not canonical")
+        expected_keys = tuple(
+            (spacing, offset) for spacing in _OFFSET_SPACINGS for offset in range(spacing)
+        )
+        empirical_keys = tuple((row.spacing_days, row.offset) for row in self.offset_empirical)
+        conclusion_keys = tuple((row.spacing_days, row.offset) for row in self.offset_conclusions)
+        if empirical_keys != expected_keys or conclusion_keys != expected_keys:
+            raise ValueError("completion must contain exactly the ten ordered offset keys")
+        if tuple(row.global_index for row in self.sample_receipts) != tuple(
+            range(len(self.sample_receipts))
+        ):
+            raise ValueError("sample receipt global indices must be contiguous")
+        anchors = tuple(row.anchor_at for row in self.sample_receipts)
+        if tuple(sorted(set(anchors))) != anchors:
+            raise ValueError("sample receipt anchors must be strictly chronological")
+        component_fingerprints: dict[int, str] = {}
+        for row in self.full_sample_ood:
+            if row.sample_scope != _FULL_SAMPLE_SCOPE:
+                raise ValueError("full OOD scope is not canonical")
+            prior = component_fingerprints.setdefault(
+                row.primary_component_index, row.primary_component_fingerprint
+            )
+            if prior != row.primary_component_fingerprint:
+                raise ValueError("primary component fingerprint is inconsistent")
+        component_indices = tuple(sorted(component_fingerprints))
+        if tuple(row.primary_component_index for row in self.full_sample_ood) != component_indices:
+            raise ValueError("full OOD rows must be unique and component ordered")
+        if sum(row.denominator for row in self.full_sample_ood) != len(self.sample_receipts):
+            raise ValueError("full OOD denominators do not reconcile with receipts")
+        if self.component_zero_ood.primary_component_fingerprint != component_fingerprints.get(0):
+            raise ValueError("Component 0 analysis fingerprint disagrees with frozen primary fit")
+        pair_fingerprints = {
+            (row.half_label, row.half_component_index): (
+                row.half_component_fingerprint,
+                row.primary_component_index,
+                row.primary_component_fingerprint,
+            )
+            for row in self.full_sample_empirical.centroid_rows
+        }
+        receipt_counts: dict[tuple[str, int], int] = {}
+        for receipt in self.sample_receipts:
+            expected_pair = pair_fingerprints.get(
+                (receipt.half_label, receipt.half_component_index)
+            )
+            if expected_pair != (
+                receipt.half_component_fingerprint,
+                receipt.matched_primary_component_index,
+                receipt.matched_primary_component_fingerprint,
+            ) or component_fingerprints.get(receipt.primary_component_index) != (
+                receipt.primary_component_fingerprint
+            ):
+                raise ValueError("sample receipt indices or fingerprints are forged")
+            identity = (receipt.half_label, receipt.half_component_index)
+            receipt_counts[identity] = receipt_counts.get(identity, 0) + 1
+        if any(
+            receipt_counts.get((row.half_label, row.half_component_index), 0)
+            != row.sample_count
+            for row in self.full_sample_empirical.centroid_rows
+        ):
+            raise ValueError("sample receipts do not reconcile with full empirical assignments")
+        for full in self.full_sample_ood:
+            receipts = tuple(
+                row
+                for row in self.sample_receipts
+                if row.primary_component_index == full.primary_component_index
+            )
+            if len(receipts) != full.denominator or sum(row.ood_exceeds for row in receipts) != full.numerator:
+                raise ValueError("sample receipts do not reconcile with full OOD counts")
+
+        for spacing in _OFFSET_SPACINGS:
+            scopes = tuple(row for row in self.offset_empirical if row.spacing_days == spacing)
+            if sum(row.selected_sample_count for row in scopes) != len(self.sample_receipts):
+                raise ValueError("offset empirical samples do not partition the full sample")
+            rows = tuple(row for row in self.offset_ood if row.spacing_days == spacing)
+            expected_ood_keys = tuple(
+                (offset, component) for offset in range(spacing) for component in component_indices
+            )
+            if tuple((row.offset, row.primary_component_index) for row in rows) != expected_ood_keys:
+                raise ValueError("offset OOD rows are missing, duplicate, or unordered")
+            for component in component_indices:
+                full = next(row for row in self.full_sample_ood if row.primary_component_index == component)
+                partitions = tuple(row for row in rows if row.primary_component_index == component)
+                if (
+                    sum(row.numerator for row in partitions) != full.numerator
+                    or sum(row.denominator for row in partitions) != full.denominator
+                    or any(row.primary_component_fingerprint != full.primary_component_fingerprint for row in partitions)
+                ):
+                    raise ValueError("offset OOD partitions do not reconcile with full OOD")
+            for full_centroid in self.full_sample_empirical.centroid_rows:
+                count = sum(
+                    centroid.sample_count
+                    for scope in scopes
+                    for centroid in scope.centroid_rows
+                    if (
+                        centroid.half_label,
+                        centroid.primary_component_index,
+                        centroid.half_component_index,
+                    )
+                    == (
+                        full_centroid.half_label,
+                        full_centroid.primary_component_index,
+                        full_centroid.half_component_index,
+                    )
+                )
+                if count != full_centroid.sample_count:
+                    raise ValueError("offset empirical component counts do not partition full counts")
+
+        full_ood_winner = _maximum_ood(self.full_sample_ood)
+        for scope, conclusion in zip(self.offset_empirical, self.offset_conclusions):
+            key = (scope.spacing_days, scope.offset)
+            offset_rows = tuple(
+                row for row in self.offset_ood if (row.spacing_days, row.offset) == key
+            )
+            ood_winner = _maximum_ood(offset_rows)
+            expected = (
+                scope.maximum_drift_half_label,
+                scope.maximum_drift_primary_component_index,
+                scope.maximum_drift_primary_component_fingerprint,
+                scope.maximum_drift_half_component_index,
+                scope.maximum_drift_half_component_fingerprint,
+                ood_winner.primary_component_index,
+                ood_winner.primary_component_fingerprint,
+                scope.top_five_drift_features,
+                (
+                    scope.maximum_drift_half_label,
+                    scope.maximum_drift_primary_component_index,
+                    scope.maximum_drift_half_component_index,
+                )
+                == (
+                    self.full_sample_empirical.maximum_drift_half_label,
+                    self.full_sample_empirical.maximum_drift_primary_component_index,
+                    self.full_sample_empirical.maximum_drift_half_component_index,
+                ),
+                ood_winner.primary_component_index == full_ood_winner.primary_component_index,
+                scope.top_five_drift_features == self.full_sample_empirical.top_five_drift_features,
+                set(scope.top_five_drift_features) == set(self.full_sample_empirical.top_five_drift_features),
+            )
+            actual = (
+                conclusion.maximum_drift_half_label,
+                conclusion.maximum_drift_primary_component_index,
+                conclusion.maximum_drift_primary_component_fingerprint,
+                conclusion.maximum_drift_half_component_index,
+                conclusion.maximum_drift_half_component_fingerprint,
+                conclusion.maximum_ood_primary_component_index,
+                conclusion.maximum_ood_primary_component_fingerprint,
+                conclusion.top_five_drift_features,
+                conclusion.drift_component_matches_full_sample,
+                conclusion.ood_component_matches_full_sample,
+                conclusion.ordered_top5_matches_full_sample,
+                conclusion.top5_set_matches_full_sample,
+            )
+            if actual != expected:
+                raise ValueError("offset conclusion fields or flags are forged")
+
+
+def _aggregate_ood_rows(
+    replay: FrozenK4Replay,
+    fingerprints: tuple[str, ...],
+    indices: tuple[int, ...],
+    sample_scope: str,
+    spacing: int | None,
+    offset: int | None,
+) -> tuple[OffsetOODRow, ...]:
+    selected = set(indices)
+    result = []
+    for component, fingerprint in enumerate(fingerprints):
+        rows = tuple(
+            row
+            for index, row in enumerate(replay.primary_ood_rows)
+            if index in selected and row.assigned_component_index == component
+        )
+        numerator = sum(row.exceeds for row in rows)
+        denominator = len(rows)
+        result.append(
+            OffsetOODRow(
+                sample_scope,
+                spacing,
+                offset,
+                component,
+                fingerprint,
+                numerator,
+                denominator,
+                None if denominator == 0 else numerator / denominator,
+            )
+        )
+    return tuple(result)
+
+
+def complete_frozen_k4_diagnosis(
+    replay: FrozenK4Replay,
+    primary_fit: object,
+    vectors: tuple[object, ...],
+    decomposition: FrozenK4Decomposition,
+) -> FrozenK4DiagnosisCompletion:
+    """Complete descriptive frozen-K4 diagnostics without fitting or rematching."""
+    if not isinstance(decomposition, FrozenK4Decomposition) or decomposition.diagnostic_only is not True:
+        raise ValueError("completion requires a frozen diagnostic decomposition")
+    full_empirical = build_full_sample_empirical_reference(replay, primary_fit, vectors)
+    fingerprints = getattr(primary_fit, "fingerprints", None)
+    if not isinstance(fingerprints, tuple) or not fingerprints:
+        raise ValueError("primary fingerprints must be an immutable tuple")
+    component_zero = summarize_component_zero_ood(
+        decomposition,
+        retained_feature_names=primary_fit.feature_names,
+        registry=THREE_DAY_CHART_FEATURE_REGISTRY_V1,
+    )
+    if component_zero.primary_component_fingerprint != fingerprints[0]:
+        raise ValueError("Component 0 decomposition fingerprint disagrees with primary fit")
+
+    receipts: list[FixedSampleReceipt] = []
+    cursor = 0
+    for half in replay.half_replays:
+        label = half.receipt.half_label
+        pairs = {pair.half_component_index: pair for pair in half.matched_pairs}
+        half_fingerprints = half.fit.fingerprints
+        for local, half_component in enumerate(half.assignments):
+            index = cursor + local
+            vector = vectors[index]
+            primary_component = replay.primary_assignments[index]
+            ood = replay.primary_ood_rows[index]
+            pair = pairs.get(half_component)
+            anchor = _anchor_string(vector.anchor_at)
+            if pair is None:
+                raise ValueError("half assignment has no fixed matched pair")
+            if (
+                ood.anchor_at != anchor
+                or ood.assigned_component_index != primary_component
+                or ood.assigned_component_fingerprint != fingerprints[primary_component]
+                or getattr(ood, "comparison_operator", ">") != ">"
+                or ood.exceeds is not (ood.squared_mahalanobis > ood.threshold)
+                or pair.half_component_fingerprint != half_fingerprints[half_component]
+                or pair.primary_component_fingerprint != fingerprints[pair.primary_component_index]
+            ):
+                raise ValueError("fixed sample assignment, OOD, or fingerprint provenance disagrees")
+            receipts.append(
+                FixedSampleReceipt(
+                    index,
+                    anchor,
+                    label,
+                    half_component,
+                    half_fingerprints[half_component],
+                    pair.primary_component_index,
+                    pair.primary_component_fingerprint,
+                    primary_component,
+                    fingerprints[primary_component],
+                    ood.squared_mahalanobis,
+                    ood.threshold,
+                    ood.exceeds,
+                )
+            )
+        cursor += len(half.assignments)
+    if cursor != len(vectors):
+        raise ValueError("fixed half assignments do not cover every global anchor")
+
+    full_ood = _aggregate_ood_rows(
+        replay, fingerprints, tuple(range(len(vectors))), _FULL_SAMPLE_SCOPE, None, None
+    )
+    component_zero_full = full_ood[0]
+    if (
+        component_zero_full.denominator != component_zero.assigned_sample_count
+        or component_zero_full.numerator != component_zero.ood_sample_count
+    ):
+        raise ValueError("existing replay does not reproduce Component 0 24/409 population")
+    replay_component_zero_exceedances = {
+        row.anchor_at
+        for row in replay.primary_ood_rows
+        if row.assigned_component_index == 0 and row.exceeds
+    }
+    decomposition_component_zero_exceedances = {
+        row.anchor_at for row in decomposition.ood_samples if row.component_index == 0
+    }
+    if replay_component_zero_exceedances != decomposition_component_zero_exceedances:
+        raise ValueError("Component 0 OOD samples disagree between replay and decomposition")
+    full_ood_winner = _maximum_ood(full_ood)
+    primary_scaled = _primary_scaled_matrix(primary_fit, vectors)
+    offset_empirical: list[EmpiricalScopeSummary] = []
+    offset_ood: list[OffsetOODRow] = []
+    conclusions: list[OffsetConclusion] = []
+    for spacing in _OFFSET_SPACINGS:
+        for offset in range(spacing):
+            indices = _global_offset_indices(len(vectors), spacing, offset)
+            scope = _build_empirical_scope(
+                replay,
+                primary_fit,
+                vectors,
+                primary_scaled,
+                indices,
+                "offset_subsample",
+                spacing,
+                offset,
+            )
+            ood_rows = _aggregate_ood_rows(
+                replay, fingerprints, indices, "offset_subsample", spacing, offset
+            )
+            ood_winner = _maximum_ood(ood_rows)
+            offset_empirical.append(scope)
+            offset_ood.extend(ood_rows)
+            conclusions.append(
+                OffsetConclusion(
+                    spacing,
+                    offset,
+                    scope.maximum_drift_half_label,
+                    scope.maximum_drift_primary_component_index,
+                    scope.maximum_drift_primary_component_fingerprint,
+                    scope.maximum_drift_half_component_index,
+                    scope.maximum_drift_half_component_fingerprint,
+                    ood_winner.primary_component_index,
+                    ood_winner.primary_component_fingerprint,
+                    scope.top_five_drift_features,
+                    (
+                        scope.maximum_drift_half_label,
+                        scope.maximum_drift_primary_component_index,
+                        scope.maximum_drift_half_component_index,
+                    )
+                    == (
+                        full_empirical.maximum_drift_half_label,
+                        full_empirical.maximum_drift_primary_component_index,
+                        full_empirical.maximum_drift_half_component_index,
+                    ),
+                    ood_winner.primary_component_index == full_ood_winner.primary_component_index,
+                    scope.top_five_drift_features == full_empirical.top_five_drift_features,
+                    set(scope.top_five_drift_features) == set(full_empirical.top_five_drift_features),
+                )
+            )
+    return FrozenK4DiagnosisCompletion(
+        _COMPLETION_SCOPE,
+        component_zero,
+        full_empirical,
+        full_ood,
+        tuple(offset_empirical),
+        tuple(offset_ood),
+        tuple(conclusions),
+        tuple(receipts),
+    )
+
+
 __all__ = [
     "ComponentZeroOODAnalysis",
+    "EmpiricalCentroidRow",
+    "EmpiricalFeatureContributionRow",
+    "EmpiricalScopeSummary",
+    "FixedSampleReceipt",
+    "FrozenK4DiagnosisCompletion",
     "OODFamilySummaryRow",
     "OODFeatureSummaryRow",
+    "OffsetConclusion",
+    "OffsetOODRow",
+    "build_full_sample_empirical_reference",
+    "complete_frozen_k4_diagnosis",
     "summarize_component_zero_ood",
 ]

@@ -16,6 +16,10 @@ from src.application.services.frozen_k4_failure_decomposition import (
 )
 from src.application.services.frozen_k4_diagnosis_completion import (
     ComponentZeroOODAnalysis,
+    FixedSampleReceipt,
+    FrozenK4DiagnosisCompletion,
+    OffsetConclusion,
+    OffsetOODRow,
     EmpiricalCentroidRow,
     EmpiricalFeatureContributionRow,
     EmpiricalScopeSummary,
@@ -24,7 +28,9 @@ from src.application.services.frozen_k4_diagnosis_completion import (
     _canonical_registry_payload,
     _canonical_registry_sha256,
     _meets_threshold,
+    _global_offset_indices,
     build_full_sample_empirical_reference,
+    complete_frozen_k4_diagnosis,
     summarize_component_zero_ood,
 )
 from src.application.services.frozen_k4_failure_replay import (
@@ -512,11 +518,210 @@ def _empirical_fixture() -> tuple[FrozenK4Replay, SimpleNamespace, tuple[SimpleN
                 anchor_at=row.anchor_at.isoformat().replace("+00:00", "Z"),
                 assigned_component_index=component,
                 assigned_component_fingerprint=primary_fit.fingerprints[component],
+                squared_mahalanobis=float(index % 4),
+                threshold=1.5,
+                exceeds=(index % 4) > 1.5,
+                comparison_operator=">",
             )
-            for row, component in zip(vectors, (0, 0, 0, 0, 1, 1, 1))
+            for index, (row, component) in enumerate(
+                zip(vectors, (0, 0, 0, 0, 1, 1, 1))
+            )
         ),
     )
     return replay, primary_fit, vectors
+
+
+def _completion_fixture() -> tuple[
+    FrozenK4Replay, SimpleNamespace, tuple[SimpleNamespace, ...], FrozenK4Decomposition
+]:
+    _, primary_fit, _ = _empirical_fixture()
+    vectors = tuple(_empirical_vector(index, (0.0,) * 6) for index in range(1641))
+    primary_assignments = (0,) * 409 + (1,) * (1641 - 409)
+
+    def half(label: str, start: int, count: int, prefix: str) -> FrozenK4HalfReplay:
+        half_fit = SimpleNamespace(
+            feature_names=EMPIRICAL_NAMES,
+            fingerprints=(prefix * 24, chr(ord(prefix) + 1) * 24),
+            means=((0.0,) * 6, (0.0,) * 6),
+            diagnostic_only=True,
+            primary_replacement_allowed=False,
+        )
+        pairs = tuple(
+            MatchedPair(
+                half_label=label,
+                primary_component_fingerprint=primary_fit.fingerprints[index],
+                half_component_fingerprint=half_fit.fingerprints[index],
+                primary_component_index=index,
+                half_component_index=index,
+                matching_cost=0.0,
+                euclidean_distance=0.0,
+            )
+            for index in range(2)
+        )
+        end = start + count
+        return FrozenK4HalfReplay(
+            receipt=SimpleNamespace(
+                half_label=label,
+                anchor_count=count,
+                anchor_range=(
+                    vectors[start].anchor_at.isoformat().replace("+00:00", "Z"),
+                    (vectors[end - 1].anchor_at + timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+                ),
+                diagnostic_only=True,
+                primary_replacement_allowed=False,
+            ),
+            fit=half_fit,
+            assignments=primary_assignments[start:end],
+            posterior_probabilities=(),
+            projected_centroids=(),
+            projected_covariances=(),
+            precisions=(),
+            precisions_cholesky=(),
+            cost_matrix=(),
+            hungarian_assignment=(),
+            matched_pairs=pairs,
+            pair_euclidean_distances=(),
+            component_weights=(),
+        )
+
+    replay = FrozenK4Replay(
+        input_identity=SimpleNamespace(),
+        dependency_metadata={},
+        status=SimpleNamespace(status="reproduced"),
+        half_replays=(half("A", 0, 820, "3"), half("B", 820, 821, "5")),
+        primary_assignments=primary_assignments,
+        primary_ood_rows=tuple(
+            SimpleNamespace(
+                anchor_at=vector.anchor_at.isoformat().replace("+00:00", "Z"),
+                assigned_component_index=component,
+                assigned_component_fingerprint=primary_fit.fingerprints[component],
+                squared_mahalanobis=1.0 if index < 24 else 0.0,
+                threshold=0.5,
+                exceeds=index < 24,
+                comparison_operator=">",
+            )
+            for index, (vector, component) in enumerate(zip(vectors, primary_assignments))
+        ),
+    )
+    contributions = tuple(
+        {name: (1.0 if name == "rv_4h" else 0.0) for name in EMPIRICAL_NAMES}
+        for _ in range(24)
+    )
+    decomposition = _decomposition(
+        contributions,
+        component_row=OODComponentRow(0, "1" * 24, 409, 24, 24 / 409),
+        sample_fingerprint="1" * 24,
+    )
+    return replay, primary_fit, vectors, decomposition
+
+
+def test_global_offset_selection_partitions_positions_without_restarting_at_half_boundary() -> None:
+    for spacing in (3, 7):
+        groups = tuple(_global_offset_indices(23, spacing, offset) for offset in range(spacing))
+        assert sorted(index for group in groups for index in group) == list(range(23))
+        assert sum(map(len, groups)) == len(set(index for group in groups for index in group))
+        assert 4 in groups[4 % spacing]
+        assert 4 not in groups[0]  # the B boundary is not a new local origin
+
+
+def test_complete_diagnosis_builds_fixed_receipts_and_all_global_offsets() -> None:
+    replay, primary_fit, vectors, decomposition = _completion_fixture()
+    result = complete_frozen_k4_diagnosis(replay, primary_fit, vectors, decomposition)
+
+    assert isinstance(result, FrozenK4DiagnosisCompletion)
+    assert result.completion_scope == "frozen-k4-diagnosis-completion"
+    assert len(result.sample_receipts) == 1641
+    assert all(isinstance(row, FixedSampleReceipt) for row in result.sample_receipts)
+    assert tuple(row.global_index for row in result.sample_receipts) == tuple(range(1641))
+    assert len(result.offset_empirical) == 10
+    assert len(result.offset_ood) == 20
+    assert len(result.offset_conclusions) == 10
+    assert {(row.spacing_days, row.offset) for row in result.offset_conclusions} == {
+        *((3, offset) for offset in range(3)),
+        *((7, offset) for offset in range(7)),
+    }
+    assert sum(row.denominator for row in result.full_sample_ood) == 1641
+    for spacing in (3, 7):
+        assert sum(
+            scope.selected_sample_count
+            for scope in result.offset_empirical
+            if scope.spacing_days == spacing
+        ) == 1641
+    assert all(row.distance_source == "existing_primary_ood_row" for row in result.offset_ood)
+    assert all(scope.sample_scope == "offset_subsample" for scope in result.offset_empirical)
+    assert result.diagnostic_only is True
+
+
+def test_offset_ood_maximum_uses_rate_then_counts_and_empty_components_are_null() -> None:
+    replay, primary_fit, vectors, decomposition = _completion_fixture()
+    result = complete_frozen_k4_diagnosis(replay, primary_fit, vectors, decomposition)
+    empty = OffsetOODRow(
+        "offset_subsample", 7, 0, 2, "f" * 24, 0, 0, None
+    )
+    assert empty.denominator == 0 and empty.numerator == 0 and empty.rate is None
+    conclusion = next(row for row in result.offset_conclusions if (row.spacing_days, row.offset) == (3, 1))
+    assert isinstance(conclusion, OffsetConclusion)
+    assert conclusion.maximum_ood_primary_component_index == 0
+
+
+def test_completion_contract_rejects_forged_rate_receipt_flag_and_conclusion_flag() -> None:
+    replay, primary_fit, vectors, decomposition = _completion_fixture()
+    result = complete_frozen_k4_diagnosis(replay, primary_fit, vectors, decomposition)
+    with pytest.raises(ValueError, match="rate"):
+        replace(result.offset_ood[0], rate=0.123)
+    with pytest.raises(ValueError, match="strict"):
+        replace(result.sample_receipts[0], ood_exceeds=not result.sample_receipts[0].ood_exceeds)
+    with pytest.raises(ValueError, match="conclusion"):
+        replace(
+            result,
+            offset_conclusions=(
+                replace(
+                    result.offset_conclusions[0],
+                    drift_component_matches_full_sample=not result.offset_conclusions[0].drift_component_matches_full_sample,
+                ),
+            ) + result.offset_conclusions[1:],
+        )
+
+
+def test_completion_never_invokes_fit_rematch_gate_artifact_or_strategy_entry_points(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replay, primary_fit, vectors, decomposition = _completion_fixture()
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("completion must remain descriptive and frozen")
+
+    monkeypatch.setattr(
+        "src.application.services.frozen_k4_failure_replay.SklearnClusterDiagnostic.fit",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        "src.application.services.frozen_k4_failure_replay.linear_sum_assignment",
+        forbidden,
+    )
+    monkeypatch.setattr("sklearn.preprocessing.RobustScaler.fit", forbidden)
+    completed = complete_frozen_k4_diagnosis(replay, primary_fit, vectors, decomposition)
+    assert len(completed.offset_conclusions) == 10
+
+
+def test_completion_rejects_forged_canonical_receipt_fingerprint() -> None:
+    replay, primary_fit, vectors, decomposition = _completion_fixture()
+    result = complete_frozen_k4_diagnosis(replay, primary_fit, vectors, decomposition)
+    forged = replace(result.sample_receipts[0], half_component_fingerprint="f" * 24)
+    with pytest.raises(ValueError, match="fingerprints"):
+        replace(result, sample_receipts=(forged,) + result.sample_receipts[1:])
+
+
+def test_offset_drift_flags_compare_with_full_empirical_not_fitted_pair_distance() -> None:
+    replay, primary_fit, vectors, decomposition = _completion_fixture()
+    result = complete_frozen_k4_diagnosis(replay, primary_fit, vectors, decomposition)
+    fitted_winner = min(
+        (pair for half in replay.half_replays for pair in half.matched_pairs),
+        key=lambda pair: (-pair.euclidean_distance, pair.half_label, pair.primary_component_index),
+    )
+    assert fitted_winner.primary_component_index == 0
+    assert result.full_sample_empirical.maximum_drift_primary_component_index == 1
+    assert all(row.drift_component_matches_full_sample for row in result.offset_conclusions)
 
 
 def test_full_sample_empirical_reference_uses_frozen_half_membership_and_primary_coordinates(
