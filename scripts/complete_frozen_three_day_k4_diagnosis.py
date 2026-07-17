@@ -403,13 +403,17 @@ def _completion_run_id(payload: Mapping[str, object], parent_run_id: str) -> str
 
 def _directory_bytes(path: Path) -> dict[str, bytes]:
     path = Path(path)
-    if not path.is_dir():
-        return {}
-    return {
-        entry.name: entry.read_bytes()
-        for entry in sorted(path.iterdir(), key=lambda child: child.name)
-        if entry.is_file() and not _is_link_or_reparse(entry)
-    }
+    if not path.is_dir() or _is_link_or_reparse(path):
+        raise PublicationError("snapshot target must be a real directory")
+    try:
+        entries = tuple(sorted(path.iterdir(), key=lambda child: child.name))
+        if any(_is_link_or_reparse(entry) or not entry.is_file() for entry in entries):
+            raise PublicationError("snapshot directory may contain only regular files")
+        return {entry.name: entry.read_bytes() for entry in entries}
+    except PublicationError:
+        raise
+    except OSError as error:
+        raise PublicationError("directory snapshot could not be read") from error
 
 
 def _bounded_read(path: Path, maximum: int) -> bytes:

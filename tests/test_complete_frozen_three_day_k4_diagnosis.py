@@ -55,6 +55,19 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _tree_state(root: Path) -> tuple[tuple[str, str, bytes | None], ...]:
+    rows: list[tuple[str, str, bytes | None]] = []
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            rows.append((relative, "link", None))
+        elif path.is_dir():
+            rows.append((relative, "directory", None))
+        else:
+            rows.append((relative, "file", path.read_bytes()))
+    return tuple(rows)
+
+
 def _metric(value: float) -> dict[str, object]:
     return {
         "absolute_error": 0.0,
@@ -191,12 +204,12 @@ def test_parent_loader_fails_closed_without_mutating_parent(
         manifest["input_identity_sha256"] = "f" * 64
         manifest["file_sha256"][reproduction_path.name] = _sha(data)
         manifest_path.write_bytes(_canonical_bytes(manifest))
-    before = _directory_bytes(parent_dir)
+    before = _tree_state(parent_dir)
 
     with pytest.raises(PublicationError):
         _load_parent_provenance(parent_dir)
 
-    assert _directory_bytes(parent_dir) == before
+    assert _tree_state(parent_dir) == before
 
 
 def test_parent_loader_rejects_symlink_or_reparse_entry(tmp_path: Path) -> None:
@@ -208,10 +221,46 @@ def test_parent_loader_rejects_symlink_or_reparse_entry(tmp_path: Path) -> None:
         link.symlink_to(target)
     except OSError:
         pytest.skip("symlinks unavailable")
-    before = _directory_bytes(parent_dir)
+    before = _tree_state(parent_dir)
     with pytest.raises(PublicationError):
         _load_parent_provenance(parent_dir)
-    assert _directory_bytes(parent_dir) == before
+    assert _tree_state(parent_dir) == before
+
+
+@pytest.mark.parametrize("nested_file", (False, True))
+def test_directory_snapshot_rejects_nested_entry_added_after_parent_load(
+    tmp_path: Path, nested_file: bool
+) -> None:
+    parent_dir = _write_parent(tmp_path)
+    parent = _load_parent_provenance(parent_dir)
+    nested = parent_dir / "post-load-nested"
+    nested.mkdir()
+    if nested_file:
+        (nested / "hidden.txt").write_text("not represented by a flat snapshot")
+
+    with pytest.raises(PublicationError):
+        _directory_bytes(parent_dir)
+
+    assert MANIFEST in parent.directory_snapshot
+
+
+def test_directory_snapshot_rejects_symlink_added_after_parent_load(
+    tmp_path: Path,
+) -> None:
+    parent_dir = _write_parent(tmp_path)
+    parent = _load_parent_provenance(parent_dir)
+    target = tmp_path / "post-load-target.txt"
+    target.write_text("outside")
+    link = parent_dir / "post-load-link"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    with pytest.raises(PublicationError):
+        _directory_bytes(parent_dir)
+
+    assert MANIFEST in parent.directory_snapshot
 
 
 @pytest.mark.parametrize(
