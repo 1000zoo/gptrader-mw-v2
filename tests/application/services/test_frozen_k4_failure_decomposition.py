@@ -17,7 +17,6 @@ from src.application.services.frozen_k4_failure_replay import (
 from src.domain.regime.frozen_k4_failure_diagnostics import (
     DiagnosisStatus,
     FrozenK4InputIdentity,
-    HalfFitReceipt,
     MatchedPair,
     MetricReproduction,
     OODRow,
@@ -54,7 +53,7 @@ def _fixture():
         scales=(1.0, 1.0),
     )
     half = FrozenK4HalfReplay(
-        receipt=HalfFitReceipt("A", 820, "f" * 64),
+        receipt=SimpleNamespace(half_label="A", anchor_count=6),
         fit=half_fit,
         assignments=(0, 0, 0, 0, 1, 1),
         posterior_probabilities=(),
@@ -367,6 +366,18 @@ def test_rejects_mismatched_replay_vector_assignment_lengths() -> None:
     )
 
     with pytest.raises(ValueError, match="primary assignment length"):
+        decompose_frozen_k4_failure(replay, primary_fit, vectors)
+
+
+def test_rejects_half_assignment_length_that_disagrees_with_receipt_count() -> None:
+    replay, primary_fit, vectors = _fixture()
+    bad_half = replace(
+        replay.half_replays[0],
+        receipt=SimpleNamespace(half_label="A", anchor_count=5),
+    )
+    replay = replace(replay, half_replays=(bad_half,))
+
+    with pytest.raises(ValueError, match="half assignment length"):
         decompose_frozen_k4_failure(replay, primary_fit, vectors)
 
 

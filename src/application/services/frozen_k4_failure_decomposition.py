@@ -204,13 +204,17 @@ def decompose_frozen_k4_failure(
     sensitivity_rows: list[SensitivityRow] = []
     pooled_rows: list[PooledMahalanobisRow] = []
     component_distance_rows: list[ComponentDistanceRow] = []
+    half_offset = 0
 
     for half in replay.half_replays:
         half_label = half.receipt.half_label
         half_fit = half.fit
-        half_raw = _raw_matrix(vectors, tuple(half_fit.feature_names))
+        half_count = int(half.receipt.anchor_count)
+        half_vectors = vectors[half_offset:half_offset + half_count]
+        half_offset += half_count
+        half_raw = _raw_matrix(half_vectors, tuple(half_fit.feature_names))
         half_clipped = _clip_and_scale(half_raw, half_fit)
-        clipped_rows.extend(_clipped_rows(half_label, vectors, half_fit, half_raw))
+        clipped_rows.extend(_clipped_rows(half_label, half_vectors, half_fit, half_raw))
         half_assignments = np.asarray(tuple(half.assignments), dtype=int)
 
         for pair in half.matched_pairs:
@@ -241,7 +245,7 @@ def decompose_frozen_k4_failure(
             members = half_clipped[member_mask]
             anchors = [
                 vector.anchor_at
-                for keep, vector in zip(member_mask, vectors)
+                for keep, vector in zip(member_mask, half_vectors)
                 if keep
             ]
             location_rows.extend(
@@ -373,9 +377,14 @@ def _validate_replay_lengths(replay: FrozenK4Replay, vectors: tuple[object, ...]
         raise ValueError("primary assignment length must match input vectors")
     if len(replay.primary_ood_rows) != expected:
         raise ValueError("primary OOD row length must match input vectors")
+    half_total = 0
     for half in replay.half_replays:
-        if len(half.assignments) != expected:
-            raise ValueError("half assignment length must match input vectors")
+        half_count = int(half.receipt.anchor_count)
+        half_total += half_count
+        if len(half.assignments) != half_count:
+            raise ValueError("half assignment length must match half receipt count")
+    if half_total != expected:
+        raise ValueError("half receipt counts must cover input vectors")
 
 
 def _raw_matrix(vectors: Sequence[object], feature_names: tuple[str, ...]) -> np.ndarray:
