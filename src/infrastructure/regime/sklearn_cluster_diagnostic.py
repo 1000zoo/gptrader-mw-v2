@@ -86,6 +86,8 @@ class SklearnClusterDiagnostic:
             converged=fitted.converged,
             iterations=fitted.iterations,
             lower_bound=fitted.lower_bound,
+            precisions=fitted.precisions,
+            precisions_cholesky=fitted.precisions_cholesky,
         )
 
     def assign(

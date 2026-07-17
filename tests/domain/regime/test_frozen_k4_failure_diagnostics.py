@@ -376,6 +376,31 @@ def test_diagnosis_status_cannot_open_decomposition_after_mismatch():
     assert status.status == "reproduction_mismatch"
 
 
+def test_diagnosis_status_accepts_causal_terminal_mismatch_when_metrics_match():
+    temporal = MetricReproduction.compare(2.0, 2.0)
+    ood = MetricReproduction.compare(0.1, 0.1)
+
+    status = DiagnosisStatus.causal_mismatch(
+        temporal=temporal,
+        primary_ood=ood,
+        ood_exceedance_numerator=1,
+        ood_denominator=10,
+        mismatch_classification="projection-mismatch",
+        causal_evidence_sha256=SHA_A,
+    )
+
+    assert status.status == "causal_reproduction_mismatch"
+    assert status.decomposition_allowed is False
+    assert status.causal_evidence_sha256 == SHA_A
+
+
+def test_pure_numeric_mismatch_still_rejects_equal_metrics_without_causal_evidence():
+    equal = MetricReproduction.compare(1.0, 1.0)
+
+    with pytest.raises(ValueError, match="reproduction mismatch"):
+        DiagnosisStatus.mismatch(equal, equal, 1, 1, "projection-mismatch")
+
+
 def test_final_manifest_copies_and_sorts_file_hashes():
     hashes = dict(reversed(tuple(SUCCESS_FILES.items())))
     manifest = FrozenK4DiagnosisManifest(

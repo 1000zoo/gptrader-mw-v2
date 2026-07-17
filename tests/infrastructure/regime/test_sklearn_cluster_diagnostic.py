@@ -90,6 +90,20 @@ def test_refit_uses_block_local_clipping_and_scaling():
     np.testing.assert_allclose(fit.scales, scaler.scale_)
 
 
+def test_gmm_fit_preserves_raw_estimator_precision_receipts():
+    fit = SklearnClusterDiagnostic().fit(
+        RegimeModelConfig("gmm", 3, covariance_type="diag"),
+        _vectors(),
+        REGISTRY,
+        retained_feature_names=RETAINED,
+    )
+
+    assert len(fit.precisions) == 3
+    assert len(fit.precisions_cholesky) == 3
+    assert all(len(row) == len(RETAINED) for row in fit.precisions)
+    assert all(len(row) == len(RETAINED) for row in fit.precisions_cholesky)
+
+
 @pytest.mark.parametrize(
     "config",
     [

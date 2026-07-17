@@ -20,6 +20,8 @@ class _ClusterArrays:
     converged: bool = True
     iterations: int = 1
     lower_bound: float = 0.0
+    precisions: tuple[tuple[float, ...], ...] = ()
+    precisions_cholesky: tuple[tuple[float, ...], ...] = ()
 
 
 def _fit_components(
@@ -42,11 +44,17 @@ def _fit_components(
         fitted_parameters = _fit_kmeans(config, values)
         converged, iterations, lower_bound = True, 1, 0.0
     else:
-        fitted_parameters, iterations, lower_bound = _fit_gmm(config, values)
+        (
+            fitted_parameters,
+            iterations,
+            lower_bound,
+            raw_precisions,
+            raw_precisions_cholesky,
+        ) = _fit_gmm(config, values)
         converged = True
 
     parameters = []
-    for mean, weight, covariance, threshold in fitted_parameters:
+    for source_index, (mean, weight, covariance, threshold) in enumerate(fitted_parameters):
         mean_tuple = tuple(float(value) for value in mean)
         covariance_tuple = tuple(float(value) for value in covariance)
         fingerprint = component_fingerprint(
@@ -57,7 +65,9 @@ def _fit_components(
             covariance=() if config.model_type == "kmeans" else covariance_tuple,
             weight=None if config.model_type == "kmeans" else float(weight),
         )
-        parameters.append((fingerprint, mean_tuple, float(weight), covariance_tuple, float(threshold)))
+        precision = tuple(float(value) for value in raw_precisions[source_index]) if config.model_type == "gmm" else ()
+        precision_cholesky = tuple(float(value) for value in raw_precisions_cholesky[source_index]) if config.model_type == "gmm" else ()
+        parameters.append((fingerprint, mean_tuple, float(weight), covariance_tuple, float(threshold), precision, precision_cholesky))
 
     records = sorted(parameters, key=lambda item: item[0])
     fingerprints = tuple(item[0] for item in records)
@@ -72,6 +82,8 @@ def _fit_components(
         converged=converged,
         iterations=iterations,
         lower_bound=lower_bound,
+        precisions=tuple(item[5] for item in records) if config.model_type == "gmm" else (),
+        precisions_cholesky=tuple(item[6] for item in records) if config.model_type == "gmm" else (),
     )
 
 
@@ -106,7 +118,13 @@ def _fit_kmeans(
 def _fit_gmm(
     config: RegimeModelConfig,
     scaled: np.ndarray,
-) -> tuple[list[tuple[np.ndarray, float, tuple[float, ...], float]], int, float]:
+) -> tuple[
+    list[tuple[np.ndarray, float, tuple[float, ...], float]],
+    int,
+    float,
+    tuple[tuple[float, ...], ...],
+    tuple[tuple[float, ...], ...],
+]:
     with warnings.catch_warnings():
         warnings.simplefilter("error", ConvergenceWarning)
         try:
@@ -138,7 +156,20 @@ def _fit_gmm(
         or not math.isfinite(float(estimator.lower_bound_))
     ):
         raise ValueError("gmm convergence metadata is invalid")
-    return records, int(estimator.n_iter_), float(estimator.lower_bound_)
+    def precision_rows(values: np.ndarray) -> tuple[tuple[float, ...], ...]:
+        array = np.asarray(values, dtype=float)
+        if config.covariance_type == "tied":
+            flattened = tuple(float(value) for value in array.reshape(-1))
+            return tuple(flattened for _ in range(config.cluster_count))
+        return tuple(tuple(float(value) for value in row.reshape(-1)) for row in array)
+
+    return (
+        records,
+        int(estimator.n_iter_),
+        float(estimator.lower_bound_),
+        precision_rows(estimator.precisions_),
+        precision_rows(estimator.precisions_cholesky_),
+    )
 
 
 def _validate_covariance(

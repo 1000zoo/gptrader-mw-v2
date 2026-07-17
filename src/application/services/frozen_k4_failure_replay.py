@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from fractions import Fraction
 import hashlib
 import json
 import math
@@ -48,10 +49,40 @@ _HALF_RANGES = {
     "B": (_SPLIT_AT, datetime(2025, 6, 30, tzinfo=timezone.utc)),
 }
 _HALF_COUNTS = {"A": 820, "B": 821}
-_FROZEN_HALF_FIT_SHA256: Mapping[str, str] = MappingProxyType(
+_STAGE_ORDER = (
+    "input",
+    "split",
+    "preprocessing",
+    "dependency",
+    "fit_a",
+    "fit_b",
+    "projection",
+    "matching",
+    "metric_provenance",
+)
+_STAGE_CLASSIFICATION = MappingProxyType({
+    "input": "input-data-mismatch",
+    "split": "split-boundary-mismatch",
+    "preprocessing": "preprocessing-mismatch",
+    "dependency": "dependency-version-nondeterminism",
+    "fit_a": "gmm-fitting-nondeterminism",
+    "fit_b": "gmm-fitting-nondeterminism",
+    "projection": "projection-mismatch",
+    "matching": "matching-mismatch",
+    "metric_provenance": "original-metric-provenance-incomplete",
+})
+# Diagnostic-only receipts pinned from the verified local production replay.
+_PINNED_STAGE_SHA256: Mapping[str, str] = MappingProxyType(
     {
-        "A": "784383b2a4d3325bf0c1fd763111cb9342d1830203db33da1143c58c316e68bf",
-        "B": "d4993ce76ac54d46bdb71f7f39245ec52ef995851b13e85d16369a22c795a6a4",
+        "input": "1618860cffdc7808825a09070cf6820f70ce5a0ad89b1b5028270105a91540ac",
+        "split": "3650eae7ea692826d4d76472571a2e6ab7e3b183b74a1b4930347d8c4a279598",
+        "preprocessing": "d7085939f4ea2b56962745045a97f4753ad4c7fdf305657002b6a514418c19ad",
+        "dependency": "4fd82ae00bfadcb35939b17ea7c01a3df5bad159440e8685051bed40d2f890b7",
+        "fit_a": "41d5d824a13ac5469e9145e8eecdcb99780fa7aa2184e12b1be6e378797ce888",
+        "fit_b": "d6c7ed9414541f9de8fae09769952741b9b7b2694ad7b72064c41bdceccfef56",
+        "projection": "310dd7f6a9abda6c74727d302f995ae2121c2e366748bb62220d2b57e3691656",
+        "matching": "cc3e6aba32ce09c8ffdc2aa1dd82e75767a4eb9eee00a9ff87728fa664e5acf0",
+        "metric_provenance": "45bccfd26f8d06adb37f3589c44da79ad5218b0d2a003ace033faf617307f53b",
     }
 )
 
@@ -99,7 +130,7 @@ class FrozenK4Replay:
         object.__setattr__(self, "dependency_metadata", _deep_freeze(self.dependency_metadata))
         bits = dict(self.metric_ieee_float_bits)
         object.__setattr__(self, "metric_ieee_float_bits", MappingProxyType(bits))
-        if self.status.status == "reproduction_mismatch" and (
+        if self.status.status != "reproduced" and (
             self.half_replays
             or self.primary_assignments
             or self.primary_posterior_probabilities
@@ -138,24 +169,29 @@ def _replay_frozen_k4_failures(
     # Exactly two calls through the low-level diagnostic fitter.  There is no
     # primary refit and no sensitivity/subsampling fit.
     fitter = seams.fitter or SklearnClusterDiagnostic()
-    fits = {
-        label: fitter.fit(
-            primary.config,
-            halves[label],
-            THREE_DAY_CHART_FEATURE_REGISTRY_V1,
-            retained_feature_names=primary.feature_names,
-        )
-        for label in ("A", "B")
-    }
+    fits: dict[str, ClusterDiagnosticFit] = {}
+    fit_errors: dict[str, Exception] = {}
+    for label in ("A", "B"):
+        try:
+            fits[label] = fitter.fit(
+                primary.config,
+                halves[label],
+                THREE_DAY_CHART_FEATURE_REGISTRY_V1,
+                retained_feature_names=primary.feature_names,
+            )
+        except Exception as error:  # terminal diagnostic receipt, never a retry
+            fit_errors[label] = error
+    if fit_errors:
+        return _terminal_fit_error_replay(source, fit_errors)
 
     projector = seams.projector or _project_half_centroids
     matcher = seams.matcher or _match_projected_centroids
     primary_means = np.asarray(primary.means, dtype=float)
     detailed_halves: list[FrozenK4HalfReplay] = []
-    projection_ok = True
-    matching_ok = True
     maximum_distance = 0.0
     fit_hashes: dict[str, str] = {}
+    projected_by_half: dict[str, np.ndarray] = {}
+    matches_by_half: dict[str, CentroidMatch] = {}
 
     for label in ("A", "B"):
         fit = fits[label]
@@ -171,11 +207,9 @@ def _replay_frozen_k4_failures(
             primary_scales=np.asarray(primary.scales, dtype=float),
         )
         projected = np.asarray(projector(**projection_arguments), dtype=float)
-        reference_projection = _project_half_centroids(**projection_arguments)
-        projection_ok &= np.array_equal(projected, reference_projection)
         matched = matcher(primary_means, projected)
-        reference_match = _match_projected_centroids(primary_means, projected)
-        matching_ok &= matched == reference_match
+        projected_by_half[label] = projected
+        matches_by_half[label] = matched
         maximum_distance = max(maximum_distance, *matched.pair_distances)
 
         matrix = _scaled_matrix(fit, halves[label])
@@ -185,9 +219,8 @@ def _replay_frozen_k4_failures(
             * np.square(np.asarray(fit.scales, dtype=float))[None, :]
             / np.square(np.asarray(primary.scales, dtype=float))[None, :]
         )
-        covariances = np.asarray(fit.covariances, dtype=float)
-        precisions = 1.0 / covariances
-        precisions_cholesky = 1.0 / np.sqrt(covariances)
+        precisions = np.asarray(fit.precisions, dtype=float)
+        precisions_cholesky = np.asarray(fit.precisions_cholesky, dtype=float)
         pairs = tuple(
             MatchedPair(
                 label,
@@ -252,19 +285,24 @@ def _replay_frozen_k4_failures(
     ood_receipt = MetricReproduction.compare(
         EXPECTED_MAXIMUM_DISTANCE_EXCEEDANCE_RATE, ood_rate
     )
-    classification = _mismatch_classification(
-        source=source,
-        halves=halves,
-        fit_hashes=fit_hashes,
-        expected_fit_hashes=seams.expected_half_fit_sha256 or _FROZEN_HALF_FIT_SHA256,
-        projection_ok=projection_ok,
-        matching_ok=matching_ok,
-        temporal=temporal_receipt,
-        ood=ood_receipt,
+    observed_stages = _observed_stage_sha256(
+        source, halves, fits, projected_by_half, matches_by_half
+    )
+    pinned_stages = dict(_PINNED_STAGE_SHA256)
+    if seams.expected_half_fit_sha256 is not None:
+        pinned_stages["fit_a"] = seams.expected_half_fit_sha256["A"]
+        pinned_stages["fit_b"] = seams.expected_half_fit_sha256["B"]
+    classification, causal_evidence = _classify_stage_mismatch(
+        observed_stages, pinned_stages, temporal_receipt, ood_receipt
     )
     if classification is not None:
-        status = DiagnosisStatus.mismatch(
-            temporal_receipt, ood_receipt, numerator, denominator, classification
+        status = DiagnosisStatus.causal_mismatch(
+            temporal_receipt,
+            ood_receipt,
+            numerator,
+            denominator,
+            classification,
+            causal_evidence,
         )
         return FrozenK4Replay(
             source.identity, source.dependency_metadata, status,
@@ -365,61 +403,180 @@ def _scaled_matrix(
     return (clipped - np.asarray(fit.medians)) / np.asarray(fit.scales)
 
 
-def _mismatch_classification(
-    *,
-    source: FrozenK4DiagnosticSource,
-    halves: Mapping[str, tuple[ThreeDayChartFeatureVector, ...]],
-    fit_hashes: Mapping[str, str],
-    expected_fit_hashes: Mapping[str, str],
-    projection_ok: bool,
-    matching_ok: bool,
+def _classify_stage_mismatch(
+    observed: Mapping[str, str],
+    pinned: Mapping[str, str],
     temporal: MetricReproduction,
     ood: MetricReproduction,
-) -> str | None:
-    if _vector_sha256(source.vectors) != source.identity.feature_vectors_sha256:
-        return "input-data-mismatch"
-    if any(
-        len(halves[label]) != _HALF_COUNTS[label]
-        or not halves[label]
-        or halves[label][0].anchor_at != _HALF_RANGES[label][0]
-        or halves[label][-1].anchor_at != _HALF_RANGES[label][1] - timedelta(days=1)
-        for label in ("A", "B")
-    ):
-        return "split-boundary-mismatch"
-    scaler_hash, clipping_hash = _preprocessing_hashes(source.primary_fit)
-    if (
-        scaler_hash != source.identity.scaler_sha256
-        or clipping_hash != source.identity.clipping_bounds_sha256
-    ):
-        return "preprocessing-mismatch"
-    if _sha256(_thaw(source.dependency_metadata)) != source.identity.dependency_metadata_sha256:
-        return "dependency-version-nondeterminism"
-    if any(fit_hashes.get(label) != expected_fit_hashes.get(label) for label in ("A", "B")):
-        return "gmm-fitting-nondeterminism"
-    if not projection_ok:
-        return "projection-mismatch"
-    if not matching_ok:
-        return "matching-mismatch"
-    if not _original_metric_provenance_complete(source):
-        return "original-metric-provenance-incomplete"
+) -> tuple[str | None, str]:
+    for stage in _STAGE_ORDER:
+        if observed.get(stage) != pinned.get(stage):
+            evidence = _sha256({
+                "stage": stage,
+                "expected_sha256": pinned.get(stage),
+                "observed_sha256": observed.get(stage),
+            })
+            return _STAGE_CLASSIFICATION[stage], evidence
     if not temporal.numeric_tolerance_match or not ood.numeric_tolerance_match:
-        return "original-metric-provenance-incomplete"
-    return None
+        evidence = _sha256({
+            "stage": "metric_reproduction",
+            "temporal": temporal.canonical_payload(),
+            "ood": ood.canonical_payload(),
+        })
+        return "original-metric-provenance-incomplete", evidence
+    return None, ""
 
 
-def _original_metric_provenance_complete(source: FrozenK4DiagnosticSource) -> bool:
+def _terminal_fit_error_replay(
+    source: FrozenK4DiagnosticSource,
+    errors: Mapping[str, Exception],
+) -> FrozenK4Replay:
+    observed_prefit = {
+        "input": _input_data_sha256(source.vectors),
+        "split": _sha256(_split_payload(source)),
+        "dependency": _sha256(_thaw(source.dependency_metadata)),
+    }
+    stage = next(
+        (
+            name
+            for name in ("input", "split", "dependency")
+            if observed_prefit[name] != _PINNED_STAGE_SHA256[name]
+        ),
+        "fit_a" if "A" in errors else "fit_b",
+    )
+    evidence = _sha256({
+        "stage": stage,
+        "expected_sha256": _PINNED_STAGE_SHA256[stage],
+        "observed_sha256": observed_prefit.get(stage),
+        "fit_errors": {
+            label: {"type": type(error).__name__, "message": str(error)}
+            for label, error in sorted(errors.items())
+        },
+    })
+    temporal = MetricReproduction.compare(
+        EXPECTED_MAXIMUM_MATCHED_CENTROID_DISTANCE,
+        EXPECTED_MAXIMUM_MATCHED_CENTROID_DISTANCE,
+    )
+    ood = MetricReproduction.compare(
+        EXPECTED_MAXIMUM_DISTANCE_EXCEEDANCE_RATE,
+        EXPECTED_MAXIMUM_DISTANCE_EXCEEDANCE_RATE,
+    )
+    fraction = Fraction(EXPECTED_MAXIMUM_DISTANCE_EXCEEDANCE_RATE).limit_denominator(
+        max(1, len(source.vectors))
+    )
+    status = DiagnosisStatus.causal_mismatch(
+        temporal,
+        ood,
+        fraction.numerator,
+        fraction.denominator,
+        _STAGE_CLASSIFICATION[stage],
+        evidence,
+    )
+    return FrozenK4Replay(
+        source.identity,
+        source.dependency_metadata,
+        status,
+        metric_ieee_float_bits=_metric_bits(temporal, ood),
+    )
+
+
+def _observed_stage_sha256(
+    source: FrozenK4DiagnosticSource,
+    halves: Mapping[str, tuple[ThreeDayChartFeatureVector, ...]],
+    fits: Mapping[str, ClusterDiagnosticFit],
+    projected: Mapping[str, np.ndarray],
+    matches: Mapping[str, CentroidMatch],
+) -> dict[str, str]:
+    primary = source.primary_fit
+    return {
+        "input": _input_data_sha256(source.vectors),
+        "split": _sha256(_split_payload(source, halves)),
+        "preprocessing": _sha256({
+            "primary": _preprocessing_payload(primary),
+            "halves": {
+                label: {
+                    "raw_selected_vectors": _raw_selected_values(fits[label], halves[label]),
+                    "preprocessing": _preprocessing_payload(fits[label]),
+                }
+                for label in ("A", "B")
+            },
+        }),
+        "dependency": _sha256(_thaw(source.dependency_metadata)),
+        "fit_a": _fit_sha256(fits["A"]),
+        "fit_b": _fit_sha256(fits["B"]),
+        "projection": _sha256({
+            label: _matrix_tuple(projected[label]) for label in ("A", "B")
+        }),
+        "matching": _sha256({
+            label: {
+                "cost_matrix": matches[label].cost_matrix,
+                "assignment": matches[label].assignment,
+                "pair_distances": matches[label].pair_distances,
+            }
+            for label in ("A", "B")
+        }),
+        "metric_provenance": _sha256(_metric_provenance_payload(source)),
+    }
+
+
+def _split_payload(
+    source: FrozenK4DiagnosticSource,
+    halves: Mapping[str, tuple[ThreeDayChartFeatureVector, ...]] | None = None,
+) -> dict[str, object]:
+    if halves is None:
+        halves = {
+            label: tuple(
+                vector
+                for vector in source.vectors
+                if start <= vector.anchor_at < end
+            )
+            for label, (start, end) in _HALF_RANGES.items()
+        }
+    return {
+        "split_at": source.identity.split_at,
+        "half_a_range": list(source.identity.half_a_range),
+        "half_b_range": list(source.identity.half_b_range),
+        "counts": {label: len(halves[label]) for label in ("A", "B")},
+        "ordered_anchors": [
+            _canonical_timestamp(vector.anchor_at) for vector in source.vectors
+        ],
+    }
+
+
+def _validate_exact_split(source: FrozenK4DiagnosticSource) -> bool:
+    identity = source.identity
+    if (
+        identity.split_at != "2023-04-01T00:00:00Z"
+        or identity.half_a_range
+        != ("2021-01-01T00:00:00Z", "2023-04-01T00:00:00Z")
+        or identity.half_b_range
+        != ("2023-04-01T00:00:00Z", "2025-06-30T00:00:00Z")
+        or len(source.vectors) != 1641
+    ):
+        return False
+    expected = datetime(2021, 1, 1, tzinfo=timezone.utc)
+    for vector in source.vectors:
+        if vector.anchor_at != expected:
+            return False
+        expected += timedelta(days=1)
+    return expected == datetime(2025, 6, 30, tzinfo=timezone.utc)
+
+
+def _metric_provenance_payload(source: FrozenK4DiagnosticSource) -> object:
     try:
         gates = source.attempt_payload["model_gates"]
-        return (
-            gates["maximum_matched_centroid_distance"]
-            == EXPECTED_MAXIMUM_MATCHED_CENTROID_DISTANCE
-            and gates["maximum_distance_exceedance_rate"]
-            == EXPECTED_MAXIMUM_DISTANCE_EXCEEDANCE_RATE
-            and gates["distance_threshold_policy"]
-            == "maximum_chi_square_995_squared_mahalanobis"
-        )
+        return {
+            "maximum_matched_centroid_distance": gates[
+                "maximum_matched_centroid_distance"
+            ],
+            "maximum_distance_exceedance_rate": gates[
+                "maximum_distance_exceedance_rate"
+            ],
+            "distance_threshold": gates["distance_threshold"],
+            "distance_threshold_policy": gates["distance_threshold_policy"],
+        }
     except (KeyError, TypeError):
-        return False
+        return {"incomplete": True}
 
 
 def _fit_sha256(fit: ClusterDiagnosticFit) -> str:
@@ -445,18 +602,19 @@ def _fit_sha256(fit: ClusterDiagnosticFit) -> str:
         "converged": fit.converged,
         "iterations": fit.iterations,
         "lower_bound": fit.lower_bound,
+        "precisions": [list(row) for row in fit.precisions],
+        "precisions_cholesky": [list(row) for row in fit.precisions_cholesky],
     })
 
 
-def _vector_sha256(vectors: tuple[ThreeDayChartFeatureVector, ...]) -> str:
+def _input_data_sha256(vectors: tuple[ThreeDayChartFeatureVector, ...]) -> str:
+    """Hash numeric source data separately from temporal split membership."""
     return _sha256({
         "schema_version": vectors[0].schema_version if vectors else None,
         "registry_names": [spec.name for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1],
         "vectors": [
             {
                 "symbol": vector.symbol,
-                "anchor_at": vector.anchor_at.isoformat(),
-                "window_start_at": vector.window_start_at.isoformat(),
                 "values": list(vector.values.items()),
             }
             for vector in vectors
@@ -464,17 +622,26 @@ def _vector_sha256(vectors: tuple[ThreeDayChartFeatureVector, ...]) -> str:
     })
 
 
-def _preprocessing_hashes(fit: ClusterDiagnosticFit) -> tuple[str, str]:
-    clipping = {
+def _preprocessing_payload(fit: ClusterDiagnosticFit) -> dict[str, object]:
+    return {
+        "feature_names": list(fit.feature_names),
         "lower_bounds": list(fit.lower_bounds),
         "upper_bounds": list(fit.upper_bounds),
+        "medians": list(fit.medians),
+        "scales": list(fit.scales),
     }
-    scaler = {
-        "feature_names": list(fit.feature_names),
-        "scaler": {"medians": list(fit.medians), "scales": list(fit.scales)},
-        "clipping": clipping,
-    }
-    return _sha256(scaler), _sha256(clipping)
+
+
+def _raw_selected_values(
+    fit: ClusterDiagnosticFit,
+    vectors: tuple[ThreeDayChartFeatureVector, ...],
+) -> list[list[float]]:
+    registry_names = tuple(spec.name for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+    indices = tuple(registry_names.index(name) for name in fit.feature_names)
+    return [
+        [float(tuple(vector.values.values())[index]) for index in indices]
+        for vector in vectors
+    ]
 
 
 def _sha256(value: object) -> str:

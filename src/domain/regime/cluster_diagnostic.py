@@ -29,6 +29,8 @@ class ClusterDiagnosticFit:
     converged: bool = True
     iterations: int = 1
     lower_bound: float = 0.0
+    precisions: tuple[tuple[float, ...], ...] = ()
+    precisions_cholesky: tuple[tuple[float, ...], ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -94,6 +96,8 @@ class ClusterDiagnosticFit:
             self.weights,
             *self.means,
             *self.covariances,
+            *self.precisions,
+            *self.precisions_cholesky,
             self.distance_thresholds,
         )
         if any(
@@ -116,6 +120,8 @@ class ClusterDiagnosticFit:
         if self.config.model_type == "kmeans":
             if self.covariances:
                 raise ValueError("kmeans diagnostic cannot contain covariances")
+            if self.precisions or self.precisions_cholesky:
+                raise ValueError("kmeans diagnostic cannot contain precision receipts")
             if (
                 not isinstance(self.distance_thresholds, tuple)
                 or len(self.distance_thresholds) != cluster_count
@@ -132,6 +138,19 @@ class ClusterDiagnosticFit:
                 raise ValueError("gmm diagnostic covariance shape is inconsistent")
             if self.distance_thresholds:
                 raise ValueError("gmm diagnostic cannot contain distance thresholds")
+            for name, values in (
+                ("precisions", self.precisions),
+                ("precisions_cholesky", self.precisions_cholesky),
+            ):
+                if values and (
+                    len(values) != cluster_count
+                    or any(not isinstance(row, tuple) or len(row) != width for row in values)
+                    or (
+                        self.config.covariance_type == "diag"
+                        and any(value <= 0 for row in values for value in row)
+                    )
+                ):
+                    raise ValueError(f"gmm diagnostic {name} shape is inconsistent")
             if self.config.covariance_type == "diag":
                 if any(
                     _below_regularization_floor(value, self.config.regularization)

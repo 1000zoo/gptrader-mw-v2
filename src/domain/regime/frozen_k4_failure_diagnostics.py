@@ -454,10 +454,13 @@ class DiagnosisStatus:
     ood_denominator: int
     decomposition_allowed: bool
     mismatch_classification: str | None = None
+    causal_evidence_sha256: str | None = None
     diagnostic_only: bool = True
 
     def __post_init__(self) -> None:
-        if self.status not in ("reproduced", "reproduction_mismatch"):
+        if self.status not in (
+            "reproduced", "reproduction_mismatch", "causal_reproduction_mismatch"
+        ):
             raise ValueError("diagnosis status is unsupported")
         if not isinstance(
             self.temporal_half_refit_stability_reproduction, MetricReproduction
@@ -485,11 +488,21 @@ class DiagnosisStatus:
                 raise ValueError("decomposition requires both reproductions to match")
             if self.mismatch_classification is not None:
                 raise ValueError("a reproduced diagnosis cannot have a mismatch classification")
-        else:
+            if self.causal_evidence_sha256 is not None:
+                raise ValueError("a reproduced diagnosis cannot have causal mismatch evidence")
+        elif self.status == "reproduction_mismatch":
             if both_match or self.decomposition_allowed is not False:
                 raise ValueError("a reproduction mismatch must keep decomposition closed")
             if self.mismatch_classification not in _MISMATCH_CLASSIFICATIONS:
                 raise ValueError("reproduction mismatch classification is unsupported")
+            if self.causal_evidence_sha256 is not None:
+                raise ValueError("a numeric reproduction mismatch cannot claim causal evidence")
+        else:
+            if self.decomposition_allowed is not False:
+                raise ValueError("a causal reproduction mismatch must keep decomposition closed")
+            if self.mismatch_classification not in _MISMATCH_CLASSIFICATIONS:
+                raise ValueError("causal reproduction mismatch classification is unsupported")
+            _canonical_sha256(self.causal_evidence_sha256, "causal_evidence_sha256")
         if self.diagnostic_only is not True:
             raise ValueError("diagnosis status must be diagnostic-only")
 
@@ -529,6 +542,27 @@ class DiagnosisStatus:
             mismatch_classification=mismatch_classification,
         )
 
+    @classmethod
+    def causal_mismatch(
+        cls,
+        temporal: MetricReproduction,
+        primary_ood: MetricReproduction,
+        ood_exceedance_numerator: int,
+        ood_denominator: int,
+        mismatch_classification: str,
+        causal_evidence_sha256: str,
+    ) -> "DiagnosisStatus":
+        return cls(
+            status="causal_reproduction_mismatch",
+            temporal_half_refit_stability_reproduction=temporal,
+            primary_model_ood_reproduction=primary_ood,
+            ood_exceedance_numerator=ood_exceedance_numerator,
+            ood_denominator=ood_denominator,
+            decomposition_allowed=False,
+            mismatch_classification=mismatch_classification,
+            causal_evidence_sha256=causal_evidence_sha256,
+        )
+
     def canonical_payload(self) -> dict[str, object]:
         return {
             "status": self.status,
@@ -542,6 +576,7 @@ class DiagnosisStatus:
             "ood_denominator": self.ood_denominator,
             "decomposition_allowed": self.decomposition_allowed,
             "mismatch_classification": self.mismatch_classification,
+            "causal_evidence_sha256": self.causal_evidence_sha256,
             "diagnostic_only": self.diagnostic_only,
         }
 
