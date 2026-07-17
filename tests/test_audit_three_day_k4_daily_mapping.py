@@ -764,6 +764,38 @@ def test_failed_model_attempt_exact_schema_rejects_recursive_extra_field() -> No
     assert any("technical failure exact schema" in item for item in failures)
 
 
+def test_independent_k4_technical_recompute_imports_domain_config(
+    monkeypatch,
+) -> None:
+    from datetime import datetime, timedelta, timezone
+    import scripts.audit_three_day_k4_daily_mapping as module
+    from src.domain.regime import (
+        THREE_DAY_CHART_FEATURE_REGISTRY_V1, ThreeDayChartFeatureVector,
+    )
+    from src.infrastructure.regime.sklearn_cluster_diagnostic import (
+        SklearnClusterDiagnostic,
+    )
+
+    anchor = datetime(2021, 1, 1, tzinfo=timezone.utc)
+    vector = ThreeDayChartFeatureVector(
+        "BTCUSDT", anchor, anchor - timedelta(days=3),
+        {spec.name: float(index + 1) for index, spec in enumerate(THREE_DAY_CHART_FEATURE_REGISTRY_V1)},
+    )
+    monkeypatch.setattr(
+        SklearnClusterDiagnostic, "fit",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            ValueError("fitted robust scaler has invalid parameters")
+        ),
+    )
+
+    artifact, attempt = module._independently_recompute_k4(
+        (vector,), (), "a" * 64
+    )
+
+    assert artifact is None
+    assert attempt["technical_failure"]["reason_code"] == "invalid_scaler"
+
+
 @pytest.mark.parametrize("mutation", ("missing", "ambiguous", "missing_key", "extra_key"))
 def test_output_binding_is_exact_and_fail_closed(tmp_path, mutation) -> None:
     inputs, report = _write_bundle(tmp_path)

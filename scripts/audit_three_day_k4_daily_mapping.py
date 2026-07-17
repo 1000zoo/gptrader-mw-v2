@@ -353,9 +353,9 @@ def _independent_attempt_base(vectors, provenance, code_hash: str) -> dict[str, 
 
 def _independently_recompute_k4(vectors, provenance, code_hash: str):
     from src.domain.regime import (
-        RegimeModelConfig, THREE_DAY_CHART_FEATURE_REGISTRY_V1,
-        ThreeDayDailyResearchProfile,
+        THREE_DAY_CHART_FEATURE_REGISTRY_V1, ThreeDayDailyResearchProfile,
     )
+    from src.domain.regime.model import RegimeModelConfig
     from src.infrastructure.regime.sklearn_cluster_diagnostic import (
         SklearnClusterDiagnostic,
     )
