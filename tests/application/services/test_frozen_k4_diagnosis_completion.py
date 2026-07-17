@@ -460,7 +460,14 @@ def _empirical_fixture() -> tuple[FrozenK4Replay, SimpleNamespace, tuple[SimpleN
             for half_index, primary_index in enumerate(primary_indices)
         )
         return FrozenK4HalfReplay(
-            receipt=SimpleNamespace(half_label=label, anchor_count=count),
+            receipt=SimpleNamespace(
+                half_label=label,
+                anchor_count=count,
+                anchor_range=(
+                    "2021-01-01T00:00:00Z" if label == "A" else "2021-01-05T00:00:00Z",
+                    "2021-01-05T00:00:00Z" if label == "A" else "2021-01-08T00:00:00Z",
+                ),
+            ),
             fit=half_fit,
             assignments=assignments,
             posterior_probabilities=(),
@@ -590,6 +597,8 @@ def test_empirical_contract_rejects_forged_rows_and_summary() -> None:
         replace(computed, centroid_status="insufficient_sample")
     with pytest.raises(ValueError, match="status"):
         replace(empty, distance=0.0)
+    with pytest.raises(ValueError, match="centroid"):
+        replace(computed, empirical_centroid=(True,) + computed.empirical_centroid[1:])
     with pytest.raises(ValueError, match="fingerprint"):
         replace(computed, primary_component_fingerprint="BAD")
     with pytest.raises(ValueError, match="finite and nonnegative"):
@@ -626,6 +635,36 @@ def test_empirical_contract_rejects_forged_rows_and_summary() -> None:
     )
     with pytest.raises(ValueError, match="unique"):
         replace(result, centroid_rows=(result.centroid_rows[0], duplicate_identity) + result.centroid_rows[2:])
+    orphan = replace(
+        result.feature_rows[0],
+        half_component_index=9,
+        half_component_fingerprint="f" * 24,
+    )
+    with pytest.raises(ValueError, match="group identities"):
+        replace(result, feature_rows=result.feature_rows + (orphan,))
+    first_group = (
+        result.feature_rows[0].half_label,
+        result.feature_rows[0].primary_component_index,
+        result.feature_rows[0].half_component_index,
+    )
+    missing_group = tuple(
+        row
+        for row in result.feature_rows
+        if (row.half_label, row.primary_component_index, row.half_component_index) != first_group
+    )
+    with pytest.raises(ValueError, match="group identities"):
+        replace(result, feature_rows=missing_group)
+    insufficient = result.centroid_rows[-1]
+    insufficient_feature = replace(
+        result.feature_rows[0],
+        half_label=insufficient.half_label,
+        primary_component_index=insufficient.primary_component_index,
+        half_component_index=insufficient.half_component_index,
+        primary_component_fingerprint=insufficient.primary_component_fingerprint,
+        half_component_fingerprint=insufficient.half_component_fingerprint,
+    )
+    with pytest.raises(ValueError, match="group identities"):
+        replace(result, feature_rows=result.feature_rows + (insufficient_feature,))
 
 
 def test_empirical_maximum_ties_use_half_then_primary_then_half_component_order() -> None:
@@ -649,6 +688,34 @@ def test_empirical_maximum_ties_use_half_then_primary_then_half_component_order(
     assert component_tie.maximum_drift_half_label == "A"
     assert component_tie.maximum_drift_primary_component_index == 0
     assert component_tie.maximum_drift_half_component_index == 1
+
+
+def test_full_sample_empirical_reference_rejects_reversed_halves_and_receipt_interval_mismatch() -> None:
+    replay, primary_fit, vectors = _empirical_fixture()
+    reversed_halves = replace(replay, half_replays=tuple(reversed(replay.half_replays)))
+    with pytest.raises(ValueError, match="A then B"):
+        build_full_sample_empirical_reference(reversed_halves, primary_fit, vectors)
+
+    bad_receipt = SimpleNamespace(
+        half_label="A",
+        anchor_count=4,
+        anchor_range=("2021-01-02T00:00:00Z", "2021-01-05T00:00:00Z"),
+    )
+    bad_boundary = replace(
+        replay,
+        half_replays=(replace(replay.half_replays[0], receipt=bad_receipt), replay.half_replays[1]),
+    )
+    with pytest.raises(ValueError, match="receipt interval"):
+        build_full_sample_empirical_reference(bad_boundary, primary_fit, vectors)
+
+    unsorted_vectors = (vectors[1], vectors[0]) + vectors[2:]
+    unsorted_replay = replace(
+        replay,
+        primary_ood_rows=(replay.primary_ood_rows[1], replay.primary_ood_rows[0])
+        + replay.primary_ood_rows[2:],
+    )
+    with pytest.raises(ValueError, match="chronological"):
+        build_full_sample_empirical_reference(unsorted_replay, primary_fit, unsorted_vectors)
 
 
 def _namespace_replace(value: SimpleNamespace, **changes) -> SimpleNamespace:
@@ -676,7 +743,7 @@ def _forge_replay_status(replay: FrozenK4Replay, status: str) -> FrozenK4Replay:
         (lambda replay, fit, vectors: (replace(replay, half_replays=(replace(replay.half_replays[0], matched_pairs=(replay.half_replays[0].matched_pairs[0], replay.half_replays[0].matched_pairs[0])), replay.half_replays[1])), fit, vectors), "one-to-one"),
         (lambda replay, fit, vectors: (replace(replay, half_replays=(replace(replay.half_replays[0], matched_pairs=(replace(replay.half_replays[0].matched_pairs[0], primary_component_fingerprint="1" * 24), replay.half_replays[0].matched_pairs[1])), replay.half_replays[1])), fit, vectors), "index-fingerprint"),
         (lambda replay, fit, vectors: (replace(replay, half_replays=(replace(replay.half_replays[0], assignments=(9,) + replay.half_replays[0].assignments[1:]), replay.half_replays[1])), fit, vectors), "assignment index"),
-        (lambda replay, fit, vectors: (replace(replay, half_replays=(replace(replay.half_replays[0], receipt=SimpleNamespace(half_label="A", anchor_count=3)), replay.half_replays[1])), fit, vectors), "receipt count"),
+        (lambda replay, fit, vectors: (replace(replay, half_replays=(replace(replay.half_replays[0], receipt=SimpleNamespace(half_label="A", anchor_count=3, anchor_range=("2021-01-01T00:00:00Z", "2021-01-05T00:00:00Z"))), replay.half_replays[1])), fit, vectors), "receipt count"),
     ],
 )
 def test_full_sample_empirical_reference_rejects_invalid_frozen_inputs(mutate, message: str) -> None:

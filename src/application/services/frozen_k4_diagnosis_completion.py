@@ -182,7 +182,12 @@ class EmpiricalCentroidRow:
             self.centroid_status != "computed"
             or not isinstance(self.empirical_centroid, tuple)
             or not self.empirical_centroid
-            or any(not _is_finite_nonnegative(abs(value)) for value in self.empirical_centroid)
+            or any(
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+                for value in self.empirical_centroid
+            )
             or not _is_finite_nonnegative(self.distance)
         ):
             raise ValueError("centroid status and computed fields are inconsistent")
@@ -316,6 +321,15 @@ class EmpiricalScopeSummary:
             by_centroid.setdefault(identity, []).append(row)
             if row.feature_name not in feature_names or row.registry_family != feature_names[row.feature_name].family:
                 raise ValueError("feature contribution registry identity is not canonical")
+        computed_identities = {
+            (row.half_label, row.primary_component_index, row.half_component_index)
+            for row in self.centroid_rows
+            if row.centroid_status == "computed"
+        }
+        if set(by_centroid) != computed_identities:
+            raise ValueError(
+                "feature-row group identities must exactly equal computed centroid identities"
+            )
         computed_feature_sets: list[set[str]] = []
         for centroid in self.centroid_rows:
             identity = (centroid.half_label, centroid.primary_component_index, centroid.half_component_index)
@@ -490,6 +504,27 @@ def _build_empirical_scope(
     cursor = 0
     seen_half_labels: set[str] = set()
 
+    supplied_half_labels = tuple(
+        getattr(half.receipt, "half_label", None) for half in replay.half_replays
+    )
+    if supplied_half_labels != ("A", "B"):
+        raise ValueError("half replays must be supplied exactly in A then B order")
+    receipt_ranges = tuple(
+        getattr(half.receipt, "anchor_range", None) for half in replay.half_replays
+    )
+    if any(
+        not isinstance(anchor_range, tuple) or len(anchor_range) != 2
+        for anchor_range in receipt_ranges
+    ):
+        raise ValueError("half receipt interval must be an immutable start/end pair")
+    for start_anchor, end_anchor in receipt_ranges:
+        _canonical_anchor(start_anchor)
+        _canonical_anchor(end_anchor)
+        if start_anchor >= end_anchor:
+            raise ValueError("half receipt interval must have positive chronological width")
+    if receipt_ranges[0][1] != receipt_ranges[1][0]:
+        raise ValueError("half receipt intervals must meet at the frozen split boundary")
+
     for half in replay.half_replays:
         label = getattr(half.receipt, "half_label", None)
         count = getattr(half.receipt, "anchor_count", None)
@@ -506,6 +541,12 @@ def _build_empirical_scope(
         start, stop = cursor, cursor + count
         if stop > len(vectors):
             raise ValueError("half receipt counts exceed the global vector length")
+        receipt_start, receipt_end = half.receipt.anchor_range
+        if any(
+            not receipt_start <= _anchor_string(vectors[index].anchor_at) < receipt_end
+            for index in range(start, stop)
+        ):
+            raise ValueError("chronological vector slice falls outside its half receipt interval")
         half_selected_local = tuple(
             local for local in range(count) if start + local in selected
         )
@@ -675,6 +716,7 @@ def build_full_sample_empirical_reference(
     fingerprints = getattr(primary_fit, "fingerprints", None)
     if not isinstance(fingerprints, tuple):
         raise ValueError("primary component fingerprints must be immutable")
+    vector_anchors: list[str] = []
     for index, (vector, assignment, ood_row) in enumerate(
         zip(vectors, replay.primary_assignments, replay.primary_ood_rows)
     ):
@@ -685,12 +727,15 @@ def build_full_sample_empirical_reference(
         ):
             raise ValueError("primary assignment index is invalid")
         expected_anchor = _anchor_string(getattr(vector, "anchor_at", None))
+        vector_anchors.append(expected_anchor)
         if (
             getattr(ood_row, "anchor_at", None) != expected_anchor
             or getattr(ood_row, "assigned_component_index", None) != assignment
             or getattr(ood_row, "assigned_component_fingerprint", None) != fingerprints[assignment]
         ):
             raise ValueError(f"primary OOD row {index} is not one-to-one with its assignment")
+    if vector_anchors != sorted(set(vector_anchors)):
+        raise ValueError("global feature vectors must be in strict chronological order")
     primary_scaled = _primary_scaled_matrix(primary_fit, vectors)
     return _build_empirical_scope(
         replay,
