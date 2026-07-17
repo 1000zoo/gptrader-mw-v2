@@ -42,6 +42,9 @@ from src.domain.regime.frozen_k4_diagnosis_completion import (  # noqa: E402
 from src.domain.regime.frozen_k4_failure_diagnostics import (  # noqa: E402
     FrozenK4DiagnosisManifest,
 )
+from src.domain.regime.three_day_chart_features import (  # noqa: E402
+    THREE_DAY_CHART_FEATURE_REGISTRY_V1,
+)
 from src.application.services.frozen_k4_diagnosis_completion import (  # noqa: E402
     complete_frozen_k4_diagnosis,
 )
@@ -114,6 +117,15 @@ _METRIC_KEYS = frozenset(
 
 class PublicationError(RuntimeError):
     """Raised when immutable completion provenance cannot be established."""
+
+
+class OwnedPartialTargetError(OSError):
+    """Replace seam signal that its partial target belongs to this invocation."""
+
+    def __init__(self, staging_dir: Path, target_dir: Path, message: str) -> None:
+        super().__init__(message)
+        self.staging_dir = Path(staging_dir)
+        self.target_dir = Path(target_dir)
 
 
 @dataclass(frozen=True)
@@ -749,16 +761,46 @@ _EMPIRICAL_FEATURE_HEADERS = (
 
 
 def _ood_feature_rows(completion: object) -> list[dict[str, object]]:
-    return [_plain(row) for row in completion.component_zero_ood.feature_rows]
+    return [
+        _plain(row)
+        for row in sorted(
+            completion.component_zero_ood.feature_rows,
+            key=lambda row: (row.rank, row.feature_name),
+        )
+    ]
 
 
 def _ood_family_rows(completion: object) -> list[dict[str, object]]:
     rows = []
-    for row in completion.component_zero_ood.family_rows:
+    registry_position = {
+        spec.name: index
+        for index, spec in enumerate(THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+    }
+    for row in sorted(
+        completion.component_zero_ood.family_rows,
+        key=lambda item: (
+            min(registry_position[name] for name in item.family_feature_names),
+            item.family_name,
+        ),
+    ):
         payload = _plain(row)
         payload["family_feature_names"] = ";".join(row.family_feature_names)
         rows.append(payload)
     return rows
+
+
+def _scope_sort_key(
+    sample_scope: object, spacing_days: object, offset: object
+) -> tuple[int, int, int]:
+    return (
+        0 if sample_scope == "full_sample" else 1,
+        -1 if spacing_days is None else int(spacing_days),
+        -1 if offset is None else int(offset),
+    )
+
+
+def _nullable_sort_int(value: object) -> int:
+    return -1 if value is None or value == "" else int(value)
 
 
 def _empirical_diagnostic_rows(completion: object) -> list[dict[str, object]]:
@@ -819,7 +861,19 @@ def _empirical_diagnostic_rows(completion: object) -> list[dict[str, object]]:
         payload["top_five_drift_features"] = ";".join(row.top_five_drift_features)
         decorate(payload, ("offset_subsample", row.spacing_days, row.offset))
         rows.append(payload)
-    return rows
+    record_order = {"centroid": 0, "ood": 1, "conclusion": 2}
+    return sorted(
+        rows,
+        key=lambda row: (
+            *_scope_sort_key(
+                row.get("sample_scope"), row.get("spacing_days"), row.get("offset")
+            ),
+            record_order[str(row["record_type"])],
+            str(row.get("half_label") or ""),
+            _nullable_sort_int(row.get("primary_component_index")),
+            _nullable_sort_int(row.get("half_component_index")),
+        ),
+    )
 
 
 def _empirical_feature_rows(completion: object) -> list[dict[str, object]]:
@@ -829,7 +883,19 @@ def _empirical_feature_rows(completion: object) -> list[dict[str, object]]:
             payload = _plain(row)
             payload["is_top_five"] = row.rank <= 5
             rows.append(payload)
-    return rows
+    return sorted(
+        rows,
+        key=lambda row: (
+            *_scope_sort_key(
+                row.get("sample_scope"), row.get("spacing_days"), row.get("offset")
+            ),
+            str(row.get("half_label") or ""),
+            _nullable_sort_int(row.get("primary_component_index")),
+            _nullable_sort_int(row.get("half_component_index")),
+            int(row["rank"]),
+            str(row["feature_name"]),
+        ),
+    )
 
 
 def _render_completion_artifacts(
@@ -1049,17 +1115,26 @@ def _publish_atomically(
         if _directory_bytes(temp_dir) != dict(artifacts):
             raise PublicationError("temporary completion tree differs before publication")
         replace_directory(temp_dir, final_dir)
-    except Exception:
+    except Exception as error:
         shutil.rmtree(temp_dir, ignore_errors=True)
+        if (
+            isinstance(error, OwnedPartialTargetError)
+            and error.staging_dir == temp_dir
+            and error.target_dir == final_dir
+        ):
+            if final_dir.exists():
+                shutil.rmtree(final_dir, ignore_errors=True)
+            raise PublicationError("partial final completion run detected") from error
         if final_dir.exists():
             try:
-                partial_differs = _directory_bytes(final_dir) != dict(artifacts)
+                final_matches = _directory_bytes(final_dir) == dict(artifacts)
             except PublicationError:
-                partial_differs = True
-            finally:
-                shutil.rmtree(final_dir, ignore_errors=True)
-            if partial_differs:
-                raise PublicationError("partial final completion run detected")
+                final_matches = False
+            if final_matches:
+                return
+            raise PublicationError(
+                "different concurrent run appeared during atomic publication"
+            ) from error
         raise
 
 
@@ -1163,6 +1238,7 @@ __all__ = [
     "DEFAULT_OUTPUT_ROOT",
     "DEFAULT_PARENT_RUN",
     "MANIFEST",
+    "OwnedPartialTargetError",
     "ParentProvenance",
     "ParentReplayReceipt",
     "PublicationError",

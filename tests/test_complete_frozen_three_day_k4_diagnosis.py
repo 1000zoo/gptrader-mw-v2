@@ -710,11 +710,49 @@ def test_atomic_replace_bad_partial_target_is_removed(tmp_path: Path) -> None:
     def partial(_source: Path, target: Path) -> None:
         target.mkdir()
         (target / "bad").write_text("partial")
-        raise OSError("partial")
+        raise completion_script.OwnedPartialTargetError(_source, target, "partial")
     with pytest.raises(PublicationError, match="partial final"):
         completion_script._publish_atomically(output, final, {"one": b"1"}, partial)
     assert not final.exists()
     assert list(output.iterdir()) == []
+
+
+@pytest.mark.parametrize("same_bytes", (True, False))
+def test_atomic_replace_preserves_concurrently_created_final(
+    tmp_path: Path, same_bytes: bool
+) -> None:
+    output = tmp_path / "out"
+    final = output / ("a" * 64)
+    artifacts = {"one": b"1"}
+    def concurrent(_source: Path, target: Path) -> None:
+        target.mkdir()
+        (target / "one").write_bytes(b"1" if same_bytes else b"other")
+        raise OSError("lost race")
+    if same_bytes:
+        completion_script._publish_atomically(output, final, artifacts, concurrent)
+    else:
+        with pytest.raises(PublicationError, match="concurrent run"):
+            completion_script._publish_atomically(output, final, artifacts, concurrent)
+    assert final.exists()
+    assert (final / "one").read_bytes() == (b"1" if same_bytes else b"other")
+
+
+def test_all_four_row_renderers_use_explicit_semantic_sorting() -> None:
+    baseline = _completion_fixture()
+    permuted = _completion_fixture()
+    permuted.component_zero_ood.feature_rows = tuple(reversed(permuted.component_zero_ood.feature_rows))
+    permuted.component_zero_ood.family_rows = tuple(reversed(permuted.component_zero_ood.family_rows))
+    permuted.offset_empirical = tuple(reversed(permuted.offset_empirical))
+    permuted.offset_ood = tuple(reversed(permuted.offset_ood))
+    permuted.offset_conclusions = tuple(reversed(permuted.offset_conclusions))
+    assert completion_script._ood_feature_rows(permuted) == completion_script._ood_feature_rows(baseline)
+    assert completion_script._ood_family_rows(permuted) == completion_script._ood_family_rows(baseline)
+    assert completion_script._empirical_diagnostic_rows(permuted) == completion_script._empirical_diagnostic_rows(baseline)
+    assert completion_script._empirical_feature_rows(permuted) == completion_script._empirical_feature_rows(baseline)
+    assert completion_script._csv_bytes(completion_script._FEATURE_HEADERS, completion_script._ood_feature_rows(permuted)) == completion_script._csv_bytes(completion_script._FEATURE_HEADERS, completion_script._ood_feature_rows(baseline))
+    assert completion_script._csv_bytes(completion_script._FAMILY_HEADERS, completion_script._ood_family_rows(permuted)) == completion_script._csv_bytes(completion_script._FAMILY_HEADERS, completion_script._ood_family_rows(baseline))
+    assert completion_script._csv_bytes(completion_script._DIAGNOSTIC_HEADERS, completion_script._empirical_diagnostic_rows(permuted)) == completion_script._csv_bytes(completion_script._DIAGNOSTIC_HEADERS, completion_script._empirical_diagnostic_rows(baseline))
+    assert completion_script._csv_bytes(completion_script._EMPIRICAL_FEATURE_HEADERS, completion_script._empirical_feature_rows(permuted)) == completion_script._csv_bytes(completion_script._EMPIRICAL_FEATURE_HEADERS, completion_script._empirical_feature_rows(baseline))
 
 
 def test_outer_parent_guard_covers_unwrapped_late_failure(
