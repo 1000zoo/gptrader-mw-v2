@@ -38,8 +38,35 @@ The already published diagnosis directory and every byte under it are immutable
 inputs. They must not be modified, replaced, or supplemented. The extension has
 a new `diagnostic_schema_version`; its deterministic `run_id` is derived from
 the extension's canonical identity payload and therefore resolves to a distinct
-directory. The new manifest records the prior run ID and manifest hash as parent
+directory. The child identity and manifest include an `implementation_sha256`
+computed from the canonical relative-path-to-file-hash map of the completion
+producer implementation. The producer file set is fixed before execution and
+excludes tests, the independent auditor, generated evidence, and the parent
+implementation. Any producer-byte change therefore creates a different child
+identity. The new manifest records the prior run ID and manifest hash as parent
 provenance without copying or rewriting the prior run.
+
+The exact producer file set, sorted by canonical repository-relative path, is:
+
+- `scripts/complete_frozen_three_day_k4_diagnosis.py`;
+- `src/application/services/frozen_k4_diagnosis_completion.py`;
+- `src/domain/regime/frozen_k4_diagnosis_completion.py`.
+
+The manifest stores both the ordered `implementation_file_sha256` mapping and
+its aggregate `implementation_sha256`, and validates their canonical
+relationship.
+
+The top-level scope is `frozen-k4-diagnosis-completion`. The narrower scope
+`primary-component-0-ood-exceedances` appears only on the nested Component 0
+analysis and its rows. A top-level completion identity or manifest must not use
+the Component 0 scope as though it described every completion result.
+
+Before post-reproduction analysis begins, compare the newly reproduced replay
+with the parent's published reproduction JSON. Both failed metric values, their
+integer OOD numerator/denominator, reproduction status, and stored IEEE float
+receipts must match exactly. A mismatch fails closed before any child artifact
+is rendered. The child JSON and manifest record that this parent-replay match
+was verified.
 
 The decomposition receives the same 1,641 ordered feature vectors, frozen
 primary fit, reproduced half fits, fixed matches, assignments, and OOD rows as
@@ -148,6 +175,12 @@ For each valid half/component group, record selected count and its share of all
 selected rows in that half. For each offset, record its maximum drift pair and
 the pair's top five feature contributions.
 
+Every empirical centroid, empirical feature-contribution, offset OOD, maximum
+drift, and maximum OOD record includes the applicable primary component
+fingerprint. Half-assignment-based empirical records also include the matched
+half component fingerprint. Indices are display and join fields; fingerprints
+are the stable component identities used for cross-output conclusions.
+
 Before computing offset comparisons, apply this identical empirical-centroid
 procedure to all 1,641 rows without subsampling. Name the resulting reference
 metric `full_sample_empirical_centroid_distance`. It uses the same frozen
@@ -214,6 +247,10 @@ available in the parent run and retain their exact bytes and meaning.
 
 Every Component 0 OOD CSV and JSON object records `analysis_scope` and
 `primary_component_index=0` in addition to the component-specific filename.
+Every top-level JSON object and the child manifest record
+`completion_scope=frozen-k4-diagnosis-completion`, `implementation_sha256`, and
+the verified parent-replay receipt. Empirical and offset outputs record both
+component indices and the required primary/half fingerprints.
 
 All rows use deterministic ordering, finite numeric validation, explicit nulls
 where a rate or centroid is undefined, canonical float serialization already
@@ -229,6 +266,10 @@ Fail closed before publishing if any of the following occurs:
   publication;
 - the extension schema version or deterministic run ID collides with the prior
   run;
+- the completion implementation file set is incomplete, contains a noncanonical
+  path, or does not reproduce the manifest `implementation_sha256`;
+- the new replay differs from the parent reproduction in status, either failed
+  metric value, OOD numerator/denominator, or IEEE float receipts;
 - feature contributions do not sum to the stored sample distance;
 - a retained feature is missing from or inconsistent with the registry;
 - the canonical registry hash changes within one run;
@@ -254,6 +295,9 @@ Unit tests use adversarial small fixtures and cover:
 - strict registry family membership and explicit exclusion of range and volume
   features from volatility;
 - canonical registry hash stability;
+- canonical implementation hash stability and run-ID sensitivity to producer
+  byte changes;
+- top-level completion scope separation from the nested Component 0 scope;
 - offset selection for every 3-day and 7-day offset;
 - reuse of existing assignments and matches;
 - primary-coordinate empirical centroid and feature-distance arithmetic;
@@ -261,6 +305,8 @@ Unit tests use adversarial small fixtures and cover:
   `offset_empirical_centroid_distance`;
 - zero-sample and one-sample groups;
 - component OOD numerator, denominator, rate, and deterministic tie-breaking;
+- fingerprint propagation through full-sample, offset, maxima, JSON, and CSV
+  records;
 - ordered top-five and set-only agreement flags;
 - immutability and diagnostic-only flags.
 

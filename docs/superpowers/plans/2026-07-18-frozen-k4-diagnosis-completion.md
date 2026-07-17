@@ -6,6 +6,8 @@
 
 **Architecture:** Leave the existing frozen replay command, manifest contract, and published run byte-identical. Add a pure completion service that consumes the already reproduced replay and decomposition, then add a separate publisher that validates the prior run as parent provenance and writes a schema-versioned deterministic run under a different output root.
 
+**Scope identity:** Use `completion_scope=frozen-k4-diagnosis-completion` only at the child identity/manifest/top level. Use `analysis_scope=primary-component-0-ood-exceedances` only inside the Component 0 OOD subsection and its rows.
+
 **Tech Stack:** Python 3.11, frozen dataclasses, NumPy, existing SciPy/scikit-learn replay objects, canonical JSON/CSV, SHA-256, pytest 9.
 
 ---
@@ -14,7 +16,7 @@
 
 - Create `src/domain/regime/frozen_k4_diagnosis_completion.py`: completion schema constants, fixed thresholds, output filename set, and immutable completion-manifest contract.
 - Create `src/application/services/frozen_k4_diagnosis_completion.py`: pure Component 0 OOD aggregation, registry provenance, full-sample empirical reference, offset empirical/OOD summaries, and consistency flags.
-- Create `scripts/complete_frozen_three_day_k4_diagnosis.py`: parent-run validation, existing replay invocation, completion rendering, deterministic run identity, and atomic publication to a new root.
+- Create `scripts/complete_frozen_three_day_k4_diagnosis.py`: canonical producer implementation hash, parent-run/replay validation, completion rendering, deterministic run identity, and atomic publication to a new root.
 - Create `scripts/audit_frozen_k4_diagnosis_completion.py`: independent child/parent hash, sample receipt, aggregate, empirical, offset, and Markdown verification without importing completion calculation or rendering helpers.
 - Create `tests/domain/regime/test_frozen_k4_diagnosis_completion.py`: manifest and fixed-policy contract tests.
 - Create `tests/application/services/test_frozen_k4_diagnosis_completion.py`: arithmetic, tie-breaking, offset, and no-refit unit tests.
@@ -36,9 +38,14 @@ The parent artifacts do not contain the complete half-fit parameters or assignme
 Add tests that import the following public constants and type, assert the exact values, construct a valid manifest, and reject a bad schema, parent hash, run ID, scope, threshold, filename set, or replacement flag:
 
 ```python
+import hashlib
+import json
+
 from src.domain.regime.frozen_k4_diagnosis_completion import (
-    ANALYSIS_SCOPE,
+    COMPLETION_IMPLEMENTATION_FILES,
+    COMPLETION_SCOPE,
     COMPLETION_ARTIFACT_FILENAMES,
+    COMPONENT_ZERO_ANALYSIS_SCOPE,
     DIAGNOSTIC_SCHEMA_VERSION,
     RECURRENT_TOP1_THRESHOLD,
     SINGLE_FEATURE_THRESHOLD,
@@ -49,13 +56,30 @@ from src.domain.regime.frozen_k4_diagnosis_completion import (
 
 def test_completion_policy_is_frozen_before_analysis() -> None:
     assert DIAGNOSTIC_SCHEMA_VERSION == "frozen-k4-diagnosis-completion-v1"
-    assert ANALYSIS_SCOPE == "primary-component-0-ood-exceedances"
+    assert COMPLETION_SCOPE == "frozen-k4-diagnosis-completion"
+    assert COMPONENT_ZERO_ANALYSIS_SCOPE == "primary-component-0-ood-exceedances"
+    assert COMPLETION_SCOPE != COMPONENT_ZERO_ANALYSIS_SCOPE
+    assert COMPLETION_IMPLEMENTATION_FILES == (
+        "scripts/complete_frozen_three_day_k4_diagnosis.py",
+        "src/application/services/frozen_k4_diagnosis_completion.py",
+        "src/domain/regime/frozen_k4_diagnosis_completion.py",
+    )
     assert SINGLE_FEATURE_THRESHOLD == 0.50
     assert VOLATILITY_FAMILY_THRESHOLD == 0.70
     assert RECURRENT_TOP1_THRESHOLD == 0.50
 
 
 def test_manifest_binds_parent_registry_policy_and_exact_files() -> None:
+    implementation_files = {
+        name: "2" * 64 for name in COMPLETION_IMPLEMENTATION_FILES
+    }
+    implementation_hash = hashlib.sha256(
+        json.dumps(
+            dict(sorted(implementation_files.items())),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     manifest = FrozenK4DiagnosisCompletionManifest(
         run_id="a" * 64,
         parent_run_id="b" * 64,
@@ -63,7 +87,10 @@ def test_manifest_binds_parent_registry_policy_and_exact_files() -> None:
         input_identity_sha256="d" * 64,
         registry_schema_version="btc-chart-regime-ohlcv-3d-v1",
         registry_sha256="e" * 64,
-        analysis_scope=ANALYSIS_SCOPE,
+        implementation_file_sha256=implementation_files,
+        implementation_sha256=implementation_hash,
+        completion_scope=COMPLETION_SCOPE,
+        replay_parent_match_verified=True,
         thresholds={
             "single_feature_contribution_ratio": 0.50,
             "volatility_family_contribution_ratio": 0.70,
@@ -75,13 +102,18 @@ def test_manifest_binds_parent_registry_policy_and_exact_files() -> None:
     payload = manifest.canonical_payload()
     assert payload["diagnostic_schema_version"] == DIAGNOSTIC_SCHEMA_VERSION
     assert payload["parent_run_id"] == "b" * 64
+    assert payload["implementation_sha256"] == implementation_hash
+    assert tuple(payload["implementation_file_sha256"]) == COMPLETION_IMPLEMENTATION_FILES
+    assert payload["completion_scope"] == COMPLETION_SCOPE
+    assert "analysis_scope" not in payload
+    assert payload["replay_parent_match_verified"] is True
     assert set(payload["file_sha256"]) == COMPLETION_ARTIFACT_FILENAMES
     assert set(payload["file_bytes"]) == COMPLETION_ARTIFACT_FILENAMES
     assert payload["diagnostic_only"] is True
     assert payload["primary_replacement_allowed"] is False
 ```
 
-Use parametrized invalid cases to require lowercase canonical SHA-256 strings, the exact three threshold keys and values, canonical basenames, and this exact artifact set:
+Use parametrized invalid cases to require lowercase canonical SHA-256 strings including `implementation_sha256`, the exact top-level completion scope, verified replay-parent match, the exact three threshold keys and values, canonical basenames, and this exact artifact set:
 
 ```python
 COMPLETION_ARTIFACT_FILENAMES = frozenset({
@@ -117,7 +149,10 @@ class FrozenK4DiagnosisCompletionManifest:
     input_identity_sha256: str
     registry_schema_version: str
     registry_sha256: str
-    analysis_scope: str
+    implementation_file_sha256: Mapping[str, str]
+    implementation_sha256: str
+    completion_scope: str
+    replay_parent_match_verified: bool
     thresholds: Mapping[str, float]
     file_sha256: Mapping[str, str]
     file_bytes: Mapping[str, int]
@@ -127,7 +162,7 @@ class FrozenK4DiagnosisCompletionManifest:
     primary_replacement_allowed: bool = False
 ```
 
-In `__post_init__`, validate all hashes, exact schema/scope/status/policy values, exact file basenames, positive integer byte counts, and identical exact filename sets in `file_sha256` and `file_bytes`; copy all mappings into `MappingProxyType`. Implement `canonical_payload()` with fields in semantic order and ordinary dictionaries for canonical serialization. Export only the constants and manifest type in `__all__`.
+In `__post_init__`, validate all hashes, require the implementation-file map to have exactly the fixed canonical paths, require `implementation_sha256` to equal the canonical hash of that sorted map, validate exact schema/completion-scope/status/policy values, require `replay_parent_match_verified is True`, reject any top-level Component 0 analysis scope, validate exact artifact basenames and positive integer byte counts, and require identical exact filename sets in `file_sha256` and `file_bytes`; copy all mappings into `MappingProxyType`. Implement `canonical_payload()` with fields in semantic order and ordinary dictionaries for canonical serialization. Export the constants, implementation file set, and manifest type in `__all__`.
 
 - [ ] **Step 4: Run the domain tests and verify GREEN**
 
@@ -160,6 +195,7 @@ analysis = summarize_component_zero_ood(
 
 assert analysis.analysis_scope == "primary-component-0-ood-exceedances"
 assert analysis.primary_component_index == 0
+assert analysis.primary_component_fingerprint == fingerprint
 assert analysis.assigned_sample_count == 409
 assert analysis.ood_sample_count == 24
 assert analysis.feature_rows[0].rank == 1
@@ -210,6 +246,7 @@ Add frozen dataclasses:
 class OODFeatureSummaryRow:
     analysis_scope: str
     primary_component_index: int
+    primary_component_fingerprint: str
     feature_name: str
     registry_family: str
     registry_schema_version: str
@@ -229,6 +266,7 @@ class OODFeatureSummaryRow:
 class OODFamilySummaryRow:
     analysis_scope: str
     primary_component_index: int
+    primary_component_fingerprint: str
     family_name: str
     family_feature_names: tuple[str, ...]
     registry_schema_version: str
@@ -244,6 +282,7 @@ class OODFamilySummaryRow:
 class ComponentZeroOODAnalysis:
     analysis_scope: str
     primary_component_index: int
+    primary_component_fingerprint: str
     assigned_sample_count: int
     ood_sample_count: int
     registry_schema_version: str
@@ -295,6 +334,8 @@ row = next(
     if item.half_label == "A" and item.primary_component_index == 0
 )
 assert row.assignment_source == "frozen_reproduced_half_assignment"
+assert row.primary_component_fingerprint == fixed_pair.primary_component_fingerprint
+assert row.half_component_fingerprint == fixed_pair.half_component_fingerprint
 assert row.sample_count == 2
 assert row.sample_share == pytest.approx(2 / 3)
 assert row.empirical_centroid == pytest.approx(expected_centroid)
@@ -307,6 +348,8 @@ assert sum(
 ```
 
 Prove that membership comes from `half.assignments` mapped through the existing `matched_pairs`, not from `replay.primary_assignments`. Include an empty matched component and require `centroid_status="insufficient_sample"`, null centroid/distance, and exclusion from the maximum. Include a one-sample component and require a valid descriptive centroid.
+
+Assert every centroid row, feature contribution row, and maximum summary carries fingerprints copied from the fixed matched pair. Reject an index/fingerprint mismatch even when the numeric index exists.
 
 - [ ] **Step 2: Write RED tests for fixed maximum and feature tie rules**
 
@@ -337,6 +380,7 @@ class EmpiricalCentroidRow:
     primary_component_index: int
     half_component_index: int
     primary_component_fingerprint: str
+    half_component_fingerprint: str
     sample_count: int
     sample_share: float
     centroid_status: str
@@ -357,6 +401,8 @@ class EmpiricalFeatureContributionRow:
     half_label: str
     primary_component_index: int
     half_component_index: int
+    primary_component_fingerprint: str
+    half_component_fingerprint: str
     feature_name: str
     registry_family: str
     squared_distance: float
@@ -375,6 +421,8 @@ class EmpiricalScopeSummary:
     maximum_drift_half_label: str
     maximum_drift_primary_component_index: int
     maximum_drift_half_component_index: int
+    maximum_drift_primary_component_fingerprint: str
+    maximum_drift_half_component_fingerprint: str
     maximum_drift_distance: float
     top_five_drift_features: tuple[str, ...]
 ```
@@ -409,6 +457,8 @@ Use 23 ordered anchors and assert selection uses global position `index % spacin
 Call the completion function with fit/rematch seams monkeypatched to raise. Assert each offset reuses the same primary transform, half assignments, matches, `primary_ood_rows`, squared distances, and thresholds. Require one OOD diagnostic per frozen primary component per offset, including zero-exceedance rows and null rate when denominator is zero.
 
 Use this exact OOD maximum ordering: rate descending, numerator descending, denominator descending, component index ascending. Assert no offset result contains a newly fitted object or gate result.
+
+Assert every OOD row carries the primary fingerprint from the frozen fit, every offset maximum carries the selected primary fingerprint, and every drift maximum carries both fixed primary and half fingerprints. Require JSON/CSV join keys to agree on index and fingerprint together.
 
 - [ ] **Step 3: Write RED tests for empirical-to-empirical consistency flags**
 
@@ -456,8 +506,13 @@ class OffsetOODRow:
 class OffsetConclusion:
     spacing_days: int
     offset: int
+    maximum_drift_half_label: str
     maximum_drift_primary_component_index: int
+    maximum_drift_primary_component_fingerprint: str
+    maximum_drift_half_component_index: int
+    maximum_drift_half_component_fingerprint: str
     maximum_ood_primary_component_index: int
+    maximum_ood_primary_component_fingerprint: str
     top_five_drift_features: tuple[str, ...]
     drift_component_matches_full_sample: bool
     ood_component_matches_full_sample: bool
@@ -471,8 +526,11 @@ class FixedSampleReceipt:
     anchor_at: str
     half_label: str
     half_component_index: int
+    half_component_fingerprint: str
     matched_primary_component_index: int
+    matched_primary_component_fingerprint: str
     primary_component_index: int
+    primary_component_fingerprint: str
     squared_mahalanobis: float
     ood_threshold: float
     ood_exceeds: bool
@@ -481,6 +539,7 @@ class FixedSampleReceipt:
 
 @dataclass(frozen=True)
 class FrozenK4DiagnosisCompletion:
+    completion_scope: str
     component_zero_ood: ComponentZeroOODAnalysis
     full_sample_empirical: EmpiricalScopeSummary
     full_sample_ood: tuple[OffsetOODRow, ...]
@@ -490,6 +549,8 @@ class FrozenK4DiagnosisCompletion:
     sample_receipts: tuple[FixedSampleReceipt, ...]
     diagnostic_only: bool = True
 ```
+
+Require `completion_scope == COMPLETION_SCOPE` and require the nested Component 0 object alone to carry `COMPONENT_ZERO_ANALYSIS_SCOPE`.
 
 - [ ] **Step 6: Implement the coordinator with no new model operation**
 
@@ -544,9 +605,13 @@ Create a temporary parent run with a valid existing `FrozenK4DiagnosisManifest` 
 
 Reject a missing file, extra file, nested entry, symlink/reparse point, corrupt file, mismatched run ID, mismatched input identity, a completion output root inside the parent run, and any identity that collides with the parent run ID.
 
+Assert the validated parent receipt preserves both failed metric values, 76/1,641 OOD accounting, reproduction status, and every IEEE float-bit pair exactly as published. Mutate each field independently while updating no manifest hash and require parent validation to fail at the file hash; then construct a separately valid parent fixture with a semantically invalid receipt and require receipt validation to fail.
+
 - [ ] **Step 2: Write RED deterministic child identity tests**
 
-Derive the child identity twice against byte-identical parent/source fixtures and assert the same child run ID. Change each of schema version, parent manifest hash, input identity hash, registry hash, or one fixed threshold and require a different identity or closed validation failure. Assert the run ID does not depend on output-root path or wall-clock time.
+Derive the child identity twice against byte-identical parent/source fixtures and assert the same child run ID. Change each of schema version, parent manifest hash, input identity hash, registry hash, implementation hash, completion scope, or one fixed threshold and require a different identity or closed validation failure. Assert the run ID does not depend on output-root path or wall-clock time.
+
+Create three temporary producer files under the exact canonical relative paths in `COMPLETION_IMPLEMENTATION_FILES`. Require `_completion_implementation_receipt(repo_root)` to return the sorted `{relative_path: sha256(file_bytes)}` mapping plus its canonical aggregate hash. A one-byte change in any producer file must change both implementation hash and child run ID. Changes to tests, auditor, plan/spec, parent files, or generated output must not change the implementation hash. Reject missing files, duplicate/noncanonical paths, symlinks/reparse points, or paths escaping the repository root.
 
 - [ ] **Step 3: Run publisher tests and verify RED**
 
@@ -569,9 +634,11 @@ DEFAULT_OUTPUT_ROOT = REPO_ROOT / "docs" / "backtests" / "frozen_k4_diagnosis_co
 
 Implement `_load_parent_provenance(parent_dir)` by bounded-reading `manifest.json`, rejecting noncanonical JSON values, reconstructing `FrozenK4DiagnosisManifest`, requiring its filename set plus manifest and no extras, hashing every referenced byte, and returning an immutable record with `run_id`, `manifest_sha256`, `input_identity_sha256`, and the full before-snapshot.
 
+After manifest validation, parse the manifest-pinned `frozen_k4_failure_reproduction.json` and extract an immutable parent replay receipt containing status, temporal failed-metric expected/reproduced values, OOD failed-metric expected/reproduced values, OOD numerator/denominator, and `metric_ieee_float_bits`. Reject missing, extra, non-finite, or type-inconsistent fields rather than filling defaults.
+
 - [ ] **Step 5: Implement the child identity helper**
 
-Implement `_completion_identity_payload(parent, input_identity_sha256, registry_schema_version, registry_sha256)` with the exact schema version, parent run/hash, input identity hash, registry schema/hash, analysis scope, and three fixed thresholds. Implement `_completion_run_id` as the canonical SHA-256 of that payload and reject equality with the parent run ID. Add argument parsing for `--parent-run`, `--model-attempt`, `--raw-kline-root`, and `--output-root`; Task 6 adds the production orchestration body.
+Implement `_completion_implementation_receipt(repo_root)` over the exact fixed producer file tuple and canonical per-file hashes. Implement `_completion_identity_payload(parent, input_identity_sha256, registry_schema_version, registry_sha256, implementation_sha256)` with the exact schema version, parent run/hash, input identity hash, registry schema/hash, implementation hash, top-level completion scope, verified replay-parent flag, and three fixed thresholds. Implement `_completion_run_id` as the canonical SHA-256 of that payload and reject equality with the parent run ID. Add argument parsing for `--parent-run`, `--model-attempt`, `--raw-kline-root`, and `--output-root`; Task 6 adds the production orchestration body.
 
 The production orchestration must call, in order:
 
@@ -587,6 +654,8 @@ completion = complete_frozen_k4_diagnosis(
 ```
 
 It must fail before rendering unless replay status is reproduced and the parent input identity matches. It must target only `DEFAULT_OUTPUT_ROOT / run_id` and compare the complete parent byte snapshot again before returning.
+
+Before calling `complete_frozen_k4_diagnosis`, compare the new replay to the parent replay receipt. Require exact status, exact OOD integers, exact stored IEEE-bit mapping, and bitwise equality of both reproduced failed metric values. Also require the new replay's expected values to equal the parent's expected values. A mismatch raises `PublicationError` before completion analysis or artifact rendering.
 
 - [ ] **Step 6: Run publisher tests and verify GREEN**
 
@@ -607,7 +676,7 @@ git commit -m "feat: bind K4 completion parent identity"
 
 - [ ] **Step 1: Write RED schema tests for the Component 0 CSVs**
 
-Require `frozen_k4_component_0_ood_feature_summary.csv` to contain the exact feature summary fields from Task 2 and every row to carry `analysis_scope`, `primary_component_index=0`, registry schema, registry hash, family, and rank. Require `frozen_k4_component_0_ood_family_summary.csv` to contain every retained registry family, ordered by registry first appearance, with feature names, contribution sum/ratio, threshold, applicability, and result.
+Require `frozen_k4_component_0_ood_feature_summary.csv` to contain the exact feature summary fields from Task 2 and every row to carry nested `analysis_scope`, `primary_component_index=0`, primary fingerprint, registry schema, registry hash, family, and rank. Require `frozen_k4_component_0_ood_family_summary.csv` to contain every retained registry family, ordered by registry first appearance, with component fingerprint, feature names, contribution sum/ratio, threshold, applicability, and result.
 
 - [ ] **Step 2: Write RED schema tests for empirical/offset CSVs**
 
@@ -617,9 +686,9 @@ Use a tagged-record schema in `frozen_k4_offset_empirical_diagnostics.csv`:
 - `record_type=ood` for every full-sample and offset primary-component OOD row;
 - `record_type=conclusion` for each of the ten offset comparison rows.
 
-Require explicit `sample_scope`, nullable spacing/offset, origin anchor, counts/shares, status, metric name, distance, OOD numerator/denominator/rate, maximum flags, and all four consistency flags. Blank fields must serialize as empty CSV cells, never strings such as `None` or `nan`.
+Require explicit `sample_scope`, nullable spacing/offset, origin anchor, primary component index/fingerprint, half component index/fingerprint where applicable, counts/shares, status, metric name, distance, OOD numerator/denominator/rate, maximum fingerprints/flags, and all four consistency flags. Blank fields must serialize as empty CSV cells, never strings such as `None` or `nan`.
 
-Require `frozen_k4_offset_feature_contributions.csv` to contain full-sample and offset feature rows with family, rank, squared distance, contribution ratio, and an `is_top_five` flag.
+Require `frozen_k4_offset_feature_contributions.csv` to contain full-sample and offset feature rows with both primary and half component indices/fingerprints, family, rank, squared distance, contribution ratio, and an `is_top_five` flag.
 
 - [ ] **Step 3: Write RED JSON, Markdown, manifest, and byte tests**
 
@@ -628,11 +697,22 @@ Require `frozen_k4_diagnosis_completion.json` to contain:
 ```json
 {
   "diagnostic_schema_version": "frozen-k4-diagnosis-completion-v1",
-  "analysis_scope": "primary-component-0-ood-exceedances",
+  "completion_scope": "frozen-k4-diagnosis-completion",
+  "implementation_file_sha256": {},
+  "implementation_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "replay_parent_match_verified": true,
+  "replay_parent_validation": {
+    "parent_receipt": {},
+    "new_replay_receipt": {},
+    "match_verified": true
+  },
   "parent_provenance": {},
   "registry_provenance": {},
   "fixed_thresholds": {},
-  "component_zero_ood": {},
+  "component_zero_ood": {
+    "analysis_scope": "primary-component-0-ood-exceedances",
+    "primary_component_index": 0
+  },
   "full_sample_empirical": {},
   "offset_consistency": [],
   "fixed_sample_receipts": [],
@@ -641,11 +721,15 @@ Require `frozen_k4_diagnosis_completion.json` to contain:
 }
 ```
 
+The fixture value is a canonical 64-character stand-in; production uses the value computed from the fixed producer file map. Require top-level `analysis_scope` to be absent and reject any manifest or completion JSON that substitutes the Component 0 scope for `completion_scope`.
+
 Require Markdown to state the Component 0 top five, all family ratios, all three flags, the separately named fitted-parameter and full-sample empirical maxima, and 3-day/7-day match counts for drift component, OOD component, ordered top five, and top-five set. Require wording `universal`, `mixed`, or `subset-only` from exact match counts and forbid any gate pass/fail verdict.
 
 Assert the child manifest includes exactly the six artifact hashes and byte counts, excludes `manifest.json` from both maps, and reproduces every artifact hash/byte count on a second clean run.
 
 Call the production publisher through injected source/replay/decomposition/completion fixtures. Require atomic cleanup on rename failure, byte-identical acceptance when the deterministic child directory already exists, rejection when an existing child differs, and exact parent snapshots after every success and failure seam.
+
+Parametrize new replay mismatches for temporal expected value, temporal reproduced value, OOD expected value, OOD reproduced value, numerator, denominator, status, and IEEE bit mapping. Require each mismatch to stop before `completion_runner`, renderer, or atomic publication is invoked. The matching fixture must record `replay_parent_match_verified=true` in JSON and manifest.
 
 - [ ] **Step 4: Run renderer tests and verify RED**
 
@@ -671,7 +755,7 @@ Render a complete structured payload from immutable completion contracts, includ
 
 Calculate match counts from the ten stored `OffsetConclusion` rows rather than from prose-specific recomputation.
 
-Implement `publish_frozen_k4_diagnosis_completion` with keyword arguments `parent_run`, `model_attempt`, `raw_kline_root`, `output_root`, plus injectable `source_loader`, `replay_runner`, `decomposition_runner`, `completion_runner`, and `replace_directory`. Follow the Task 5 orchestration sequence, render the six artifacts, create `FrozenK4DiagnosisCompletionManifest` with both hash and byte maps, publish atomically under the child run ID, and compare the full parent snapshot immediately before returning. `main()` prints the final child directory and returns zero only after all checks pass.
+Implement `_validate_replay_matches_parent` using `struct.pack(">d", value).hex()` for both failed metric values and exact mapping/integer comparisons for the remaining receipt. Implement `publish_frozen_k4_diagnosis_completion` with keyword arguments `parent_run`, `model_attempt`, `raw_kline_root`, `output_root`, plus injectable `source_loader`, `replay_runner`, `decomposition_runner`, `completion_runner`, and `replace_directory`. Follow the Task 5 orchestration sequence, validate replay against parent before completion, compute the implementation file/hash receipt, render the six artifacts, create `FrozenK4DiagnosisCompletionManifest` with implementation file map/hash, completion scope, verified replay-parent flag, and both artifact hash/byte maps, publish atomically under the child run ID, and compare the full parent snapshot immediately before returning. `main()` prints the final child directory and returns zero only after all checks pass.
 
 - [ ] **Step 7: Run the full renderer tests and verify GREEN**
 
@@ -779,7 +863,7 @@ git commit -m "test: prove frozen K4 completion isolation"
 
 - [ ] **Step 1: Write RED tests for independent hash and parent verification**
 
-Build a valid temporary parent/child pair from static bytes. Call the auditor as a library and require it to verify the child manifest schema, exact artifact membership, SHA-256, byte counts, run-ID identity payload, parent run ID, exact parent manifest-byte hash, every parent artifact hash, and parent/child path separation. Parametrize one-byte mutations in each artifact and require a closed audit failure naming the affected invariant.
+Build a valid temporary parent/child pair from static bytes. Call the auditor as a library and require it to verify the child manifest schema, exact artifact membership, SHA-256, byte counts, run-ID identity payload, canonical producer implementation hash, top-level completion scope, nested Component 0 scope, verified replay-parent receipt, parent run ID, exact parent manifest-byte hash, every parent artifact hash, and parent/child path separation. Parametrize one-byte mutations in each artifact or producer file and require a closed audit failure naming the affected invariant.
 
 - [ ] **Step 2: Write RED tests for independent analytical recomputation**
 
@@ -791,6 +875,8 @@ Use a small but complete fixture containing raw vectors, primary fit, all fixed 
 - strict registry family totals and all three inclusive-threshold flags;
 - full-sample and offset empirical centroids from sample receipts;
 - all 3-day/7-day offset partitions, OOD rows, maxima, ties, and four consistency flags;
+- all empirical/offset primary and half fingerprints against the frozen fit and fixed sample receipts;
+- the new replay receipt against both failed values, OOD integers, status, and IEEE receipts published by the parent;
 - JSON and Markdown claims from the recomputed values.
 
 Monkeypatch both forbidden modules in `sys.modules` with objects that raise on attribute access to prove the audit does not share calculation/rendering helpers.
@@ -809,7 +895,7 @@ Expected: collection fails because the independent audit script does not exist.
 
 Implement `audit_frozen_k4_diagnosis_completion(*, parent_run, completion_run, model_attempt, raw_kline_root) -> Mapping[str, object]`. Load the frozen source only through `load_frozen_k4_diagnostic_source` to obtain verified vectors and the frozen primary fit; do not call replay, decomposition, completion, renderer, fitter, scaler `.fit`, or matcher code. Parse CSV with `csv.DictReader`, JSON with non-finite constants rejected, and Markdown as immutable UTF-8 text.
 
-Return a canonical receipt with parent/child IDs, checked file count, Component 0 numerator/denominator, registry hash, ten checked offsets, three flags, and `status="verified"`. The CLI exits nonzero on any mismatch and prints the canonical receipt on success.
+Return a canonical receipt with parent/child IDs, implementation hash, completion scope, replay-parent verification, checked file count, Component 0 numerator/denominator/scope, registry hash, ten checked offsets, three flags, and `status="verified"`. The CLI exits nonzero on any mismatch and prints the canonical receipt on success.
 
 - [ ] **Step 5: Implement independent formulas and claim reconciliation**
 
@@ -869,7 +955,7 @@ $runB = $runsB[0]
 .\.venv\Scripts\python.exe scripts/audit_frozen_k4_diagnosis_completion.py --parent-run docs/backtests/frozen_k4_failure_diagnosis/d89032317b12af7bc18d3a6c14ed1cb2ee47f0f5de6425a530296f3c518b55af --completion-run $runB.FullName --model-attempt docs/backtests/chart-regime-strategy-mapping-btcusdt-3d-k4-daily-model.json --raw-kline-root .research-data/binance-usdm/raw/klines
 ```
 
-Expected: both receipts are identical and report `status=verified`, `component_0_ood=24/409`, and `checked_offsets=10`. Any mismatch blocks publication.
+Expected: both receipts are identical and report `status=verified`, `completion_scope=frozen-k4-diagnosis-completion`, the same canonical `implementation_sha256` as the manifest, `replay_parent_match_verified=true`, `component_0_scope=primary-component-0-ood-exceedances`, `component_0_ood=24/409`, and `checked_offsets=10`. Any mismatch blocks publication.
 
 - [ ] **Step 4: Publish once to the canonical completion root**
 
