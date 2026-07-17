@@ -491,11 +491,11 @@ def _markdown_bytes(replay: object, decomposition: object | None) -> bytes:
         ),
         (
             "4. Does the shift persist beyond the mean?",
-            "Compare mean, coordinate median, trimmed mean, and medoid rows.",
+            _location_answer(decomposition, top_pair),
         ),
         (
             "5. How much does distance fall after removing tail samples?",
-            "Compare exclusion sensitivity rows.",
+            _tail_answer(decomposition, top_pair),
         ),
         (
             "6. Which clusters and features dominate the 4.631% OOD rate?",
@@ -503,15 +503,15 @@ def _markdown_bytes(replay: object, decomposition: object | None) -> bytes:
         ),
         (
             "7. Do centroid drift and OOD failure hit the same cluster/features?",
-            "Cross-check cluster diagnostics with OOD sample contributions.",
+            _centroid_ood_alignment_answer(decomposition, top_pair),
         ),
         (
             "8. Do covariance-aware component distances show the same anomaly?",
-            "Inspect Mahalanobis, KL, Bhattacharyya, and Wasserstein distance rows.",
+            _component_distance_answer(decomposition, top_pair),
         ),
         (
             "9. Does the conclusion hold for 3-day and 7-day subsamples?",
-            "Inspect offset subsample rows.",
+            _offset_answer(decomposition),
         ),
         ("10. How is the failure cause classified?", _cause_answer(decomposition)),
     ]
@@ -537,11 +537,47 @@ def _answer_reproduced(replay: object) -> str:
 def _top_features_answer(decomposition: object | None) -> str:
     if decomposition is None or not decomposition.feature_contributions:
         return "Replay failure prevented feature contribution decomposition."
-    rows = sorted(
-        decomposition.feature_contributions,
-        key=lambda row: (-row.squared_distance, row.feature_name),
-    )[:5]
-    return ", ".join(row.feature_name for row in rows)
+    best_by_feature: dict[str, float] = {}
+    for row in decomposition.feature_contributions:
+        best_by_feature[row.feature_name] = max(
+            best_by_feature.get(row.feature_name, 0.0),
+            float(row.squared_distance),
+        )
+    rows = sorted(best_by_feature.items(), key=lambda item: (-item[1], item[0]))[:5]
+    return ", ".join(f"{name}={_float(value)}" for name, value in rows)
+
+
+def _location_answer(decomposition: object | None, top_pair: object | None) -> str:
+    if decomposition is None or top_pair is None:
+        return "Replay failure prevented robust location comparison."
+    rows = [
+        row for row in decomposition.location_distances
+        if row.half_label == top_pair.half_label
+        and row.primary_component_index == top_pair.primary_component_index
+        and row.half_component_index == top_pair.half_component_index
+    ]
+    if not rows:
+        return "No location rows were available for the largest drift pair."
+    return "; ".join(
+        f"{row.statistic}={_float(row.centroid_distance)}"
+        for row in sorted(rows, key=lambda item: item.statistic)
+    )
+
+
+def _tail_answer(decomposition: object | None, top_pair: object | None) -> str:
+    if decomposition is None or top_pair is None:
+        return "Replay failure prevented tail sensitivity comparison."
+    rows = [
+        row for row in decomposition.exclusion_sensitivity
+        if row.half_label == top_pair.half_label
+        and row.component_fingerprint == top_pair.primary_component_fingerprint
+    ]
+    if not rows:
+        return "No exclusion sensitivity rows were available for the largest drift pair."
+    return "; ".join(
+        f"{row.statistic}={_float(row.centroid_distance)}"
+        for row in sorted(rows, key=lambda item: item.statistic)
+    )
 
 
 def _ood_answer(decomposition: object | None) -> str:
@@ -551,6 +587,49 @@ def _ood_answer(decomposition: object | None) -> str:
     return (
         f"component {row.component_index} has {row.exceedance_count}/"
         f"{row.sample_count} exceedances."
+    )
+
+
+def _centroid_ood_alignment_answer(
+    decomposition: object | None, top_pair: object | None
+) -> str:
+    if decomposition is None or top_pair is None or not decomposition.ood_by_component:
+        return "Replay failure prevented centroid/OOD alignment comparison."
+    ood = max(decomposition.ood_by_component, key=lambda item: item.exceedance_count)
+    same_cluster = int(ood.component_index) == int(top_pair.primary_component_index)
+    return (
+        f"largest centroid drift primary component={top_pair.primary_component_index}; "
+        f"largest OOD component={ood.component_index}; same_cluster={str(same_cluster).lower()}."
+    )
+
+
+def _component_distance_answer(decomposition: object | None, top_pair: object | None) -> str:
+    if decomposition is None or top_pair is None:
+        return "Replay failure prevented covariance-aware distance comparison."
+    rows = [
+        row for row in decomposition.component_distances
+        if row.half_label == top_pair.half_label
+        and row.primary_component_index == top_pair.primary_component_index
+        and row.half_component_index == top_pair.half_component_index
+    ]
+    if not rows:
+        return "No component distance rows were available for the largest drift pair."
+    return "; ".join(
+        f"{row.metric}={_float(row.distance)}"
+        for row in sorted(rows, key=lambda item: item.metric)
+    )
+
+
+def _offset_answer(decomposition: object | None) -> str:
+    if decomposition is None or not decomposition.offset_subsamples:
+        return "Replay failure prevented offset subsample comparison."
+    rows = sorted(
+        decomposition.offset_subsamples,
+        key=lambda row: (row.spacing_days, row.offset),
+    )
+    return "; ".join(
+        f"{row.spacing_days}d/{row.offset}:n={row.sample_count}"
+        for row in rows
     )
 
 

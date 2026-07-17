@@ -27,12 +27,15 @@ from src.application.services.frozen_k4_failure_decomposition import (
     ClusterSummaryRow,
     ComponentDistanceRow,
     FeatureContributionRow,
+    LocationDistanceRow,
     OODComponentRow,
     OODSampleContributionRow,
+    OffsetSubsampleRow,
 )
 from src.domain.regime.frozen_k4_failure_diagnostics import (
     DiagnosisStatus,
     MetricReproduction,
+    SensitivityRow,
 )
 
 
@@ -100,6 +103,14 @@ def _decomposition() -> SimpleNamespace:
             ComponentDistanceRow("A", 0, 2, "euclidean", 2.3526219570607076),
             ComponentDistanceRow("A", 0, 2, "symmetric_kl", 3.5),
         ),
+        location_distances=(
+            LocationDistanceRow("A", 0, 2, "mean", 2.3),
+            LocationDistanceRow("A", 0, 2, "coordinate_median", 2.1),
+            LocationDistanceRow("A", 0, 2, "medoid", 2.0),
+        ),
+        exclusion_sensitivity=(
+            SensitivityRow("A", "a" * 24, "exclude_farthest_1", 1, 1.8),
+        ),
         ood_by_component=(
             OODComponentRow(0, "a" * 24, 100, 7, 0.07),
         ),
@@ -116,6 +127,10 @@ def _decomposition() -> SimpleNamespace:
         cause_classification=CauseClassification(
             ("specific-feature-drift", "component-ood-concentration"),
             {"largest_ood_rate": 0.07},
+        ),
+        offset_subsamples=(
+            OffsetSubsampleRow(3, 0, 10, MappingProxyType({0: 5, 1: 5})),
+            OffsetSubsampleRow(7, 0, 4, MappingProxyType({0: 2, 1: 2})),
         ),
     )
 
