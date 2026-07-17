@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 from statistics import median
+import sys
 from typing import Sequence
 
 import numpy as np
@@ -272,6 +273,32 @@ class EmpiricalScopeSummary:
         )
         if len(set(centroid_identities)) != len(centroid_identities):
             raise ValueError("empirical centroid identities must be unique")
+        if {row.half_label for row in self.centroid_rows} != {"A", "B"}:
+            raise ValueError("empirical centroid graph must cover exactly halves A and B")
+        primary_indices_by_half: dict[str, tuple[int, ...]] = {}
+        primary_fingerprints: dict[int, str] = {}
+        for half_label in ("A", "B"):
+            half_rows = tuple(row for row in self.centroid_rows if row.half_label == half_label)
+            primary_indices = tuple(row.primary_component_index for row in half_rows)
+            half_indices = tuple(row.half_component_index for row in half_rows)
+            half_fingerprints = tuple(row.half_component_fingerprint for row in half_rows)
+            if (
+                len(set(primary_indices)) != len(primary_indices)
+                or len(set(half_indices)) != len(half_indices)
+                or len(set(half_fingerprints)) != len(half_fingerprints)
+            ):
+                raise ValueError("empirical centroid graph must be complete and one-to-one per half")
+            primary_indices_by_half[half_label] = primary_indices
+            for row in half_rows:
+                prior = primary_fingerprints.setdefault(
+                    row.primary_component_index, row.primary_component_fingerprint
+                )
+                if prior != row.primary_component_fingerprint:
+                    raise ValueError(
+                        "primary fingerprint must be consistent for each component across halves"
+                    )
+        if set(primary_indices_by_half["A"]) != set(primary_indices_by_half["B"]):
+            raise ValueError("empirical centroid graph must contain a complete primary pair set in each half")
         for half_label in {row.half_label for row in self.centroid_rows}:
             half_rows = tuple(row for row in self.centroid_rows if row.half_label == half_label)
             half_count = sum(row.sample_count for row in half_rows)
@@ -453,6 +480,52 @@ def _anchor_string(anchor: object) -> str:
     return result
 
 
+def _validate_diagnostic_provenance(replay: FrozenK4Replay) -> None:
+    if replay.diagnostic_only is not True or replay.primary_replacement_allowed is not False:
+        raise ValueError("replay diagnostic provenance forbids primary replacement")
+    for half in replay.half_replays:
+        if half.diagnostic_only is not True or half.primary_replacement_allowed is not False:
+            raise ValueError("half replay diagnostic provenance forbids primary replacement")
+        for source_name, source in (("receipt", half.receipt), ("fit", half.fit)):
+            diagnostic_only = getattr(source, "diagnostic_only", True)
+            replacement_allowed = getattr(source, "primary_replacement_allowed", False)
+            if diagnostic_only is not True or replacement_allowed is not False:
+                raise ValueError(
+                    f"half {source_name} diagnostic provenance forbids primary replacement"
+                )
+
+
+def _safe_empirical_mean(values: np.ndarray) -> float:
+    count = len(values)
+    try:
+        result = math.fsum(float(value) / count for value in values)
+    except OverflowError as exc:
+        raise ValueError("empirical centroid exceeds the finite representable range") from exc
+    if not math.isfinite(result):
+        raise ValueError("empirical centroid exceeds the finite representable range")
+    return result
+
+
+def _safe_squared_contributions(
+    empirical: tuple[float, ...],
+    target: tuple[float, ...],
+) -> tuple[tuple[float, ...], float]:
+    square_root_max = math.sqrt(sys.float_info.max)
+    squared: list[float] = []
+    for actual, expected in zip(empirical, target):
+        delta = actual - expected
+        if not math.isfinite(delta) or abs(delta) > square_root_max:
+            raise ValueError("empirical squared distance exceeds the finite representable range")
+        squared.append(delta * delta)
+    try:
+        total = math.fsum(squared)
+    except OverflowError as exc:
+        raise ValueError("empirical squared distance exceeds the finite representable range") from exc
+    if not math.isfinite(total):
+        raise ValueError("empirical squared distance exceeds the finite representable range")
+    return tuple(squared), total
+
+
 def _build_empirical_scope(
     replay: FrozenK4Replay,
     primary_fit: object,
@@ -464,6 +537,7 @@ def _build_empirical_scope(
     offset: int | None,
 ) -> EmpiricalScopeSummary:
     _validate_empirical_scope(sample_scope, spacing_days, offset)
+    _validate_diagnostic_provenance(replay)
     if not selected_indices or tuple(sorted(set(selected_indices))) != selected_indices:
         raise ValueError("selected indices must be a nonempty ordered unique tuple")
     if selected_indices[0] < 0 or selected_indices[-1] >= len(vectors):
@@ -623,26 +697,30 @@ def _build_empirical_scope(
                     )
                 )
                 continue
-            empirical = np.mean(primary_scaled[np.asarray(member_globals, dtype=np.int64)], axis=0)
-            delta = empirical - np.asarray(means[pair.primary_component_index], dtype=np.float64)
-            squared = np.square(delta)
-            squared_total = float(np.sum(squared))
+            member_matrix = primary_scaled[np.asarray(member_globals, dtype=np.int64)]
+            empirical = tuple(
+                _safe_empirical_mean(member_matrix[:, feature_index])
+                for feature_index in range(len(feature_names))
+            )
+            squared, squared_total = _safe_squared_contributions(
+                empirical, means[pair.primary_component_index]
+            )
             distance = math.sqrt(squared_total)
             centroid_rows.append(
                 EmpiricalCentroidRow(
                     **common,
                     centroid_status="computed",
-                    empirical_centroid=tuple(float(value) for value in empirical),
+                    empirical_centroid=empirical,
                     distance=distance,
                 )
             )
             ordered_indices = sorted(
                 range(len(feature_names)),
-                key=lambda index: (-float(squared[index]), registry_position[feature_names[index]]),
+                key=lambda index: (-squared[index], registry_position[feature_names[index]]),
             )
             for rank, feature_index in enumerate(ordered_indices, start=1):
                 name = feature_names[feature_index]
-                value = float(squared[feature_index])
+                value = squared[feature_index]
                 feature_rows.append(
                     EmpiricalFeatureContributionRow(
                         sample_scope=sample_scope,
@@ -703,6 +781,7 @@ def build_full_sample_empirical_reference(
 ) -> EmpiricalScopeSummary:
     if not isinstance(replay, FrozenK4Replay):
         raise ValueError("full-sample empirical reference requires FrozenK4Replay")
+    _validate_diagnostic_provenance(replay)
     if getattr(replay.status, "status", None) != "reproduced":
         raise ValueError("full-sample empirical reference requires reproduced status")
     if not isinstance(vectors, tuple):

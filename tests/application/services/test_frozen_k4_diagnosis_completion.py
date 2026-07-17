@@ -4,6 +4,7 @@ from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
 import math
 from types import MappingProxyType, SimpleNamespace
+import warnings
 
 import pytest
 
@@ -445,6 +446,8 @@ def _empirical_fixture() -> tuple[FrozenK4Replay, SimpleNamespace, tuple[SimpleN
             feature_names=EMPIRICAL_NAMES,
             fingerprints=(prefix * 24, chr(ord(prefix) + 1) * 24),
             means=((9.0,) * 6, (8.0,) * 6),
+            diagnostic_only=True,
+            primary_replacement_allowed=False,
         )
         primary_indices = (1, 0) if label == "A" else (0, 1)
         pairs = tuple(
@@ -467,6 +470,8 @@ def _empirical_fixture() -> tuple[FrozenK4Replay, SimpleNamespace, tuple[SimpleN
                     "2021-01-01T00:00:00Z" if label == "A" else "2021-01-05T00:00:00Z",
                     "2021-01-05T00:00:00Z" if label == "A" else "2021-01-08T00:00:00Z",
                 ),
+                diagnostic_only=True,
+                primary_replacement_allowed=False,
             ),
             fit=half_fit,
             assignments=assignments,
@@ -667,6 +672,67 @@ def test_empirical_contract_rejects_forged_rows_and_summary() -> None:
         replace(result, feature_rows=result.feature_rows + (insufficient_feature,))
 
 
+def test_empirical_summary_rejects_incomplete_or_inconsistent_component_graph() -> None:
+    replay, primary_fit, vectors = _empirical_fixture()
+    result = build_full_sample_empirical_reference(replay, primary_fit, vectors)
+
+    only_a_centroids = tuple(row for row in result.centroid_rows if row.half_label == "A")
+    only_a_features = tuple(row for row in result.feature_rows if row.half_label == "A")
+    a_winner = max(
+        (row for row in only_a_centroids if row.centroid_status == "computed"),
+        key=lambda row: row.distance,
+    )
+    a_winner_features = tuple(
+        row
+        for row in only_a_features
+        if row.primary_component_index == a_winner.primary_component_index
+        and row.half_component_index == a_winner.half_component_index
+    )
+    with pytest.raises(ValueError, match="A and B"):
+        replace(
+            result,
+            selected_sample_count=sum(row.sample_count for row in only_a_centroids),
+            centroid_rows=only_a_centroids,
+            feature_rows=only_a_features,
+            maximum_drift_half_label="A",
+            maximum_drift_primary_component_index=a_winner.primary_component_index,
+            maximum_drift_half_component_index=a_winner.half_component_index,
+            maximum_drift_primary_component_fingerprint=a_winner.primary_component_fingerprint,
+            maximum_drift_half_component_fingerprint=a_winner.half_component_fingerprint,
+            maximum_drift_distance=a_winner.distance,
+            top_five_drift_features=tuple(row.feature_name for row in a_winner_features[:5]),
+        )
+
+    missing_empty_pair = tuple(
+        row
+        for row in result.centroid_rows
+        if not (row.half_label == "B" and row.half_component_index == 1)
+    )
+    with pytest.raises(ValueError, match="complete"):
+        replace(result, centroid_rows=missing_empty_pair)
+
+    forged_fingerprint = "e" * 24
+    forged_centroids = tuple(
+        replace(row, primary_component_fingerprint=forged_fingerprint)
+        if row.half_label == "B" and row.primary_component_index == 0
+        else row
+        for row in result.centroid_rows
+    )
+    forged_features = tuple(
+        replace(row, primary_component_fingerprint=forged_fingerprint)
+        if row.half_label == "B" and row.primary_component_index == 0
+        else row
+        for row in result.feature_rows
+    )
+    with pytest.raises(ValueError, match="primary fingerprint"):
+        replace(
+            result,
+            centroid_rows=forged_centroids,
+            feature_rows=forged_features,
+            maximum_drift_primary_component_fingerprint=forged_fingerprint,
+        )
+
+
 def test_empirical_maximum_ties_use_half_then_primary_then_half_component_order() -> None:
     replay, primary_fit, vectors = _empirical_fixture()
     half_tie_vectors = vectors[:4] + tuple(
@@ -716,6 +782,144 @@ def test_full_sample_empirical_reference_rejects_reversed_halves_and_receipt_int
     )
     with pytest.raises(ValueError, match="chronological"):
         build_full_sample_empirical_reference(unsorted_replay, primary_fit, unsorted_vectors)
+
+
+@pytest.mark.parametrize("target", ("replay", "half", "receipt", "fit"))
+def test_full_sample_empirical_reference_rejects_laundered_diagnostic_provenance(
+    target: str,
+) -> None:
+    replay, primary_fit, vectors = _empirical_fixture()
+    if target == "replay":
+        forged = replace(replay, diagnostic_only=False)
+    elif target == "half":
+        forged = replace(
+            replay,
+            half_replays=(
+                replace(replay.half_replays[0], primary_replacement_allowed=True),
+                replay.half_replays[1],
+            ),
+        )
+    elif target == "receipt":
+        receipt = _namespace_replace(replay.half_replays[0].receipt, diagnostic_only=False)
+        forged = replace(
+            replay,
+            half_replays=(replace(replay.half_replays[0], receipt=receipt), replay.half_replays[1]),
+        )
+    else:
+        fit = _namespace_replace(replay.half_replays[0].fit, primary_replacement_allowed=True)
+        forged = replace(
+            replay,
+            half_replays=(replace(replay.half_replays[0], fit=fit), replay.half_replays[1]),
+        )
+    with pytest.raises(ValueError, match="diagnostic provenance"):
+        build_full_sample_empirical_reference(forged, primary_fit, vectors)
+
+
+def _extreme_empirical_fixture(
+    *,
+    primary_mean: float,
+    vector_value: float = 1e308,
+) -> tuple[FrozenK4Replay, SimpleNamespace, tuple[SimpleNamespace, ...]]:
+    name = EMPIRICAL_NAMES[0]
+    primary_fit = SimpleNamespace(
+        feature_names=(name,),
+        lower_bounds=(-1e308,),
+        upper_bounds=(1e308,),
+        medians=(0.0,),
+        scales=(1.0,),
+        fingerprints=("1" * 24,),
+        means=((primary_mean,),),
+    )
+    vectors = tuple(
+        SimpleNamespace(
+            anchor_at=datetime(2021, 1, 1, tzinfo=timezone.utc) + timedelta(days=index),
+            values=MappingProxyType({name: vector_value}),
+        )
+        for index in range(3)
+    )
+
+    def half(label: str, start: int, count: int) -> FrozenK4HalfReplay:
+        half_fit = SimpleNamespace(
+            feature_names=(name,),
+            fingerprints=(("2" if label == "A" else "3") * 24,),
+            means=((0.0,),),
+            diagnostic_only=True,
+            primary_replacement_allowed=False,
+        )
+        boundary_start = vectors[start].anchor_at.isoformat().replace("+00:00", "Z")
+        boundary_end = (vectors[start + count - 1].anchor_at + timedelta(days=1)).isoformat().replace("+00:00", "Z")
+        return FrozenK4HalfReplay(
+            receipt=SimpleNamespace(
+                half_label=label,
+                anchor_count=count,
+                anchor_range=(boundary_start, boundary_end),
+                diagnostic_only=True,
+                primary_replacement_allowed=False,
+            ),
+            fit=half_fit,
+            assignments=(0,) * count,
+            posterior_probabilities=(),
+            projected_centroids=(),
+            projected_covariances=(),
+            precisions=(),
+            precisions_cholesky=(),
+            cost_matrix=(),
+            hungarian_assignment=(),
+            matched_pairs=(
+                MatchedPair(
+                    half_label=label,
+                    primary_component_fingerprint="1" * 24,
+                    half_component_fingerprint=half_fit.fingerprints[0],
+                    primary_component_index=0,
+                    half_component_index=0,
+                    matching_cost=0.0,
+                    euclidean_distance=0.0,
+                ),
+            ),
+            pair_euclidean_distances=(),
+            component_weights=(),
+        )
+
+    replay = FrozenK4Replay(
+        input_identity=SimpleNamespace(),
+        dependency_metadata={},
+        status=SimpleNamespace(status="reproduced"),
+        half_replays=(half("A", 0, 2), half("B", 2, 1)),
+        primary_assignments=(0, 0, 0),
+        primary_ood_rows=tuple(
+            SimpleNamespace(
+                anchor_at=vector.anchor_at.isoformat().replace("+00:00", "Z"),
+                assigned_component_index=0,
+                assigned_component_fingerprint="1" * 24,
+            )
+            for vector in vectors
+        ),
+    )
+    return replay, primary_fit, vectors
+
+
+def test_empirical_mean_is_overflow_safe_and_extreme_delta_rejects_without_warning() -> None:
+    replay, primary_fit, vectors = _extreme_empirical_fixture(primary_mean=1e308)
+    result = build_full_sample_empirical_reference(replay, primary_fit, vectors)
+    assert all(row.empirical_centroid == (1e308,) for row in result.centroid_rows)
+    assert all(row.distance == 0.0 for row in result.centroid_rows)
+
+    replay, primary_fit, vectors = _extreme_empirical_fixture(primary_mean=-1e308)
+    with warnings.catch_warnings(record=True) as warning_record:
+        warnings.simplefilter("always")
+        with pytest.raises(ValueError, match="representable range"):
+            build_full_sample_empirical_reference(replay, primary_fit, vectors)
+    assert not warning_record
+
+    replay, primary_fit, vectors = _extreme_empirical_fixture(
+        primary_mean=0.0,
+        vector_value=1e-320,
+    )
+    underflow = build_full_sample_empirical_reference(replay, primary_fit, vectors)
+    assert all(row.empirical_centroid == (1e-320,) for row in underflow.centroid_rows)
+    assert all(row.distance == 0.0 for row in underflow.centroid_rows)
+    assert all(row.squared_distance == 0.0 for row in underflow.feature_rows)
+    assert all(row.contribution_ratio == 0.0 for row in underflow.feature_rows)
 
 
 def _namespace_replace(value: SimpleNamespace, **changes) -> SimpleNamespace:
