@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from fractions import Fraction
 import hashlib
 import json
 import math
@@ -453,22 +452,7 @@ def _terminal_fit_error_replay(
             for label, error in sorted(errors.items())
         },
     })
-    temporal = MetricReproduction.compare(
-        EXPECTED_MAXIMUM_MATCHED_CENTROID_DISTANCE,
-        EXPECTED_MAXIMUM_MATCHED_CENTROID_DISTANCE,
-    )
-    ood = MetricReproduction.compare(
-        EXPECTED_MAXIMUM_DISTANCE_EXCEEDANCE_RATE,
-        EXPECTED_MAXIMUM_DISTANCE_EXCEEDANCE_RATE,
-    )
-    fraction = Fraction(EXPECTED_MAXIMUM_DISTANCE_EXCEEDANCE_RATE).limit_denominator(
-        max(1, len(source.vectors))
-    )
-    status = DiagnosisStatus.causal_mismatch(
-        temporal,
-        ood,
-        fraction.numerator,
-        fraction.denominator,
+    status = DiagnosisStatus.causal_mismatch_unavailable(
         _STAGE_CLASSIFICATION[stage],
         evidence,
     )
@@ -476,7 +460,6 @@ def _terminal_fit_error_replay(
         source.identity,
         source.dependency_metadata,
         status,
-        metric_ieee_float_bits=_metric_bits(temporal, ood),
     )
 
 

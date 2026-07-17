@@ -394,6 +394,35 @@ def test_diagnosis_status_accepts_causal_terminal_mismatch_when_metrics_match():
     assert status.causal_evidence_sha256 == SHA_A
 
 
+def test_diagnosis_status_accepts_causal_terminal_with_unavailable_metrics():
+    status = DiagnosisStatus.causal_mismatch_unavailable(
+        mismatch_classification="gmm-fitting-nondeterminism",
+        causal_evidence_sha256=SHA_A,
+    )
+
+    assert status.status == "causal_reproduction_mismatch"
+    assert status.temporal_half_refit_stability_reproduction is None
+    assert status.primary_model_ood_reproduction is None
+    assert status.ood_exceedance_numerator is None
+    assert status.ood_denominator is None
+    assert status.decomposition_allowed is False
+    assert status.canonical_payload()["temporal_half_refit_stability_reproduction"] is None
+
+
+def test_unavailable_terminal_rejects_partial_metric_or_count_payloads():
+    with pytest.raises(ValueError, match="partial receipts or counts"):
+        DiagnosisStatus(
+            status="causal_reproduction_mismatch",
+            temporal_half_refit_stability_reproduction=None,
+            primary_model_ood_reproduction=None,
+            ood_exceedance_numerator=76,
+            ood_denominator=None,
+            decomposition_allowed=False,
+            mismatch_classification="gmm-fitting-nondeterminism",
+            causal_evidence_sha256=SHA_A,
+        )
+
+
 def test_pure_numeric_mismatch_still_rejects_equal_metrics_without_causal_evidence():
     equal = MetricReproduction.compare(1.0, 1.0)
 

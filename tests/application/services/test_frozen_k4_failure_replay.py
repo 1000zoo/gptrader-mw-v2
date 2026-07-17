@@ -399,7 +399,16 @@ def test_public_replay_returns_terminal_and_still_attempts_both_fits_when_one_ra
     assert calls == [820, 821]
     assert result.status.status == "causal_reproduction_mismatch"
     assert result.status.mismatch_classification == "gmm-fitting-nondeterminism"
+    assert result.status.temporal_half_refit_stability_reproduction is None
+    assert result.status.primary_model_ood_reproduction is None
+    assert result.status.ood_exceedance_numerator is None
+    assert result.status.ood_denominator is None
+    assert result.status.decomposition_allowed is False
     assert result.half_replays == ()
+    assert result.primary_assignments == ()
+    assert result.primary_posterior_probabilities == ()
+    assert result.primary_ood_rows == ()
+    assert result.metric_ieee_float_bits == {}
 
 
 @pytest.fixture(scope="session")

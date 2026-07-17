@@ -448,10 +448,10 @@ class SensitivityRow:
 @dataclass(frozen=True)
 class DiagnosisStatus:
     status: str
-    temporal_half_refit_stability_reproduction: MetricReproduction
-    primary_model_ood_reproduction: MetricReproduction
-    ood_exceedance_numerator: int
-    ood_denominator: int
+    temporal_half_refit_stability_reproduction: MetricReproduction | None
+    primary_model_ood_reproduction: MetricReproduction | None
+    ood_exceedance_numerator: int | None
+    ood_denominator: int | None
     decomposition_allowed: bool
     mismatch_classification: str | None = None
     causal_evidence_sha256: str | None = None
@@ -462,36 +462,47 @@ class DiagnosisStatus:
             "reproduced", "reproduction_mismatch", "causal_reproduction_mismatch"
         ):
             raise ValueError("diagnosis status is unsupported")
-        if not isinstance(
+        has_receipts = isinstance(
             self.temporal_half_refit_stability_reproduction, MetricReproduction
-        ) or not isinstance(self.primary_model_ood_reproduction, MetricReproduction):
-            raise ValueError("diagnosis status requires both reproduction receipts")
-        numerator = _nonnegative_integer(
-            self.ood_exceedance_numerator, "OOD numerator"
-        )
-        denominator = _nonnegative_integer(self.ood_denominator, "OOD denominator")
-        if denominator == 0 or numerator > denominator:
-            raise ValueError("OOD numerator/denominator must form a valid fraction")
-        if not math.isclose(
-            numerator / denominator,
-            self.primary_model_ood_reproduction.reproduced_value,
-            rel_tol=1e-12,
-            abs_tol=1e-12,
+        ) and isinstance(self.primary_model_ood_reproduction, MetricReproduction)
+        if has_receipts:
+            numerator = _nonnegative_integer(
+                self.ood_exceedance_numerator, "OOD numerator"
+            )
+            denominator = _nonnegative_integer(self.ood_denominator, "OOD denominator")
+            if denominator == 0 or numerator > denominator:
+                raise ValueError("OOD numerator/denominator must form a valid fraction")
+            if not math.isclose(
+                numerator / denominator,
+                self.primary_model_ood_reproduction.reproduced_value,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            ):
+                raise ValueError("OOD numerator/denominator must reproduce the OOD rate")
+            both_match = (
+                self.temporal_half_refit_stability_reproduction.numeric_tolerance_match
+                and self.primary_model_ood_reproduction.numeric_tolerance_match
+            )
+        elif (
+            self.temporal_half_refit_stability_reproduction is not None
+            or self.primary_model_ood_reproduction is not None
+            or self.ood_exceedance_numerator is not None
+            or self.ood_denominator is not None
         ):
-            raise ValueError("OOD numerator/denominator must reproduce the OOD rate")
-        both_match = (
-            self.temporal_half_refit_stability_reproduction.numeric_tolerance_match
-            and self.primary_model_ood_reproduction.numeric_tolerance_match
-        )
+            raise ValueError(
+                "unavailable reproduction status cannot mix partial receipts or counts"
+            )
+        else:
+            both_match = False
         if self.status == "reproduced":
-            if not both_match or self.decomposition_allowed is not True:
+            if not has_receipts or not both_match or self.decomposition_allowed is not True:
                 raise ValueError("decomposition requires both reproductions to match")
             if self.mismatch_classification is not None:
                 raise ValueError("a reproduced diagnosis cannot have a mismatch classification")
             if self.causal_evidence_sha256 is not None:
                 raise ValueError("a reproduced diagnosis cannot have causal mismatch evidence")
         elif self.status == "reproduction_mismatch":
-            if both_match or self.decomposition_allowed is not False:
+            if not has_receipts or both_match or self.decomposition_allowed is not False:
                 raise ValueError("a reproduction mismatch must keep decomposition closed")
             if self.mismatch_classification not in _MISMATCH_CLASSIFICATIONS:
                 raise ValueError("reproduction mismatch classification is unsupported")
@@ -563,14 +574,35 @@ class DiagnosisStatus:
             causal_evidence_sha256=causal_evidence_sha256,
         )
 
+    @classmethod
+    def causal_mismatch_unavailable(
+        cls,
+        mismatch_classification: str,
+        causal_evidence_sha256: str,
+    ) -> "DiagnosisStatus":
+        return cls(
+            status="causal_reproduction_mismatch",
+            temporal_half_refit_stability_reproduction=None,
+            primary_model_ood_reproduction=None,
+            ood_exceedance_numerator=None,
+            ood_denominator=None,
+            decomposition_allowed=False,
+            mismatch_classification=mismatch_classification,
+            causal_evidence_sha256=causal_evidence_sha256,
+        )
+
     def canonical_payload(self) -> dict[str, object]:
         return {
             "status": self.status,
             "temporal_half_refit_stability_reproduction": (
-                self.temporal_half_refit_stability_reproduction.canonical_payload()
+                None
+                if self.temporal_half_refit_stability_reproduction is None
+                else self.temporal_half_refit_stability_reproduction.canonical_payload()
             ),
             "primary_model_ood_reproduction": (
-                self.primary_model_ood_reproduction.canonical_payload()
+                None
+                if self.primary_model_ood_reproduction is None
+                else self.primary_model_ood_reproduction.canonical_payload()
             ),
             "ood_exceedance_numerator": self.ood_exceedance_numerator,
             "ood_denominator": self.ood_denominator,
