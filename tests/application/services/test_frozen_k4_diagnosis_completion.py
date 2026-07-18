@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
+import builtins
 import math
+from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 import warnings
 
@@ -726,23 +728,271 @@ def test_completion_contract_rejects_forged_rate_receipt_flag_and_conclusion_fla
 
 def test_completion_never_invokes_fit_rematch_gate_artifact_or_strategy_entry_points(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     replay, primary_fit, vectors, decomposition = _completion_fixture()
+    parent = tmp_path / "immutable-parent"
+    parent.mkdir()
+    protected = parent / "manifest.json"
+    protected.write_text("immutable", encoding="utf-8")
 
     def forbidden(*_args, **_kwargs):
         raise AssertionError("completion must remain descriptive and frozen")
 
     monkeypatch.setattr(
-        "src.application.services.frozen_k4_failure_replay.SklearnClusterDiagnostic.fit",
+        "sklearn.mixture.GaussianMixture.fit",
         forbidden,
     )
     monkeypatch.setattr(
-        "src.application.services.frozen_k4_failure_replay.linear_sum_assignment",
+        "sklearn.preprocessing.RobustScaler.fit",
         forbidden,
     )
-    monkeypatch.setattr("sklearn.preprocessing.RobustScaler.fit", forbidden)
+    monkeypatch.setattr(
+        "src.application.services.frozen_k4_failure_replay._match_projected_centroids",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        (
+            "src.infrastructure.regime.three_day_k4_model_artifact."
+            "write_three_day_k4_model_artifact"
+        ),
+        forbidden,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.application.usecases.regime.select_regime_model_usecase.select_model",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        "src.application.usecases.regime.select_regime_model_usecase._apply_gates",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        "src.infrastructure.regime.three_day_k4_model_artifact.ThreeDayK4ModelArtifact.from_fit",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        "src.application.usecases.regime.build_strategy_mapping_usecase.BuildStrategyMappingUseCase.execute",
+        forbidden,
+    )
+    monkeypatch.setattr(
+        (
+            "src.application.usecases.regime.build_daily_strategy_mapping_usecase."
+            "BuildDailyStrategyMappingUseCase.execute"
+        ),
+        forbidden,
+    )
+
+    original_open = builtins.open
+    original_path_open = Path.open
+    sensitive_tokens = (
+        "mapping",
+        "evidence",
+        "strategy",
+        "candidate",
+        "untouched-test",
+        "untouched_test",
+    )
+
+    def guard_path(path: object, mode: str) -> None:
+        candidate = Path(path).resolve(strict=False)
+        normalized = str(candidate).replace("\\", "/").lower()
+        if any(token in normalized for token in sensitive_tokens):
+            raise AssertionError("completion boundary read a forbidden downstream path")
+        if candidate.is_relative_to(parent.resolve()) and any(
+            token in mode for token in "wax+"
+        ):
+            raise AssertionError("completion boundary attempted to mutate the parent run")
+
+    def guarded_open(file, mode="r", *args, **kwargs):
+        guard_path(file, mode)
+        return original_open(file, mode, *args, **kwargs)
+
+    def guarded_path_open(self, mode="r", *args, **kwargs):
+        guard_path(self, mode)
+        return original_path_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", guarded_open)
+    monkeypatch.setattr(Path, "open", guarded_path_open)
     completed = complete_frozen_k4_diagnosis(replay, primary_fit, vectors, decomposition)
     assert len(completed.offset_conclusions) == 10
+    assert protected.read_text(encoding="utf-8") == "immutable"
+
+
+def test_completion_independently_reconciles_population_contributions_and_offsets() -> None:
+    replay, primary_fit, vectors, decomposition = _completion_fixture()
+    completed = complete_frozen_k4_diagnosis(replay, primary_fit, vectors, decomposition)
+
+    component_receipts = tuple(
+        row for row in completed.sample_receipts if row.primary_component_index == 0
+    )
+    assert len(component_receipts) == 409
+    assert sum(row.ood_exceeds for row in component_receipts) == 24
+    component_samples = tuple(
+        row for row in decomposition.ood_samples if row.component_index == 0
+    )
+    assert len(component_samples) == 24
+    independently_summed = {
+        name: sum(sample.feature_contributions[name] for sample in component_samples)
+        for name in primary_fit.feature_names
+    }
+    feature_by_name = {
+        row.feature_name: row for row in completed.component_zero_ood.feature_rows
+    }
+    assert independently_summed == {
+        name: feature_by_name[name].contribution_sum for name in primary_fit.feature_names
+    }
+    expected_top_five = tuple(
+        name
+        for name, _ in sorted(
+            independently_summed.items(),
+            key=lambda item: (
+                -item[1],
+                primary_fit.feature_names.index(item[0]),
+            ),
+        )[:5]
+    )
+    assert completed.component_zero_ood.top_five_features == expected_top_five
+    assert math.isclose(
+        sum(feature_by_name[name].contribution_sum for name in expected_top_five),
+        sum(independently_summed[name] for name in expected_top_five),
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    )
+    assert math.isclose(
+        sum(independently_summed.values()),
+        sum(sample.squared_mahalanobis for sample in component_samples),
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    )
+    for family in completed.component_zero_ood.family_rows:
+        assert math.isclose(
+            family.contribution_sum,
+            sum(independently_summed[name] for name in family.family_feature_names),
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        )
+
+    receipt_by_index = {row.global_index: row for row in completed.sample_receipts}
+    assert tuple(receipt_by_index) == tuple(range(1641))
+    assert sum(row.half_label == "A" for row in receipt_by_index.values()) == 820
+    assert sum(row.half_label == "B" for row in receipt_by_index.values()) == 821
+    all_empirical_scopes = (completed.full_sample_empirical, *completed.offset_empirical)
+    for scope in all_empirical_scopes:
+        for centroid in scope.centroid_rows:
+            features = tuple(
+                row
+                for row in scope.feature_rows
+                if (
+                    row.half_label,
+                    row.primary_component_index,
+                    row.half_component_index,
+                )
+                == (
+                    centroid.half_label,
+                    centroid.primary_component_index,
+                    centroid.half_component_index,
+                )
+            )
+            if centroid.distance is not None:
+                assert math.isclose(
+                    sum(row.squared_distance for row in features),
+                    centroid.distance**2,
+                    rel_tol=1e-12,
+                    abs_tol=1e-12,
+                )
+                assert tuple(row.feature_name for row in features[:5]) == tuple(
+                    row.feature_name
+                    for row in sorted(
+                        features,
+                        key=lambda row: (row.rank, row.feature_name),
+                    )[:5]
+                )
+            assert all(
+                row.primary_component_fingerprint
+                == centroid.primary_component_fingerprint
+                and row.half_component_fingerprint
+                == centroid.half_component_fingerprint
+                for row in features
+            )
+    for spacing in (3, 7):
+        partition = tuple(
+            index
+            for offset in range(spacing)
+            for index in range(offset, 1641, spacing)
+        )
+        assert sorted(partition) == list(range(1641))
+        assert len(partition) == len(set(partition)) == 1641
+        expected_offset_counts = (
+            (547, 547, 547)
+            if spacing == 3
+            else (235, 235, 235, 234, 234, 234, 234)
+        )
+        assert tuple(
+            row.selected_sample_count
+            for row in completed.offset_empirical
+            if row.spacing_days == spacing
+        ) == expected_offset_counts
+        for scope in (row for row in completed.offset_empirical if row.spacing_days == spacing):
+            selected = tuple(
+                receipt_by_index[index] for index in range(scope.offset, 1641, spacing)
+            )
+            assert scope.selected_sample_count == len(selected)
+            for centroid in scope.centroid_rows:
+                selected_half = tuple(row for row in selected if row.half_label == centroid.half_label)
+                expected_count = sum(
+                    row.half_component_index == centroid.half_component_index
+                    and row.matched_primary_component_index == centroid.primary_component_index
+                    for row in selected_half
+                )
+                assert centroid.sample_count == expected_count
+                assert math.isclose(
+                    centroid.sample_share,
+                    expected_count / len(selected_half),
+                    rel_tol=1e-15,
+                    abs_tol=1e-15,
+                )
+                assert centroid.offset_origin_anchor == completed.sample_receipts[0].anchor_at
+            offset_ood = (
+                row
+                for row in completed.offset_ood
+                if (row.spacing_days, row.offset) == (spacing, scope.offset)
+            )
+            for ood in offset_ood:
+                assigned = tuple(
+                    row for row in selected if row.primary_component_index == ood.primary_component_index
+                )
+                assert (ood.numerator, ood.denominator) == (
+                    sum(row.ood_exceeds for row in assigned),
+                    len(assigned),
+                )
+        for full in completed.full_sample_ood:
+            partitions = tuple(
+                row
+                for row in completed.offset_ood
+                if row.spacing_days == spacing
+                and row.primary_component_index == full.primary_component_index
+            )
+            assert sum(row.numerator for row in partitions) == full.numerator
+            assert sum(row.denominator for row in partitions) == full.denominator
+
+    analysis = completed.component_zero_ood
+    volatility_names = tuple(
+        spec.name
+        for spec in THREE_DAY_CHART_FEATURE_REGISTRY_V1
+        if spec.family == "volatility" and spec.name in primary_fit.feature_names
+    )
+    volatility = next(row for row in analysis.family_rows if row.family_name == "volatility")
+    assert volatility.family_feature_names == volatility_names
+    assert analysis.single_feature_concentration is (
+        max(row.contribution_ratio for row in analysis.feature_rows) >= 0.50
+    )
+    assert analysis.volatility_family_concentration is (
+        volatility.contribution_ratio >= 0.70
+    )
+    assert analysis.recurrent_feature_dominance is any(
+        row.top1_ratio >= 0.50 for row in analysis.feature_rows
+    )
 
 
 def test_completion_rejects_forged_canonical_receipt_fingerprint() -> None:

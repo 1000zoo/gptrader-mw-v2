@@ -640,6 +640,10 @@ def test_publisher_is_atomic_deterministic_and_preserves_parent(tmp_path: Path) 
     first = completion_script.publish_frozen_k4_diagnosis_completion(**kwargs)
     second = completion_script.publish_frozen_k4_diagnosis_completion(**kwargs)
     assert first == second
+    assert first != parent_dir
+    assert first.parent == tmp_path / "children"
+    assert first.name != parent_dir.name
+    assert not first.is_relative_to(parent_dir)
     assert _tree_state(parent_dir) == before
     manifest = json.loads((first / MANIFEST).read_bytes())
     assert set(manifest["file_sha256"]) == completion_script.COMPLETION_ARTIFACT_FILENAMES
@@ -652,6 +656,51 @@ def test_publisher_is_atomic_deterministic_and_preserves_parent(tmp_path: Path) 
         data = (first / name).read_bytes()
         assert _sha(data) == expected_hash
         assert len(data) == manifest["file_bytes"][name]
+
+
+def test_publisher_opens_immutable_parent_read_only_and_publishes_only_to_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "parent-root").mkdir()
+    parent_dir = _write_parent(tmp_path / "parent-root")
+    before = _tree_state(parent_dir)
+    original_open = Path.open
+    observed_parent_modes: list[str] = []
+
+    def guarded_open(self: Path, mode: str = "r", *args, **kwargs):
+        candidate = self.resolve(strict=False)
+        if candidate.is_relative_to(parent_dir.resolve()):
+            observed_parent_modes.append(mode)
+            if any(token in mode for token in "wax+"):
+                raise AssertionError("published parent run must never be opened for mutation")
+        return original_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+    source = SimpleNamespace(
+        identity=SimpleNamespace(
+            canonical_payload=lambda: {"fixture": "frozen-source", "version": 1}
+        ),
+        primary_fit=object(),
+        vectors=(),
+    )
+    output_root = tmp_path / "completion-children"
+    child = completion_script.publish_frozen_k4_diagnosis_completion(
+        parent_run=parent_dir,
+        model_attempt=tmp_path / "model.json",
+        raw_kline_root=tmp_path / "raw",
+        output_root=output_root,
+        source_loader=lambda *_: source,
+        replay_runner=lambda _: _matching_replay(),
+        decomposition_runner=lambda *_: object(),
+        completion_runner=lambda *_: _completion_fixture(),
+    )
+
+    assert observed_parent_modes
+    assert all(not any(token in mode for token in "wax+") for mode in observed_parent_modes)
+    assert _tree_state(parent_dir) == before
+    assert child.parent == output_root
+    assert child != parent_dir
+    assert not child.is_relative_to(parent_dir)
 
 
 def test_publisher_replay_mismatch_stops_before_decomposition_completion_or_publication(
