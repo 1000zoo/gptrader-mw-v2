@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 import csv
 import hashlib
 import io
@@ -14,7 +15,7 @@ import re
 import stat
 import struct
 import sys
-from typing import Mapping, Sequence
+from typing import Sequence
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -389,10 +390,10 @@ def _frozen_ood_threshold(source: object) -> float:
     if tuple(source.primary_fit.distance_thresholds) != ():
         _fail("frozen GMM fit must not carry per-component distance thresholds")
     attempt = source.attempt_payload
-    if not isinstance(attempt, dict):
+    if not isinstance(attempt, Mapping):
         _fail("frozen attempt payload is malformed")
     gates = attempt.get("model_gates")
-    if not isinstance(gates, dict):
+    if not isinstance(gates, Mapping):
         _fail("frozen attempt model gates are malformed")
     value = gates.get("distance_threshold")
     if (not isinstance(value, (int, float)) or isinstance(value, bool)

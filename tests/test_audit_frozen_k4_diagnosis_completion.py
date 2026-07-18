@@ -9,7 +9,7 @@ from pathlib import Path
 import shutil
 import sys
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
@@ -663,7 +663,9 @@ def _synthetic_end_to_end_fixture(tmp_path: Path, auditor=None):
         "diagnostic_only": True, "primary_replacement_allowed": False}
     (child / "manifest.json").write_bytes(_document(child_manifest))
     source = SimpleNamespace(primary_fit=primary, vectors=tuple(vectors),
-                             attempt_payload={"model_gates": {"distance_threshold": 1.0}},
+                             attempt_payload=MappingProxyType({
+                                 "model_gates": MappingProxyType({"distance_threshold": 1.0})
+                             }),
                              identity=SimpleNamespace(canonical_payload=lambda: identity_payload))
     return auditor, parent, child, source
 
