@@ -857,8 +857,8 @@ def _verify_ood_and_conclusions(payload: Mapping[str, object], receipts: Sequenc
                 "primary_component_fingerprint": source.primary_fit.fingerprints[component],
                 "numerator": numerator, "denominator": denominator,
                 "rate": numerator / denominator if denominator else None,
-                "distance_source": "frozen_primary_ood_row",
-                "threshold_source": "frozen_primary_component_threshold"})
+                "distance_source": "existing_primary_ood_row",
+                "threshold_source": "frozen_component_chi_square_threshold"})
         expected_by_key[key] = rows
         expected_all.extend(rows)
     _compare_objects(full_rows, expected_by_key[("full_sample", None, None)], "full OOD")

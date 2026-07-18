@@ -13,7 +13,10 @@ from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
-from src.application.services.frozen_k4_diagnosis_completion import FixedSampleReceipt
+from src.application.services.frozen_k4_diagnosis_completion import (
+    FixedSampleReceipt,
+    OffsetOODRow,
+)
 from src.domain.regime.three_day_chart_features import (
     THREE_DAY_CHART_FEATURE_REGISTRY_V1,
     THREE_DAY_CHART_FEATURE_SCHEMA_VERSION,
@@ -564,6 +567,9 @@ def _synthetic_end_to_end_fixture(tmp_path: Path, auditor=None):
     def ood_rows(spacing: int | None, offset: int | None):
         scope = "full_sample" if spacing is None else "offset_subsample"
         selected = list(range(1641)) if spacing is None else [i for i in range(1641) if i % spacing == offset]
+        production_provenance = OffsetOODRow(
+            scope, spacing, offset, 0, primary_fps[0], 0, 0, None,
+        )
         return [{
             "sample_scope": scope, "spacing_days": spacing, "offset": offset,
             "primary_component_index": component_index,
@@ -572,8 +578,8 @@ def _synthetic_end_to_end_fixture(tmp_path: Path, auditor=None):
             "denominator": sum(assignments[i] == component_index for i in selected),
             "rate": (sum(receipts[i]["ood_exceeds"] for i in selected if assignments[i] == component_index)
                      / sum(assignments[i] == component_index for i in selected)),
-            "distance_source": "frozen_primary_ood_row",
-            "threshold_source": "frozen_primary_component_threshold",
+            "distance_source": production_provenance.distance_source,
+            "threshold_source": production_provenance.threshold_source,
         } for component_index in range(4)]
 
     full_ood = ood_rows(None, None)
