@@ -187,6 +187,49 @@ def test_public_loader_has_no_profile_bypass_and_always_selects_production(monke
         load_frozen_k4_diagnostic_source(MODEL, Path("unused"), _source_profile=_PRODUCTION_PROFILE)
 
 
+def test_public_loader_owns_single_thread_context_and_restores_ambient_environment(
+    monkeypatch,
+) -> None:
+    import src.infrastructure.regime.frozen_k4_diagnostic_source as module
+
+    thread_variables = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+    monkeypatch.setenv("OMP_NUM_THREADS", "8")
+    monkeypatch.delenv("MKL_NUM_THREADS", raising=False)
+    monkeypatch.setenv("OPENBLAS_NUM_THREADS", "16")
+    ambient = {name: os.environ.get(name) for name in thread_variables}
+    calls = []
+
+    class Boundary:
+        def __init__(self, limits):
+            calls.append(("construct", limits))
+
+        def __enter__(self):
+            calls.append(("enter", {name: os.environ.get(name) for name in thread_variables}))
+
+        def __exit__(self, *_):
+            calls.append(("exit", {name: os.environ.get(name) for name in thread_variables}))
+
+    def stop(*_args, **_kwargs):
+        metadata = module._canonical_dependency_metadata()
+        assert dict(metadata["thread_environment"]) == {
+            name: "1" for name in thread_variables
+        }
+        raise RuntimeError("selected")
+
+    monkeypatch.setattr(module, "threadpool_limits", Boundary)
+    monkeypatch.setattr(module, "_load_frozen_k4_diagnostic_inputs", stop)
+
+    with pytest.raises(RuntimeError, match="selected"):
+        module.load_frozen_k4_diagnostic_source(MODEL, Path("unused"))
+
+    assert calls == [
+        ("construct", 1),
+        ("enter", {name: "1" for name in thread_variables}),
+        ("exit", {name: "1" for name in thread_variables}),
+    ]
+    assert {name: os.environ.get(name) for name in thread_variables} == ambient
+
+
 def test_public_boundary_pins_exact_published_attempt_and_raw_file(tmp_path: Path) -> None:
     assert _PRODUCTION_ATTEMPT_HASH == "83e25e21a2bccb5cf14572da000718deae7f3e068c45b2898a26e78cef67101f"
     assert _PRODUCTION_FILE_SHA256 == "e19ff1b2ec685f60b05d9aa98d088ea3883b62f0a394cf9fbdc2b84264ec23a5"

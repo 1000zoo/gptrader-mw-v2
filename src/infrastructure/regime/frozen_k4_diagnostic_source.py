@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import contextmanager
 import csv
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -16,12 +17,14 @@ from pathlib import Path
 import platform
 import re
 import tempfile
+import threading
 from types import MappingProxyType
 from urllib.parse import urlsplit
 import zipfile
 
 from scipy.stats import chi2
 import numpy as np
+from threadpoolctl import threadpool_limits
 
 from src.domain.regime.cluster_diagnostic import ClusterDiagnosticFit
 from src.domain.regime.frozen_k4_failure_diagnostics import FrozenK4InputIdentity
@@ -107,6 +110,28 @@ _GATE_FLOAT_FIELDS = frozenset({
 })
 _GATE_STR_FIELDS = frozenset({"distance_threshold_policy", "feature_registry_version_expected"})
 _GATE_FIELDS = _GATE_BOOL_FIELDS | _GATE_INT_FIELDS | _GATE_FLOAT_FIELDS | _GATE_STR_FIELDS
+_THREAD_ENVIRONMENT_NAMES = (
+    "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+)
+_SINGLE_THREAD_BOUNDARY_LOCK = threading.RLock()
+
+
+@contextmanager
+def _single_thread_source_boundary():
+    """Make the production source identity independent of the caller's shell."""
+    with _SINGLE_THREAD_BOUNDARY_LOCK:
+        previous = {name: os.environ.get(name) for name in _THREAD_ENVIRONMENT_NAMES}
+        try:
+            for name in _THREAD_ENVIRONMENT_NAMES:
+                os.environ[name] = "1"
+            with threadpool_limits(1):
+                yield
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
 
 @dataclass(frozen=True)
@@ -842,12 +867,13 @@ def _load_frozen_k4_diagnostic_inputs(
 def load_frozen_k4_diagnostic_source(
     attempt_path: Path, raw_root: Path,
 ) -> FrozenK4DiagnosticSource:
-    loaded = _load_frozen_k4_diagnostic_inputs(
-        attempt_path, raw_root, _PRODUCTION_PROFILE,
-        trusted_file_sha256=_PRODUCTION_FILE_SHA256,
-        trusted_file_bytes=_PRODUCTION_FILE_BYTES,
-        trusted_attempt_hash=_PRODUCTION_ATTEMPT_HASH,
-    )
+    with _single_thread_source_boundary():
+        loaded = _load_frozen_k4_diagnostic_inputs(
+            attempt_path, raw_root, _PRODUCTION_PROFILE,
+            trusted_file_sha256=_PRODUCTION_FILE_SHA256,
+            trusted_file_bytes=_PRODUCTION_FILE_BYTES,
+            trusted_attempt_hash=_PRODUCTION_ATTEMPT_HASH,
+        )
     identity = FrozenK4InputIdentity(
         **loaded.identity_hashes,
         split_at="2023-04-01T00:00:00Z",
