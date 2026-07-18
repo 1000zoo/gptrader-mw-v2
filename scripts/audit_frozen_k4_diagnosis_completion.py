@@ -569,10 +569,20 @@ def _compare_objects(actual: object, expected: Sequence[Mapping[str, object]], l
         if not isinstance(left, dict) or set(left) != set(right):
             _fail(f"{label} fields differ")
         for key, value in right.items():
-            if type(value) is float:
-                _close(left[key], value, f"{label}.{key}")
-            else:
-                _exact(left[key], value, f"{label}.{key}")
+            _compare_object_value(left[key], value, f"{label}.{key}")
+
+
+def _compare_object_value(actual: object, expected: object, label: str) -> None:
+    if type(expected) is float:
+        _close(actual, expected, label)
+        return
+    if isinstance(expected, list):
+        if not isinstance(actual, list) or len(actual) != len(expected):
+            _fail(f"{label} list shape differs")
+        for index, (left, right) in enumerate(zip(actual, expected)):
+            _compare_object_value(left, right, f"{label}[{index}]")
+        return
+    _exact(actual, expected, label)
 
 
 def _exact_fields(value: object, fields: set[str], label: str) -> dict[str, object]:

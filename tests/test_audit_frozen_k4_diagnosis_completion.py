@@ -39,6 +39,29 @@ def test_auditor_is_importable_and_independent() -> None:
     assert "scripts.complete_frozen_three_day_k4_diagnosis" not in source
 
 
+def test_empirical_centroid_vector_reconciles_production_rounding_order() -> None:
+    auditor = _load()
+    producer = -0.5340541477761451
+    independently_recomputed = -0.5340541477761452
+
+    auditor._compare_objects(
+        [{"empirical_centroid": [producer, 0.25]}],
+        [{"empirical_centroid": [independently_recomputed, 0.25]}],
+        "empirical centroids",
+    )
+
+
+def test_empirical_centroid_vector_rejects_material_numeric_mutation() -> None:
+    auditor = _load()
+
+    with pytest.raises(auditor.AuditError, match="does not numerically reconcile"):
+        auditor._compare_objects(
+            [{"empirical_centroid": [-0.5340541477761451, 0.25]}],
+            [{"empirical_centroid": [-0.5340541477761451, 0.250001]}],
+            "empirical centroids",
+        )
+
+
 def test_canonical_json_rejects_nonfinite_and_noncanonical(tmp_path: Path) -> None:
     module = _load()
     path = tmp_path / "bad.json"
