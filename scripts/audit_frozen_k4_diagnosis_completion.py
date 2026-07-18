@@ -950,48 +950,35 @@ def _verify_fitted_reference(payload: Mapping[str, object], parent_files: Mappin
 
 def _verify_markdown(payload: Mapping[str, object], data: bytes,
                      fitted: Mapping[str, object]) -> None:
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise AuditError("Markdown is not UTF-8") from error
-    required = (
-        "# Frozen K4 Diagnosis Completion",
-        "This diagnostic-only report completes the frozen K4 cause diagnosis.",
-        "## Component 0 OOD (24/409)",
-        "fitted_parameter_centroid_distance=",
-        "full_sample_empirical_centroid_distance=",
-        "offset_empirical_centroid_distance is reported for every 3-day and 7-day offset.",
-        "No model gate was re-evaluated and no strategy mapping was performed.",
-    )
-    if any(sentence not in text for sentence in required):
-        _fail("Markdown required claims do not reconcile")
     component = payload["component_zero_ood"]
-    top_five_sentence = f"- Top five features: {', '.join(component['top_five_features'])}"
-    if top_five_sentence not in text:
-        _fail("Markdown Component 0 top-five claim differs")
+    lines = [
+        "# Frozen K4 Diagnosis Completion", "",
+        "This diagnostic-only report completes the frozen K4 cause diagnosis.", "",
+        "## Component 0 OOD (24/409)", "",
+        f"- Top five features: {', '.join(component['top_five_features'])}",
+    ]
     for family in component["family_rows"]:
-        sentence = f"- family {family['family_name']}: contribution_ratio={_float_text(family['contribution_ratio'])}"
-        if sentence not in text:
-            _fail(f"Markdown family ratio differs: {family['family_name']}")
+        lines.append(
+            f"- family {family['family_name']}: contribution_ratio={_float_text(family['contribution_ratio'])}"
+        )
     for key in ("single_feature_concentration", "volatility_family_concentration",
                 "recurrent_feature_dominance"):
-        sentence = f"- {key}={'true' if component[key] else 'false'}"
-        if sentence not in text:
-            _fail(f"Markdown flag claim differs: {key}")
-    fitted_sentence = f"- fitted_parameter_centroid_distance={_float_text(fitted['distance'])}"
-    if fitted_sentence not in text:
-        _fail("Markdown fitted-parameter value differs")
+        lines.append(f"- {key}={'true' if component[key] else 'false'}")
     full = payload["full_sample_empirical"]
-    full_sentence = f"- full_sample_empirical_centroid_distance={_float_text(full['maximum_drift_distance'])}"
-    if full_sentence not in text:
-        _fail("Markdown full-sample empirical value differs")
+    lines.extend([
+        "", "## Distinct distance metrics", "",
+        f"- fitted_parameter_centroid_distance={_float_text(fitted['distance'])}",
+        f"- full_sample_empirical_centroid_distance={_float_text(full['maximum_drift_distance'])}",
+        "- offset_empirical_centroid_distance is reported for every 3-day and 7-day offset.",
+        "", "## Offset consistency", "",
+    ])
     conclusions = payload["offset_consistency"]
     scope_map = {(scope["spacing_days"], scope["offset"]): scope
                  for scope in payload["offset_empirical"]}
     for conclusion in conclusions:
         scope = scope_map[(conclusion["spacing_days"], conclusion["offset"])]
         origin = scope["centroid_rows"][0]["offset_origin_anchor"]
-        sentence = (
+        lines.append(
             f"- {conclusion['spacing_days']}-day offset={conclusion['offset']} origin={origin} "
             f"offset_empirical_centroid_distance: max={_float_text(scope['maximum_drift_distance'])} "
             f"half={scope['maximum_drift_half_label']} "
@@ -1003,8 +990,6 @@ def _verify_markdown(payload: Mapping[str, object], data: bytes,
             f"maximum_ood_fingerprint={conclusion['maximum_ood_primary_component_fingerprint']} "
             f"top_five={','.join(conclusion['top_five_drift_features'])}"
         )
-        if sentence not in text:
-            _fail(f"Markdown offset detail differs: {conclusion['spacing_days']}/{conclusion['offset']}")
     for spacing in (3, 7):
         rows = [row for row in conclusions if row["spacing_days"] == spacing]
         fields = (("drift component", "drift_component_matches_full_sample"),
@@ -1013,11 +998,13 @@ def _verify_markdown(payload: Mapping[str, object], data: bytes,
                   ("top-five set", "top5_set_matches_full_sample"))
         for label, field in fields:
             count = sum(bool(row[field]) for row in rows)
-            sentence = f"- {spacing}-day {label}: {count}/{len(rows)} ({_classification(count, len(rows))})"
-            if sentence not in text:
-                _fail(f"Markdown offset claim differs: {spacing}-day {label}")
-    if text.count("offset_empirical_centroid_distance:") != 10:
-        _fail("Markdown must contain exactly ten offset detail claims")
+            lines.append(
+                f"- {spacing}-day {label}: {count}/{len(rows)} ({_classification(count, len(rows))})"
+            )
+    lines.extend(["", "No model gate was re-evaluated and no strategy mapping was performed."])
+    expected = ("\n".join(lines) + "\n").encode("utf-8")
+    if data != expected:
+        _fail("Markdown bytes do not exactly reconcile with audited evidence")
 
 
 def _verify_replay(parent_reproduction: Mapping[str, object], child: Mapping[str, object]) -> None:

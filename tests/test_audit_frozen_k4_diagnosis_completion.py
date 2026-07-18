@@ -207,17 +207,176 @@ class _ForbiddenModule:
         raise AssertionError(f"independent auditor accessed forbidden helper: {name}")
 
 
-def _nested_namespace(value: object) -> object:
-    if isinstance(value, dict):
-        return SimpleNamespace(**{key: _nested_namespace(item) for key, item in value.items()})
-    if isinstance(value, list):
-        return tuple(_nested_namespace(item) for item in value)
-    return value
+def _csv_bytes(headers: tuple[str, ...], rows: list[dict[str, object]]) -> bytes:
+    from io import StringIO
+    buffer = StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=headers, lineterminator="\n")
+    writer.writeheader()
+    for row in rows:
+        rendered = {}
+        for name in headers:
+            value = row.get(name)
+            if value is None:
+                rendered[name] = ""
+            elif isinstance(value, bool):
+                rendered[name] = "true" if value else "false"
+            elif isinstance(value, float):
+                rendered[name] = format(value, ".17g")
+            else:
+                rendered[name] = value
+        writer.writerow(rendered)
+    return buffer.getvalue().encode()
 
 
-def _synthetic_end_to_end_fixture(tmp_path: Path):
-    auditor = _load()
-    import scripts.complete_frozen_three_day_k4_diagnosis as producer
+def _independent_artifacts(
+    completion: dict[str, object], *, parent_id: str, parent_manifest_hash: str,
+    input_hash: str, implementation_files: dict[str, str], implementation_hash: str,
+    replay_receipt: dict[str, object], fitted: dict[str, object], registry_hash: str,
+) -> dict[str, bytes]:
+    component = completion["component_zero_ood"]
+    payload = {
+        "diagnostic_schema_version": "frozen-k4-diagnosis-completion-v1",
+        "completion_scope": "frozen-k4-diagnosis-completion",
+        "implementation_file_sha256": implementation_files,
+        "implementation_sha256": implementation_hash,
+        "replay_parent_match_verified": True,
+        "replay_parent_validation": {"parent_receipt": replay_receipt,
+                                     "new_replay_receipt": replay_receipt,
+                                     "match_verified": True},
+        "parent_provenance": {"parent_run_id": parent_id,
+                              "parent_manifest_sha256": parent_manifest_hash,
+                              "input_identity_sha256": input_hash},
+        "registry_provenance": {"registry_schema_version": THREE_DAY_CHART_FEATURE_SCHEMA_VERSION,
+                                "registry_sha256": registry_hash},
+        "fixed_thresholds": {"single_feature_contribution_ratio": 0.5,
+                             "volatility_family_contribution_ratio": 0.7,
+                             "recurrent_feature_top1_ratio": 0.5},
+        "component_zero_ood": component,
+        "fitted_parameter_reference": fitted,
+        "full_sample_empirical": completion["full_sample_empirical"],
+        "full_sample_ood": completion["full_sample_ood"],
+        "offset_empirical": completion["offset_empirical"],
+        "offset_ood": completion["offset_ood"],
+        "offset_consistency": completion["offset_conclusions"],
+        "fixed_sample_receipts": completion["sample_receipts"],
+        "diagnostic_only": True, "primary_replacement_allowed": False,
+    }
+    feature_headers = ("analysis_scope", "primary_component_index", "primary_component_fingerprint",
+        "feature_name", "registry_family", "registry_schema_version", "registry_sha256",
+        "contribution_sum", "contribution_ratio", "contribution_mean", "contribution_median",
+        "top1_count", "top1_ratio", "top5_count", "top5_ratio", "rank")
+    family_headers = ("analysis_scope", "primary_component_index", "primary_component_fingerprint",
+        "family_name", "family_feature_names", "registry_schema_version", "registry_sha256",
+        "contribution_sum", "contribution_ratio", "concentration_threshold",
+        "concentration_rule_applies", "concentration_result")
+    family_rows = [{**row, "family_feature_names": ";".join(row["family_feature_names"])}
+                   for row in component["family_rows"]]
+    empirical_feature_headers = ("sample_scope", "spacing_days", "offset", "half_label",
+        "primary_component_index", "primary_component_fingerprint", "half_component_index",
+        "half_component_fingerprint", "feature_name", "registry_family", "rank",
+        "squared_distance", "contribution_ratio", "is_top_five")
+    scopes = [completion["full_sample_empirical"], *completion["offset_empirical"]]
+    empirical_feature_rows = []
+    for scope in scopes:
+        empirical_feature_rows.extend({**row, "is_top_five": row["rank"] <= 5}
+                                      for row in scope["feature_rows"])
+    diagnostic_headers = ("record_type", "sample_scope", "spacing_days", "offset",
+        "offset_origin_anchor", "half_label", "primary_component_index",
+        "primary_component_fingerprint", "half_component_index", "half_component_fingerprint",
+        "sample_count", "sample_share", "centroid_status", "metric_name",
+        "empirical_centroid", "distance", "ood_numerator", "ood_denominator", "ood_rate",
+        "distance_source", "threshold_source", "maximum_drift_half_label",
+        "maximum_drift_primary_component_index", "maximum_drift_primary_component_fingerprint",
+        "maximum_drift_half_component_index", "maximum_drift_half_component_fingerprint",
+        "maximum_ood_primary_component_index", "maximum_ood_primary_component_fingerprint",
+        "top_five_drift_features", "drift_component_matches_full_sample",
+        "ood_component_matches_full_sample", "ordered_top5_matches_full_sample",
+        "top5_set_matches_full_sample")
+    all_ood = [*completion["full_sample_ood"], *completion["offset_ood"]]
+    ood_by_scope = {}
+    for row in all_ood:
+        ood_by_scope.setdefault((row["sample_scope"], row["spacing_days"], row["offset"]), []).append(row)
+    scope_by_key = {(row["sample_scope"], row["spacing_days"], row["offset"]): row for row in scopes}
+
+    def decorate(row: dict[str, object], key: tuple[object, object, object]) -> dict[str, object]:
+        scope = scope_by_key[key]
+        maximum_ood = min(ood_by_scope[key], key=lambda item: (-item["rate"], -item["numerator"],
+                                                                -item["denominator"], item["primary_component_index"]))
+        return {**row, "offset_origin_anchor": scope["centroid_rows"][0]["offset_origin_anchor"],
+            "maximum_drift_half_label": scope["maximum_drift_half_label"],
+            "maximum_drift_primary_component_index": scope["maximum_drift_primary_component_index"],
+            "maximum_drift_primary_component_fingerprint": scope["maximum_drift_primary_component_fingerprint"],
+            "maximum_drift_half_component_index": scope["maximum_drift_half_component_index"],
+            "maximum_drift_half_component_fingerprint": scope["maximum_drift_half_component_fingerprint"],
+            "maximum_ood_primary_component_index": maximum_ood["primary_component_index"],
+            "maximum_ood_primary_component_fingerprint": maximum_ood["primary_component_fingerprint"]}
+
+    diagnostics = []
+    for scope in scopes:
+        key = (scope["sample_scope"], scope["spacing_days"], scope["offset"])
+        for row in scope["centroid_rows"]:
+            diagnostics.append(decorate({**row, "record_type": "centroid",
+                "empirical_centroid": None if row["empirical_centroid"] is None else ";".join(format(value, ".17g") for value in row["empirical_centroid"])}, key))
+    for row in all_ood:
+        key = (row["sample_scope"], row["spacing_days"], row["offset"])
+        diagnostics.append(decorate({**row, "record_type": "ood", "ood_numerator": row["numerator"],
+                                     "ood_denominator": row["denominator"], "ood_rate": row["rate"]}, key))
+    for row in completion["offset_conclusions"]:
+        key = ("offset_subsample", row["spacing_days"], row["offset"])
+        diagnostics.append(decorate({**row, "record_type": "conclusion", "sample_scope": "offset_subsample",
+                                     "top_five_drift_features": ";".join(row["top_five_drift_features"])}, key))
+    record_order = {"centroid": 0, "ood": 1, "conclusion": 2}
+    diagnostics.sort(key=lambda row: (0 if row["sample_scope"] == "full_sample" else 1,
+        -1 if row.get("spacing_days") is None else row["spacing_days"],
+        -1 if row.get("offset") is None else row["offset"], record_order[row["record_type"]],
+        str(row.get("half_label") or ""), -1 if row.get("primary_component_index") is None else row["primary_component_index"],
+        -1 if row.get("half_component_index") is None else row["half_component_index"]))
+    lines = ["# Frozen K4 Diagnosis Completion", "",
+        "This diagnostic-only report completes the frozen K4 cause diagnosis.", "",
+        "## Component 0 OOD (24/409)", "",
+        f"- Top five features: {', '.join(component['top_five_features'])}"]
+    for row in component["family_rows"]:
+        lines.append(f"- family {row['family_name']}: contribution_ratio={format(row['contribution_ratio'], '.17g')}")
+    for key in ("single_feature_concentration", "volatility_family_concentration", "recurrent_feature_dominance"):
+        lines.append(f"- {key}={'true' if component[key] else 'false'}")
+    lines.extend(["", "## Distinct distance metrics", "",
+        f"- fitted_parameter_centroid_distance={format(fitted['distance'], '.17g')}",
+        f"- full_sample_empirical_centroid_distance={format(completion['full_sample_empirical']['maximum_drift_distance'], '.17g')}",
+        "- offset_empirical_centroid_distance is reported for every 3-day and 7-day offset.", "",
+        "## Offset consistency", ""])
+    for row in completion["offset_conclusions"]:
+        scope = scope_by_key[("offset_subsample", row["spacing_days"], row["offset"])]
+        lines.append(f"- {row['spacing_days']}-day offset={row['offset']} origin={scope['centroid_rows'][0]['offset_origin_anchor']} "
+            f"offset_empirical_centroid_distance: max={format(scope['maximum_drift_distance'], '.17g')} "
+            f"half={scope['maximum_drift_half_label']} primary_component={scope['maximum_drift_primary_component_index']} "
+            f"primary_fingerprint={scope['maximum_drift_primary_component_fingerprint']} "
+            f"half_component={scope['maximum_drift_half_component_index']} half_fingerprint={scope['maximum_drift_half_component_fingerprint']} "
+            f"maximum_ood_primary_component={row['maximum_ood_primary_component_index']} "
+            f"maximum_ood_fingerprint={row['maximum_ood_primary_component_fingerprint']} "
+            f"top_five={','.join(row['top_five_drift_features'])}")
+    flags = (("drift component", "drift_component_matches_full_sample"),
+             ("OOD component", "ood_component_matches_full_sample"),
+             ("ordered top five", "ordered_top5_matches_full_sample"),
+             ("top-five set", "top5_set_matches_full_sample"))
+    for spacing in (3, 7):
+        rows = [row for row in completion["offset_conclusions"] if row["spacing_days"] == spacing]
+        for label, field in flags:
+            count = sum(row[field] for row in rows)
+            classification = "universal" if count == len(rows) else ("subset-only" if count == 0 else "mixed")
+            lines.append(f"- {spacing}-day {label}: {count}/{len(rows)} ({classification})")
+    lines.extend(["", "No model gate was re-evaluated and no strategy mapping was performed."])
+    return {
+        "frozen_k4_component_0_ood_feature_summary.csv": _csv_bytes(feature_headers, component["feature_rows"]),
+        "frozen_k4_component_0_ood_family_summary.csv": _csv_bytes(family_headers, family_rows),
+        "frozen_k4_offset_empirical_diagnostics.csv": _csv_bytes(diagnostic_headers, diagnostics),
+        "frozen_k4_offset_feature_contributions.csv": _csv_bytes(empirical_feature_headers, empirical_feature_rows),
+        "frozen_k4_diagnosis_completion.json": _document(payload),
+        "frozen_k4_diagnosis_completion.md": ("\n".join(lines) + "\n").encode(),
+    }
+
+
+def _synthetic_end_to_end_fixture(tmp_path: Path, auditor=None):
+    auditor = auditor or _load()
 
     names = ("rv_4h", "rv_1d", "rv_3d", "rv_ratio_1d_3d", "range_ratio_3d")
     registry = {row.name: row for row in THREE_DAY_CHART_FEATURE_REGISTRY_V1}
@@ -415,13 +574,13 @@ def _synthetic_end_to_end_fixture(tmp_path: Path):
             "top5_set_matches_full_sample": set(top) == set(full_empirical["top_five_drift_features"]),
         })
 
-    completion = _nested_namespace({
+    completion = {
         "completion_scope": auditor.SCOPE, "component_zero_ood": component,
         "full_sample_empirical": full_empirical, "full_sample_ood": full_ood,
         "offset_empirical": offsets, "offset_ood": offset_ood,
         "offset_conclusions": conclusions, "sample_receipts": receipts,
         "diagnostic_only": True,
-    })
+    }
     temporal = 2.3526219570607076
     ood_rate = 0.04631322364411944
     bits = {
@@ -473,12 +632,12 @@ def _synthetic_end_to_end_fixture(tmp_path: Path):
         "primary_component_index": 3, "half_component_index": 3,
         "primary_component_fingerprint": primary_fps[3], "half_component_fingerprint": half_fps[("B", 3)],
         "distance": temporal, "top_five_drift_features": names}
-    artifacts = producer._render_completion_artifacts(
-        completion, parent=SimpleNamespace(run_id=parent_id, manifest_sha256=parent_manifest_hash,
-                                           input_identity_sha256=input_hash),
-        implementation=SimpleNamespace(file_sha256=implementation_files, implementation_sha256=implementation_hash),
-        replay_validation={"parent_receipt": replay_receipt, "new_replay_receipt": replay_receipt,
-                           "match_verified": True}, fitted_parameter_summary=fitted)
+    artifacts = _independent_artifacts(
+        completion, parent_id=parent_id, parent_manifest_hash=parent_manifest_hash,
+        input_hash=input_hash, implementation_files=implementation_files,
+        implementation_hash=implementation_hash, replay_receipt=replay_receipt,
+        fitted=fitted, registry_hash=registry_hash,
+    )
     identity = {"diagnostic_schema_version": auditor.SCHEMA, "parent_run_id": parent_id,
         "parent_manifest_sha256": parent_manifest_hash, "input_identity_sha256": input_hash,
         "registry_schema_version": THREE_DAY_CHART_FEATURE_SCHEMA_VERSION,
@@ -509,10 +668,11 @@ def _synthetic_end_to_end_fixture(tmp_path: Path):
 def test_synthetic_1641_row_fixture_is_audited_end_to_end(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    auditor, parent, child, source = _synthetic_end_to_end_fixture(tmp_path)
-    monkeypatch.setattr(auditor, "load_frozen_k4_diagnostic_source", lambda *_: source)
     monkeypatch.setitem(sys.modules, "src.application.services.frozen_k4_diagnosis_completion", _ForbiddenModule())
     monkeypatch.setitem(sys.modules, "scripts.complete_frozen_three_day_k4_diagnosis", _ForbiddenModule())
+    auditor = _load()
+    auditor, parent, child, source = _synthetic_end_to_end_fixture(tmp_path, auditor)
+    monkeypatch.setattr(auditor, "load_frozen_k4_diagnostic_source", lambda *_: source)
     receipt = auditor.audit_frozen_k4_diagnosis_completion(
         parent_run=parent, completion_run=child, model_attempt=tmp_path / "model",
         raw_kline_root=tmp_path / "raw")
@@ -542,8 +702,13 @@ def test_synthetic_artifact_mutations_fail_closed(
             raw_kline_root=tmp_path / "raw")
 
 
+@pytest.mark.parametrize("mutated_relative", (
+    "scripts/complete_frozen_three_day_k4_diagnosis.py",
+    "src/application/services/frozen_k4_diagnosis_completion.py",
+    "src/domain/regime/frozen_k4_diagnosis_completion.py",
+))
 def test_synthetic_producer_mutation_fails_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutated_relative: str,
 ) -> None:
     auditor, parent, child, source = _synthetic_end_to_end_fixture(tmp_path)
     fake_root = tmp_path / "producer-copy"
@@ -552,7 +717,7 @@ def test_synthetic_producer_mutation_fails_closed(
         target = fake_root.joinpath(*relative.split("/"))
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(source_file.read_bytes())
-    producer = fake_root / "scripts/complete_frozen_three_day_k4_diagnosis.py"
+    producer = fake_root.joinpath(*mutated_relative.split("/"))
     producer.write_bytes(producer.read_bytes() + b"\n# one-byte-identity-mutation\n")
     monkeypatch.setattr(auditor, "REPO_ROOT", fake_root)
     monkeypatch.setattr(auditor, "load_frozen_k4_diagnostic_source", lambda *_: source)
@@ -571,7 +736,9 @@ def _rehash_child_artifact(child: Path, name: str) -> None:
     manifest_path.write_bytes(_document(manifest))
 
 
-@pytest.mark.parametrize("mutation", ("component_flag", "markdown_claim"))
+@pytest.mark.parametrize("mutation", (
+    "component_flag", "markdown_claim", "appended_false_flag", "conflicting_offset",
+))
 def test_synthetic_analytical_mutations_fail_after_rehash(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str,
 ) -> None:
@@ -585,10 +752,16 @@ def test_synthetic_analytical_mutations_fail_after_rehash(
     else:
         name = "frozen_k4_diagnosis_completion.md"
         text = (child / name).read_text(encoding="utf-8")
-        (child / name).write_text(text.replace("Top five features:", "Top five mutated:"),
-                                 encoding="utf-8", newline="")
+        if mutation == "markdown_claim":
+            text = text.replace("Top five features:", "Top five mutated:")
+        elif mutation == "appended_false_flag":
+            text += "- volatility_family_concentration=false\n"
+        else:
+            detail = next(line for line in text.splitlines() if "3-day offset=0" in line)
+            text += detail.replace("offset=0", "offset=0 conflicting=true") + "\n"
+        (child / name).write_text(text, encoding="utf-8", newline="")
     _rehash_child_artifact(child, name)
-    with pytest.raises(auditor.AuditError, match="volatility_family_concentration|Markdown Component"):
+    with pytest.raises(auditor.AuditError, match="volatility_family_concentration|Markdown bytes"):
         auditor.audit_frozen_k4_diagnosis_completion(
             parent_run=parent, completion_run=child, model_attempt=tmp_path / "model",
             raw_kline_root=tmp_path / "raw")
@@ -615,6 +788,118 @@ def test_synthetic_duplicate_diagnostic_identity_fails_after_rehash(
     with pytest.raises(auditor.AuditError, match=f"{record_type.upper() if record_type == 'ood' else record_type} identities"):
         auditor.audit_frozen_k4_diagnosis_completion(
             parent_run=parent, completion_run=child, model_attempt=tmp_path / "model",
+            raw_kline_root=tmp_path / "raw")
+
+
+def _rename_child_for_manifest_identity(child: Path) -> Path:
+    manifest_path = child / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    identity = {
+        "diagnostic_schema_version": manifest["diagnostic_schema_version"],
+        "parent_run_id": manifest["parent_run_id"],
+        "parent_manifest_sha256": manifest["parent_manifest_sha256"],
+        "input_identity_sha256": manifest["input_identity_sha256"],
+        "registry_schema_version": manifest["registry_schema_version"],
+        "registry_sha256": manifest["registry_sha256"],
+        "implementation_sha256": manifest["implementation_sha256"],
+        "completion_scope": manifest["completion_scope"],
+        "replay_parent_match_verified": manifest["replay_parent_match_verified"],
+        "thresholds": manifest["thresholds"],
+    }
+    new_id = hashlib.sha256(_document(identity)).hexdigest()
+    manifest["run_id"] = new_id
+    manifest_path.write_bytes(_document(manifest))
+    target = child.parent / new_id
+    child.rename(target)
+    return target
+
+
+def test_full_audit_rejects_rehashed_half_boundary_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auditor, parent, child, source = _synthetic_end_to_end_fixture(tmp_path)
+    monkeypatch.setattr(auditor, "load_frozen_k4_diagnostic_source", lambda *_: source)
+    name = "frozen_k4_diagnosis_completion.json"
+    payload = json.loads((child / name).read_bytes())
+    payload["fixed_sample_receipts"][0]["half_label"] = "B"
+    (child / name).write_bytes(_document(payload))
+    _rehash_child_artifact(child, name)
+    with pytest.raises(auditor.AuditError, match="sample half boundary"):
+        auditor.audit_frozen_k4_diagnosis_completion(
+            parent_run=parent, completion_run=child, model_attempt=tmp_path / "model",
+            raw_kline_root=tmp_path / "raw")
+
+
+def test_full_audit_rejects_rehashed_parent_match_graph_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auditor, parent, child, source = _synthetic_end_to_end_fixture(tmp_path)
+    monkeypatch.setattr(auditor, "load_frozen_k4_diagnostic_source", lambda *_: source)
+    reproduction_path = parent / auditor.PARENT_REPRODUCTION
+    reproduction = json.loads(reproduction_path.read_bytes())
+    reproduction["half_replays"][0]["matched_pairs"][0]["half_component_fingerprint"] = "f" * 24
+    reproduction_path.write_bytes(_document(reproduction))
+    parent_manifest_path = parent / "manifest.json"
+    parent_manifest = json.loads(parent_manifest_path.read_bytes())
+    parent_manifest["file_sha256"][auditor.PARENT_REPRODUCTION] = hashlib.sha256(reproduction_path.read_bytes()).hexdigest()
+    parent_manifest_path.write_bytes(_document(parent_manifest))
+    new_parent_hash = hashlib.sha256(parent_manifest_path.read_bytes()).hexdigest()
+    json_name = "frozen_k4_diagnosis_completion.json"
+    payload = json.loads((child / json_name).read_bytes())
+    payload["parent_provenance"]["parent_manifest_sha256"] = new_parent_hash
+    (child / json_name).write_bytes(_document(payload))
+    child_manifest_path = child / "manifest.json"
+    child_manifest = json.loads(child_manifest_path.read_bytes())
+    child_manifest["parent_manifest_sha256"] = new_parent_hash
+    child_manifest["file_sha256"][json_name] = hashlib.sha256((child / json_name).read_bytes()).hexdigest()
+    child_manifest["file_bytes"][json_name] = (child / json_name).stat().st_size
+    child_manifest_path.write_bytes(_document(child_manifest))
+    child = _rename_child_for_manifest_identity(child)
+    with pytest.raises(auditor.AuditError, match="sample receipt parent matched-pair identity"):
+        auditor.audit_frozen_k4_diagnosis_completion(
+            parent_run=parent, completion_run=child, model_attempt=tmp_path / "model",
+            raw_kline_root=tmp_path / "raw")
+
+
+def test_full_audit_rejects_rehashed_manifest_registry_chain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auditor, parent, child, source = _synthetic_end_to_end_fixture(tmp_path)
+    monkeypatch.setattr(auditor, "load_frozen_k4_diagnostic_source", lambda *_: source)
+    forged_hash = "f" * 64
+    json_name = "frozen_k4_diagnosis_completion.json"
+    payload = json.loads((child / json_name).read_bytes())
+    payload["registry_provenance"]["registry_sha256"] = forged_hash
+    (child / json_name).write_bytes(_document(payload))
+    manifest_path = child / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["registry_sha256"] = forged_hash
+    manifest["file_sha256"][json_name] = hashlib.sha256((child / json_name).read_bytes()).hexdigest()
+    manifest["file_bytes"][json_name] = (child / json_name).stat().st_size
+    manifest_path.write_bytes(_document(manifest))
+    child = _rename_child_for_manifest_identity(child)
+    with pytest.raises(auditor.AuditError, match="independently recomputed registry hash"):
+        auditor.audit_frozen_k4_diagnosis_completion(
+            parent_run=parent, completion_run=child, model_attempt=tmp_path / "model",
+            raw_kline_root=tmp_path / "raw")
+
+
+def test_full_audit_rejects_parent_child_run_id_collision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auditor, parent, child, source = _synthetic_end_to_end_fixture(tmp_path)
+    monkeypatch.setattr(auditor, "load_frozen_k4_diagnostic_source", lambda *_: source)
+    collision_root = tmp_path / "collision-root"
+    collision_root.mkdir()
+    collision = collision_root / parent.name
+    shutil.copytree(child, collision)
+    manifest_path = collision / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["run_id"] = parent.name
+    manifest_path.write_bytes(_document(manifest))
+    with pytest.raises(auditor.AuditError, match="parent and child run IDs must differ"):
+        auditor.audit_frozen_k4_diagnosis_completion(
+            parent_run=parent, completion_run=collision, model_attempt=tmp_path / "model",
             raw_kline_root=tmp_path / "raw")
 
 
