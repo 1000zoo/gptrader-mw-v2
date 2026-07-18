@@ -87,6 +87,14 @@ def _canonical_hash(value: object) -> str:
     return _sha256(_canonical_bytes(value))
 
 
+def _document_bytes(value: object) -> bytes:
+    return _canonical_bytes(value) + b"\n"
+
+
+def _document_hash(value: object) -> str:
+    return _sha256(_document_bytes(value))
+
+
 def _reject_constant(_: str) -> object:
     raise ValueError("non-finite JSON constant")
 
@@ -97,7 +105,7 @@ def _load_canonical_json(path: Path) -> object:
         value = json.loads(data.decode("utf-8"), parse_constant=_reject_constant)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
         raise AuditError(f"{Path(path).name} is invalid JSON") from error
-    if _canonical_bytes(value) != data:
+    if _document_bytes(value) != data:
         raise AuditError(f"{Path(path).name} is not canonical JSON")
     return value
 
@@ -140,11 +148,16 @@ def _float_bits(value: float) -> str:
 
 
 def _close(left: object, right: object, label: str) -> None:
-    if (type(left) not in (int, float) or type(right) not in (int, float)
-            or not math.isfinite(float(left)) or not math.isfinite(float(right))
-            or not math.isclose(float(left), float(right), rel_tol=_REL_TOL,
+    try:
+        left_number = float(left)  # CSV values are canonical numeric strings.
+        right_number = float(right)
+    except (TypeError, ValueError) as error:
+        raise AuditError(f"{label} is not numeric") from error
+    if (isinstance(left, bool) or isinstance(right, bool)
+            or not math.isfinite(left_number) or not math.isfinite(right_number)
+            or not math.isclose(left_number, right_number, rel_tol=_REL_TOL,
                                 abs_tol=_ABS_TOL)):
-        _fail(f"{label} does not numerically reconcile")
+        _fail(f"{label} does not numerically reconcile: {left!r} != {right!r}")
 
 
 def _exact(left: object, right: object, label: str) -> None:
@@ -166,7 +179,7 @@ def _read_manifest(run: Path, files: Mapping[str, bytes], *, child: bool) -> dic
         payload = json.loads(raw.decode("utf-8"), parse_constant=_reject_constant)
     except Exception as error:
         raise AuditError("manifest is invalid JSON") from error
-    if not isinstance(payload, dict) or _canonical_bytes(payload) != raw:
+    if not isinstance(payload, dict) or _document_bytes(payload) != raw:
         _fail("manifest must be an exact canonical object")
     parent_fields = {
         "run_id", "input_identity_sha256", "file_sha256", "status",
@@ -301,7 +314,9 @@ def _primary_assignment(primary: object, row: Sequence[float]) -> int:
     for component, (mean, covariance, weight) in enumerate(
         zip(primary.means, primary.covariances, primary.weights)
     ):
-        variance = [max(float(value), 1e-6) for value in covariance]
+        variance = [float(value) for value in covariance]
+        if any(not math.isfinite(value) or value <= 0 for value in variance):
+            _fail("stored primary covariance must be finite and positive")
         score = math.log(float(weight)) - 0.5 * (
             len(row) * math.log(2 * math.pi)
             + math.fsum(math.log(value) for value in variance)
@@ -316,7 +331,47 @@ def _anchor(vector: object) -> str:
     return vector.anchor_at.isoformat().replace("+00:00", "Z")
 
 
-def _verify_receipts(payload: Mapping[str, object], source: object) -> tuple[list[dict[str, object]], list[list[float]]]:
+def _parent_half_graph(parent_reproduction: Mapping[str, object], primary: object) -> dict[tuple[str, int], tuple[int, str, str]]:
+    halves = parent_reproduction.get("half_replays")
+    if not isinstance(halves, list) or len(halves) != 2:
+        _fail("parent must publish exactly two half replays")
+    graph: dict[tuple[str, int], tuple[int, str, str]] = {}
+    for expected_label, expected_count, half in zip(("A", "B"), (820, 821), halves):
+        if not isinstance(half, dict) or not isinstance(half.get("receipt"), dict):
+            _fail("parent half replay receipt is malformed")
+        receipt = half["receipt"]
+        _exact(receipt.get("half_label"), expected_label, "parent half label")
+        _exact(receipt.get("anchor_count"), expected_count, "parent half count")
+        pairs = half.get("matched_pairs")
+        if not isinstance(pairs, list) or len(pairs) != 4:
+            _fail("parent matched-pair graph must be K4")
+        primary_indices: set[int] = set()
+        half_indices: set[int] = set()
+        for pair in pairs:
+            if not isinstance(pair, dict):
+                _fail("parent matched-pair row is malformed")
+            _exact(pair.get("half_label"), expected_label, "parent matched-pair half")
+            half_index = pair.get("half_component_index")
+            primary_index = pair.get("primary_component_index")
+            if (type(half_index) is not int or type(primary_index) is not int
+                    or not 0 <= half_index < 4 or not 0 <= primary_index < 4):
+                _fail("parent matched-pair indices are invalid")
+            half_fp = pair.get("half_component_fingerprint")
+            primary_fp = pair.get("primary_component_fingerprint")
+            if not isinstance(half_fp, str) or _FINGERPRINT.fullmatch(half_fp) is None:
+                _fail("parent matched-pair half fingerprint is invalid")
+            _exact(primary_fp, primary.fingerprints[primary_index],
+                   "parent matched-pair primary fingerprint")
+            graph[(expected_label, half_index)] = (primary_index, str(primary_fp), half_fp)
+            primary_indices.add(primary_index)
+            half_indices.add(half_index)
+        if primary_indices != set(range(4)) or half_indices != set(range(4)):
+            _fail("parent matched-pair graph is not one-to-one K4")
+    return graph
+
+
+def _verify_receipts(payload: Mapping[str, object], source: object,
+                     parent_reproduction: Mapping[str, object]) -> tuple[list[dict[str, object]], list[list[float]]]:
     receipts = payload.get("fixed_sample_receipts")
     if not isinstance(receipts, list) or len(receipts) != 1641:
         _fail("fixed sample receipt ledger must contain 1,641 rows")
@@ -324,6 +379,7 @@ def _verify_receipts(payload: Mapping[str, object], source: object) -> tuple[lis
     if len(vectors) != len(receipts):
         _fail("source vector count differs from sample ledger")
     scaled = _transform(source.primary_fit, vectors)
+    parent_graph = _parent_half_graph(parent_reproduction, source.primary_fit)
     half_counts = {"A": 0, "B": 0}
     receipt_fields = {
         "global_index", "anchor_at", "half_label", "half_component_index",
@@ -341,6 +397,7 @@ def _verify_receipts(payload: Mapping[str, object], source: object) -> tuple[lis
         if half not in half_counts:
             _fail("sample half label is invalid")
         half_counts[str(half)] += 1
+        _exact(half, "A" if index < 820 else "B", "sample half boundary")
         half_component = receipt.get("half_component_index")
         if type(half_component) is not int or not 0 <= half_component < 4:
             _fail("receipt half component index is invalid")
@@ -354,6 +411,12 @@ def _verify_receipts(payload: Mapping[str, object], source: object) -> tuple[lis
         matched = _i(receipt.get("matched_primary_component_index"), "matched component")
         _exact(receipt.get("matched_primary_component_fingerprint"),
                source.primary_fit.fingerprints[matched], "matched primary fingerprint")
+        _exact(
+            (matched, receipt.get("matched_primary_component_fingerprint"),
+             receipt.get("half_component_fingerprint")),
+            parent_graph[(str(half), int(half_component))],
+            "sample receipt parent matched-pair identity",
+        )
         mean = source.primary_fit.means[assigned]
         covariance = source.primary_fit.covariances[assigned]
         squared = math.fsum((value - center) ** 2 / max(float(var), 1e-6)
@@ -738,7 +801,15 @@ def _verify_empirical_csvs(files: Mapping[str, bytes], centroids: Sequence[Mappi
         (row["sample_scope"], row.get("spacing_days"), row.get("offset"),
          row["primary_component_index"]): row for row in ood_json
     }
-    for actual in (row for row in rows if row["record_type"] == "ood"):
+    ood_csv_rows = [row for row in rows if row["record_type"] == "ood"]
+    ood_csv_identities = [
+        (row["sample_scope"], _nullable_int(row["spacing_days"]),
+         _nullable_int(row["offset"]), _i(row["primary_component_index"], "diagnostic OOD component"))
+        for row in ood_csv_rows
+    ]
+    if len(ood_csv_identities) != len(set(ood_csv_identities)) or set(ood_csv_identities) != set(ood_map):
+        _fail("diagnostic CSV OOD identities are not exact one-to-one")
+    for actual in ood_csv_rows:
         key = (actual["sample_scope"], _nullable_int(actual["spacing_days"]),
                _nullable_int(actual["offset"]), _i(actual["primary_component_index"], "diagnostic OOD component"))
         expected_row = ood_map.get(key)
@@ -757,7 +828,16 @@ def _verify_empirical_csvs(files: Mapping[str, bytes], centroids: Sequence[Mappi
         _verify_decorated_scope(actual, scope_map[key[:3]], ood_json)
     conclusion_map = {(row["spacing_days"], row["offset"]): row
                       for row in payload["offset_consistency"]}
-    for actual in (row for row in rows if row["record_type"] == "conclusion"):
+    conclusion_csv_rows = [row for row in rows if row["record_type"] == "conclusion"]
+    conclusion_identities = [
+        (_i(row["spacing_days"], "diagnostic conclusion spacing"),
+         _i(row["offset"], "diagnostic conclusion offset"))
+        for row in conclusion_csv_rows
+    ]
+    if (len(conclusion_identities) != len(set(conclusion_identities))
+            or set(conclusion_identities) != set(conclusion_map)):
+        _fail("diagnostic CSV conclusion identities are not exact one-to-one")
+    for actual in conclusion_csv_rows:
         spacing = _i(actual["spacing_days"], "diagnostic conclusion spacing")
         offset = _i(actual["offset"], "diagnostic conclusion offset")
         expected_row = conclusion_map.get((spacing, offset))
@@ -828,7 +908,48 @@ def _classification(count: int, total: int) -> str:
     return "universal" if count == total else ("subset-only" if count == 0 else "mixed")
 
 
-def _verify_markdown(payload: Mapping[str, object], data: bytes) -> None:
+def _float_text(value: object) -> str:
+    number = _f(value, "rendered float")
+    return format(number, ".17g")
+
+
+def _verify_fitted_reference(payload: Mapping[str, object], parent_files: Mapping[str, bytes]) -> dict[str, object]:
+    name = "frozen_k4_cluster_diagnostics.csv"
+    try:
+        rows = list(csv.DictReader(io.StringIO(parent_files[name].decode("utf-8"))))
+    except (KeyError, UnicodeDecodeError, csv.Error) as error:
+        raise AuditError("parent fitted diagnostics are malformed") from error
+    expected_headers = (
+        "half_label", "primary_component_index", "half_component_index",
+        "primary_component_fingerprint", "half_component_fingerprint", "sample_count",
+        "exceedance_count", "euclidean_distance", "top_drift_features", "diagnostic_only",
+    )
+    if not rows or tuple(rows[0]) != expected_headers:
+        _fail("parent fitted diagnostic schema differs")
+    maximum = min(rows, key=lambda row: (
+        -_f(row["euclidean_distance"], "parent fitted distance"), row["half_label"],
+        _i(row["primary_component_index"], "parent fitted primary component"),
+        _i(row["half_component_index"], "parent fitted half component"),
+    ))
+    expected = {
+        "metric_name": "fitted_parameter_centroid_distance",
+        "half_label": maximum["half_label"],
+        "primary_component_index": _i(maximum["primary_component_index"], "fitted primary component"),
+        "half_component_index": _i(maximum["half_component_index"], "fitted half component"),
+        "primary_component_fingerprint": maximum["primary_component_fingerprint"],
+        "half_component_fingerprint": maximum["half_component_fingerprint"],
+        "distance": _f(maximum["euclidean_distance"], "fitted distance"),
+        "top_five_drift_features": maximum["top_drift_features"].split("|")[:5],
+    }
+    reference = payload.get("fitted_parameter_reference")
+    if not isinstance(reference, dict):
+        _fail("JSON fitted-parameter reference is missing")
+    _compare_objects([reference], [expected], "JSON fitted-parameter reference")
+    return expected
+
+
+def _verify_markdown(payload: Mapping[str, object], data: bytes,
+                     fitted: Mapping[str, object]) -> None:
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as error:
@@ -845,12 +966,45 @@ def _verify_markdown(payload: Mapping[str, object], data: bytes) -> None:
     if any(sentence not in text for sentence in required):
         _fail("Markdown required claims do not reconcile")
     component = payload["component_zero_ood"]
+    top_five_sentence = f"- Top five features: {', '.join(component['top_five_features'])}"
+    if top_five_sentence not in text:
+        _fail("Markdown Component 0 top-five claim differs")
+    for family in component["family_rows"]:
+        sentence = f"- family {family['family_name']}: contribution_ratio={_float_text(family['contribution_ratio'])}"
+        if sentence not in text:
+            _fail(f"Markdown family ratio differs: {family['family_name']}")
     for key in ("single_feature_concentration", "volatility_family_concentration",
                 "recurrent_feature_dominance"):
         sentence = f"- {key}={'true' if component[key] else 'false'}"
         if sentence not in text:
             _fail(f"Markdown flag claim differs: {key}")
+    fitted_sentence = f"- fitted_parameter_centroid_distance={_float_text(fitted['distance'])}"
+    if fitted_sentence not in text:
+        _fail("Markdown fitted-parameter value differs")
+    full = payload["full_sample_empirical"]
+    full_sentence = f"- full_sample_empirical_centroid_distance={_float_text(full['maximum_drift_distance'])}"
+    if full_sentence not in text:
+        _fail("Markdown full-sample empirical value differs")
     conclusions = payload["offset_consistency"]
+    scope_map = {(scope["spacing_days"], scope["offset"]): scope
+                 for scope in payload["offset_empirical"]}
+    for conclusion in conclusions:
+        scope = scope_map[(conclusion["spacing_days"], conclusion["offset"])]
+        origin = scope["centroid_rows"][0]["offset_origin_anchor"]
+        sentence = (
+            f"- {conclusion['spacing_days']}-day offset={conclusion['offset']} origin={origin} "
+            f"offset_empirical_centroid_distance: max={_float_text(scope['maximum_drift_distance'])} "
+            f"half={scope['maximum_drift_half_label']} "
+            f"primary_component={scope['maximum_drift_primary_component_index']} "
+            f"primary_fingerprint={scope['maximum_drift_primary_component_fingerprint']} "
+            f"half_component={scope['maximum_drift_half_component_index']} "
+            f"half_fingerprint={scope['maximum_drift_half_component_fingerprint']} "
+            f"maximum_ood_primary_component={conclusion['maximum_ood_primary_component_index']} "
+            f"maximum_ood_fingerprint={conclusion['maximum_ood_primary_component_fingerprint']} "
+            f"top_five={','.join(conclusion['top_five_drift_features'])}"
+        )
+        if sentence not in text:
+            _fail(f"Markdown offset detail differs: {conclusion['spacing_days']}/{conclusion['offset']}")
     for spacing in (3, 7):
         rows = [row for row in conclusions if row["spacing_days"] == spacing]
         fields = (("drift component", "drift_component_matches_full_sample"),
@@ -932,6 +1086,8 @@ def audit_frozen_k4_diagnosis_completion(*, parent_run: Path, completion_run: Pa
     _exact(child_manifest.get("diagnostic_schema_version"), SCHEMA, "child schema")
     _exact(child_manifest.get("completion_scope"), SCOPE, "completion scope")
     _exact(child_manifest.get("parent_run_id"), parent_manifest["run_id"], "parent run ID")
+    if child_manifest["run_id"] == parent_manifest["run_id"]:
+        _fail("parent and child run IDs must differ")
     _exact(child_manifest.get("parent_manifest_sha256"), _sha256(parent_files[MANIFEST]),
            "parent manifest byte hash")
     _exact(child_manifest.get("thresholds"), THRESHOLDS, "fixed thresholds")
@@ -952,7 +1108,7 @@ def audit_frozen_k4_diagnosis_completion(*, parent_run: Path, completion_run: Pa
         "completion_scope": SCOPE, "replay_parent_match_verified": True,
         "thresholds": THRESHOLDS,
     }
-    _exact(child_manifest["run_id"], _canonical_hash(identity), "deterministic child run ID")
+    _exact(child_manifest["run_id"], _document_hash(identity), "deterministic child run ID")
     payload = _load_canonical_json(completion_run / COMPLETION_JSON)
     if not isinstance(payload, dict):
         _fail("completion JSON must be an object")
@@ -984,13 +1140,19 @@ def audit_frozen_k4_diagnosis_completion(*, parent_run: Path, completion_run: Pa
     _verify_replay(parent_reproduction, payload)
     source = load_frozen_k4_diagnostic_source(Path(model_attempt), Path(raw_kline_root))
     try:
-        identity_hash = _canonical_hash(source.identity.canonical_payload())
+        identity_hash = _document_hash(source.identity.canonical_payload())
         _exact(identity_hash, parent_manifest.get("input_identity_sha256"), "source/parent identity")
         _exact(identity_hash, child_manifest.get("input_identity_sha256"), "source/child identity")
-        receipts, scaled = _verify_receipts(payload, source)
+        independently_computed_registry = _registry_hash(tuple(source.primary_fit.feature_names))
+        _exact(child_manifest.get("registry_schema_version"),
+               THREE_DAY_CHART_FEATURE_SCHEMA_VERSION, "manifest registry schema")
+        _exact(child_manifest.get("registry_sha256"), independently_computed_registry,
+               "manifest independently recomputed registry hash")
+        receipts, scaled = _verify_receipts(payload, source, parent_reproduction)
         flags = _verify_component_zero(payload, source, receipts, scaled, child_files)
         _verify_empirical(payload, source, receipts, scaled, child_files)
-        _verify_markdown(payload, child_files[REPORT])
+        fitted = _verify_fitted_reference(payload, parent_files)
+        _verify_markdown(payload, child_files[REPORT], fitted)
     finally:
         close = getattr(source, "close", None)
         if callable(close):
