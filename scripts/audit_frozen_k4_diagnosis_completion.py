@@ -128,6 +128,21 @@ def _is_link_or_reparse(path: Path) -> bool:
     )
 
 
+def _resolve_real_root(value: Path, label: str) -> Path:
+    original = Path(value)
+    try:
+        if _is_link_or_reparse(original) or not original.is_dir():
+            _fail(f"{label} root must be a real directory")
+        resolved = original.resolve(strict=True)
+    except AuditError:
+        raise
+    except (OSError, ValueError) as error:
+        raise AuditError(f"{label} root cannot be resolved") from error
+    if _is_link_or_reparse(resolved) or not resolved.is_dir():
+        _fail(f"{label} root must resolve to a real directory")
+    return resolved
+
+
 def _directory(path: Path, expected: set[str] | frozenset[str] | None = None) -> dict[str, bytes]:
     path = Path(path)
     if not path.is_dir() or _is_link_or_reparse(path):
@@ -543,6 +558,111 @@ def _compare_objects(actual: object, expected: Sequence[Mapping[str, object]], l
                 _exact(left[key], value, f"{label}.{key}")
 
 
+def _exact_fields(value: object, fields: set[str], label: str) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != fields:
+        _fail(f"{label} fields are not exact")
+    return value
+
+
+def _verify_completion_json_fields(payload: Mapping[str, object]) -> None:
+    _exact_fields(payload, {
+        "diagnostic_schema_version", "completion_scope", "implementation_file_sha256",
+        "implementation_sha256", "replay_parent_match_verified", "replay_parent_validation",
+        "parent_provenance", "registry_provenance", "fixed_thresholds", "component_zero_ood",
+        "fitted_parameter_reference", "full_sample_empirical", "full_sample_ood",
+        "offset_empirical", "offset_ood", "offset_consistency", "fixed_sample_receipts",
+        "diagnostic_only", "primary_replacement_allowed",
+    }, "completion JSON")
+    validation = _exact_fields(payload["replay_parent_validation"],
+                               {"parent_receipt", "new_replay_receipt", "match_verified"},
+                               "replay validation")
+    receipt_fields = {"status", "temporal_expected_value", "temporal_reproduced_value",
+                      "ood_expected_value", "ood_reproduced_value", "ood_numerator",
+                      "ood_denominator", "metric_ieee_float_bits"}
+    for name in ("parent_receipt", "new_replay_receipt"):
+        receipt = _exact_fields(validation[name], receipt_fields, name)
+        bits = _exact_fields(receipt["metric_ieee_float_bits"],
+                             {"maximum_distance_exceedance_rate",
+                              "maximum_matched_centroid_distance"}, f"{name} IEEE bits")
+        if any(not isinstance(pair, list) or len(pair) != 2 for pair in bits.values()):
+            _fail(f"{name} IEEE bit pairs are not exact")
+    _exact_fields(payload["parent_provenance"],
+                  {"parent_run_id", "parent_manifest_sha256", "input_identity_sha256"},
+                  "parent provenance")
+    _exact_fields(payload["registry_provenance"],
+                  {"registry_schema_version", "registry_sha256"}, "registry provenance")
+    component = _exact_fields(payload["component_zero_ood"], {
+        "analysis_scope", "primary_component_index", "primary_component_fingerprint",
+        "assigned_sample_count", "ood_sample_count", "registry_schema_version",
+        "registry_sha256", "feature_rows", "family_rows", "top_five_features",
+        "single_feature_concentration", "volatility_family_concentration",
+        "recurrent_feature_dominance", "diagnostic_only",
+    }, "Component 0 analysis")
+    _exact(component.get("diagnostic_only"), True, "Component 0 diagnostic-only policy")
+    feature_fields = {"analysis_scope", "primary_component_index", "primary_component_fingerprint",
+        "feature_name", "registry_family", "registry_schema_version", "registry_sha256",
+        "contribution_sum", "contribution_ratio", "contribution_mean", "contribution_median",
+        "top1_count", "top1_ratio", "top5_count", "top5_ratio", "rank"}
+    family_fields = {"analysis_scope", "primary_component_index", "primary_component_fingerprint",
+        "family_name", "family_feature_names", "registry_schema_version", "registry_sha256",
+        "contribution_sum", "contribution_ratio", "concentration_threshold",
+        "concentration_rule_applies", "concentration_result"}
+    if not isinstance(component["feature_rows"], list) or not isinstance(component["family_rows"], list):
+        _fail("Component 0 rows must be arrays")
+    for row in component["feature_rows"]:
+        _exact_fields(row, feature_fields, "Component 0 feature row")
+    for row in component["family_rows"]:
+        _exact_fields(row, family_fields, "Component 0 family row")
+    _exact_fields(payload["fitted_parameter_reference"], {
+        "metric_name", "half_label", "primary_component_index", "half_component_index",
+        "primary_component_fingerprint", "half_component_fingerprint", "distance",
+        "top_five_drift_features"}, "fitted-parameter reference")
+    scope_fields = {"sample_scope", "spacing_days", "offset", "selected_sample_count",
+        "centroid_rows", "feature_rows", "maximum_drift_half_label",
+        "maximum_drift_primary_component_index", "maximum_drift_half_component_index",
+        "maximum_drift_primary_component_fingerprint", "maximum_drift_half_component_fingerprint",
+        "maximum_drift_distance", "top_five_drift_features"}
+    centroid_fields = {"sample_scope", "spacing_days", "offset", "offset_origin_anchor",
+        "half_label", "primary_component_index", "half_component_index",
+        "primary_component_fingerprint", "half_component_fingerprint", "sample_count",
+        "sample_share", "centroid_status", "metric_name", "empirical_centroid", "distance",
+        "assignment_source", "refit_performed", "rematch_performed", "diagnostic_only"}
+    empirical_feature_fields = {"sample_scope", "spacing_days", "offset", "half_label",
+        "primary_component_index", "half_component_index", "primary_component_fingerprint",
+        "half_component_fingerprint", "feature_name", "registry_family", "squared_distance",
+        "contribution_ratio", "rank"}
+    scopes = [payload["full_sample_empirical"]]
+    if not isinstance(payload["offset_empirical"], list):
+        _fail("offset empirical claims must be an array")
+    scopes.extend(payload["offset_empirical"])
+    for scope in scopes:
+        scope = _exact_fields(scope, scope_fields, "empirical scope")
+        if not isinstance(scope["centroid_rows"], list) or not isinstance(scope["feature_rows"], list):
+            _fail("empirical nested rows must be arrays")
+        for row in scope["centroid_rows"]:
+            _exact_fields(row, centroid_fields, "empirical centroid row")
+        for row in scope["feature_rows"]:
+            _exact_fields(row, empirical_feature_fields, "empirical feature row")
+    ood_fields = {"sample_scope", "spacing_days", "offset", "primary_component_index",
+        "primary_component_fingerprint", "numerator", "denominator", "rate",
+        "distance_source", "threshold_source"}
+    conclusion_fields = {"spacing_days", "offset", "maximum_drift_half_label",
+        "maximum_drift_primary_component_index", "maximum_drift_primary_component_fingerprint",
+        "maximum_drift_half_component_index", "maximum_drift_half_component_fingerprint",
+        "maximum_ood_primary_component_index", "maximum_ood_primary_component_fingerprint",
+        "top_five_drift_features", "drift_component_matches_full_sample",
+        "ood_component_matches_full_sample", "ordered_top5_matches_full_sample",
+        "top5_set_matches_full_sample"}
+    for collection_name, fields in (("full_sample_ood", ood_fields),
+                                    ("offset_ood", ood_fields),
+                                    ("offset_consistency", conclusion_fields)):
+        rows = payload[collection_name]
+        if not isinstance(rows, list):
+            _fail(f"{collection_name} must be an array")
+        for row in rows:
+            _exact_fields(row, fields, f"{collection_name} row")
+
+
 def _compare_csv(actual: Sequence[Mapping[str, object]], expected: Sequence[Mapping[str, object]], label: str) -> None:
     if len(actual) != len(expected):
         _fail(f"{label} row count differs")
@@ -858,6 +978,85 @@ def _verify_empirical_csvs(files: Mapping[str, bytes], centroids: Sequence[Mappi
             _exact(_b(actual[field], f"diagnostic conclusion {field}"), expected_row[field],
                    f"diagnostic conclusion {field}")
         _verify_decorated_scope(actual, scope_map[("offset_subsample", spacing, offset)], ood_json)
+    _verify_complete_diagnostic_csv_rows(
+        rows, diagnostic_headers, centroids, payload, scope_map, ood_json
+    )
+
+
+def _csv_expected_cell(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            _fail("expected diagnostic CSV value is non-finite")
+        return format(value, ".17g")
+    return str(value)
+
+
+def _verify_complete_diagnostic_csv_rows(
+    actual_rows: Sequence[Mapping[str, str]], headers: tuple[str, ...],
+    centroids: Sequence[Mapping[str, object]], payload: Mapping[str, object],
+    scope_map: Mapping[tuple[str, int | None, int | None], Mapping[str, object]],
+    ood_json: Sequence[Mapping[str, object]],
+) -> None:
+    expected_rows: list[dict[str, object]] = []
+
+    def decorate(row: dict[str, object], key: tuple[str, int | None, int | None]) -> dict[str, object]:
+        scope = scope_map[key]
+        maximum_ood = _max_ood([item for item in ood_json if _scope_key(item) == key])
+        return {
+            **row,
+            "offset_origin_anchor": scope["centroid_rows"][0]["offset_origin_anchor"],
+            "maximum_drift_half_label": scope["maximum_drift_half_label"],
+            "maximum_drift_primary_component_index": scope["maximum_drift_primary_component_index"],
+            "maximum_drift_primary_component_fingerprint": scope["maximum_drift_primary_component_fingerprint"],
+            "maximum_drift_half_component_index": scope["maximum_drift_half_component_index"],
+            "maximum_drift_half_component_fingerprint": scope["maximum_drift_half_component_fingerprint"],
+            "maximum_ood_primary_component_index": maximum_ood["primary_component_index"],
+            "maximum_ood_primary_component_fingerprint": maximum_ood["primary_component_fingerprint"],
+        }
+
+    for row in centroids:
+        key = (str(row["sample_scope"]), row["spacing_days"], row["offset"])
+        centroid = row["empirical_centroid"]
+        expected_rows.append(decorate({
+            **row, "record_type": "centroid",
+            "empirical_centroid": None if centroid is None else ";".join(
+                format(float(value), ".17g") for value in centroid
+            ),
+        }, key))
+    for row in ood_json:
+        key = (str(row["sample_scope"]), row["spacing_days"], row["offset"])
+        expected_rows.append(decorate({
+            **row, "record_type": "ood", "ood_numerator": row["numerator"],
+            "ood_denominator": row["denominator"], "ood_rate": row["rate"],
+        }, key))
+    for row in payload["offset_consistency"]:
+        key = ("offset_subsample", row["spacing_days"], row["offset"])
+        expected_rows.append(decorate({
+            **row, "record_type": "conclusion", "sample_scope": "offset_subsample",
+            "top_five_drift_features": ";".join(row["top_five_drift_features"]),
+        }, key))
+    order = {"centroid": 0, "ood": 1, "conclusion": 2}
+    expected_rows.sort(key=lambda row: (
+        0 if row["sample_scope"] == "full_sample" else 1,
+        -1 if row.get("spacing_days") is None else int(row["spacing_days"]),
+        -1 if row.get("offset") is None else int(row["offset"]),
+        order[str(row["record_type"])], str(row.get("half_label") or ""),
+        -1 if row.get("primary_component_index") is None else int(row["primary_component_index"]),
+        -1 if row.get("half_component_index") is None else int(row["half_component_index"]),
+    ))
+    if len(actual_rows) != len(expected_rows):
+        _fail("diagnostic CSV complete row count differs")
+    for row_index, (actual, expected) in enumerate(zip(actual_rows, expected_rows)):
+        for header in headers:
+            wanted = _csv_expected_cell(expected.get(header))
+            if actual[header] != wanted:
+                _fail(
+                    f"diagnostic CSV complete row {row_index} field {header} differs"
+                )
 
 
 def _nullable_int(value: str) -> int | None:
@@ -1062,8 +1261,8 @@ def _verify_replay(parent_reproduction: Mapping[str, object], child: Mapping[str
 
 def audit_frozen_k4_diagnosis_completion(*, parent_run: Path, completion_run: Path,
                                          model_attempt: Path, raw_kline_root: Path) -> Mapping[str, object]:
-    parent_run = Path(parent_run).resolve(strict=True)
-    completion_run = Path(completion_run).resolve(strict=True)
+    parent_run = _resolve_real_root(Path(parent_run), "parent")
+    completion_run = _resolve_real_root(Path(completion_run), "completion")
     if parent_run == completion_run or parent_run in completion_run.parents or completion_run in parent_run.parents:
         _fail("parent and child paths must be separate")
     parent_files = _directory(parent_run)
@@ -1099,6 +1298,7 @@ def audit_frozen_k4_diagnosis_completion(*, parent_run: Path, completion_run: Pa
     payload = _load_canonical_json(completion_run / COMPLETION_JSON)
     if not isinstance(payload, dict):
         _fail("completion JSON must be an object")
+    _verify_completion_json_fields(payload)
     for key in ("completion_scope", "implementation_file_sha256", "implementation_sha256",
                 "replay_parent_match_verified"):
         _exact(payload.get(key), child_manifest.get(key), f"JSON/manifest {key}")
@@ -1125,7 +1325,10 @@ def audit_frozen_k4_diagnosis_completion(*, parent_run: Path, completion_run: Pa
     if not isinstance(parent_reproduction, dict):
         _fail("parent reproduction must be an object")
     _verify_replay(parent_reproduction, payload)
-    source = load_frozen_k4_diagnostic_source(Path(model_attempt), Path(raw_kline_root))
+    try:
+        source = load_frozen_k4_diagnostic_source(Path(model_attempt), Path(raw_kline_root))
+    except (OSError, ValueError) as error:
+        raise AuditError("frozen diagnostic source could not be loaded") from error
     try:
         identity_hash = _document_hash(source.identity.canonical_payload())
         _exact(identity_hash, parent_manifest.get("input_identity_sha256"), "source/parent identity")

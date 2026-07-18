@@ -903,6 +903,105 @@ def test_full_audit_rejects_parent_child_run_id_collision(
             raw_kline_root=tmp_path / "raw")
 
 
+@pytest.mark.parametrize("mutation", ("extra_top_level", "component_diagnostic_false"))
+def test_full_audit_rejects_rehashed_json_schema_mutations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str,
+) -> None:
+    auditor, parent, child, source = _synthetic_end_to_end_fixture(tmp_path)
+    monkeypatch.setattr(auditor, "load_frozen_k4_diagnostic_source", lambda *_: source)
+    name = "frozen_k4_diagnosis_completion.json"
+    payload = json.loads((child / name).read_bytes())
+    if mutation == "extra_top_level":
+        payload["surplus_claim"] = "forbidden"
+    else:
+        payload["component_zero_ood"]["diagnostic_only"] = False
+    (child / name).write_bytes(_document(payload))
+    _rehash_child_artifact(child, name)
+    with pytest.raises(auditor.AuditError, match="completion JSON fields|Component 0 diagnostic-only"):
+        auditor.audit_frozen_k4_diagnosis_completion(
+            parent_run=parent, completion_run=child, model_attempt=tmp_path / "model",
+            raw_kline_root=tmp_path / "raw")
+
+
+@pytest.mark.parametrize("record_type,unused_field,value", (
+    ("centroid", "ood_numerator", "999"),
+    ("ood", "half_label", "A"),
+    ("conclusion", "sample_count", "1"),
+))
+def test_full_audit_rejects_rehashed_unused_tagged_csv_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_type: str,
+    unused_field: str, value: str,
+) -> None:
+    auditor, parent, child, source = _synthetic_end_to_end_fixture(tmp_path)
+    monkeypatch.setattr(auditor, "load_frozen_k4_diagnostic_source", lambda *_: source)
+    name = "frozen_k4_offset_empirical_diagnostics.csv"
+    with (child / name).open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        headers = reader.fieldnames
+        rows = list(reader)
+    target = next(row for row in rows if row["record_type"] == record_type)
+    target[unused_field] = value
+    with (child / name).open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=headers, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(rows)
+    _rehash_child_artifact(child, name)
+    with pytest.raises(auditor.AuditError, match=f"field {unused_field} differs"):
+        auditor.audit_frozen_k4_diagnosis_completion(
+            parent_run=parent, completion_run=child, model_attempt=tmp_path / "model",
+            raw_kline_root=tmp_path / "raw")
+
+
+@pytest.mark.parametrize("root_name", ("parent", "completion"))
+def test_full_audit_rejects_root_symlink_before_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_name: str,
+) -> None:
+    auditor, parent, child, source = _synthetic_end_to_end_fixture(tmp_path)
+    monkeypatch.setattr(auditor, "load_frozen_k4_diagnostic_source", lambda *_: source)
+    link = tmp_path / f"{root_name}-link"
+    try:
+        link.symlink_to(parent if root_name == "parent" else child, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable on this OS")
+    kwargs = {"parent_run": link if root_name == "parent" else parent,
+              "completion_run": link if root_name == "completion" else child,
+              "model_attempt": tmp_path / "model", "raw_kline_root": tmp_path / "raw"}
+    with pytest.raises(auditor.AuditError, match=f"{root_name} root must be a real directory"):
+        auditor.audit_frozen_k4_diagnosis_completion(**kwargs)
+
+
+@pytest.mark.parametrize("root_name", ("parent", "completion"))
+def test_full_audit_rejects_root_reparse_before_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root_name: str,
+) -> None:
+    auditor, parent, child, source = _synthetic_end_to_end_fixture(tmp_path)
+    monkeypatch.setattr(auditor, "load_frozen_k4_diagnostic_source", lambda *_: source)
+    original = auditor._is_link_or_reparse
+    blocked = parent if root_name == "parent" else child
+    monkeypatch.setattr(
+        auditor, "_is_link_or_reparse",
+        lambda path: True if Path(path) == blocked else original(Path(path)),
+    )
+    with pytest.raises(auditor.AuditError, match=f"{root_name} root must be a real directory"):
+        auditor.audit_frozen_k4_diagnosis_completion(
+            parent_run=parent, completion_run=child, model_attempt=tmp_path / "model",
+            raw_kline_root=tmp_path / "raw")
+
+
+@pytest.mark.parametrize("error", (OSError("io"), ValueError("value")))
+def test_source_loader_failures_are_normalized(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception,
+) -> None:
+    auditor, parent, child, _ = _synthetic_end_to_end_fixture(tmp_path)
+    def fail(*_: object) -> object:
+        raise error
+    monkeypatch.setattr(auditor, "load_frozen_k4_diagnostic_source", fail)
+    with pytest.raises(auditor.AuditError, match="source could not be loaded"):
+        auditor.audit_frozen_k4_diagnosis_completion(
+            parent_run=parent, completion_run=child, model_attempt=tmp_path / "model",
+            raw_kline_root=tmp_path / "raw")
+
+
 def test_real_published_fixture_is_audited_end_to_end_when_available(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
