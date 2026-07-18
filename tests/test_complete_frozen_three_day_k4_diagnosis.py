@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 from dataclasses import replace
 import csv
 import hashlib
@@ -705,7 +706,7 @@ def test_publisher_opens_immutable_parent_read_only_and_publishes_only_to_child(
 
 
 def test_actual_committed_parent_is_byte_identical_after_completion_publication(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     before = _tree_state(DEFAULT_PARENT_RUN)
     reproduction = json.loads((DEFAULT_PARENT_RUN / PARENT_REPRODUCTION).read_bytes())
@@ -716,6 +717,56 @@ def test_actual_committed_parent_is_byte_identical_after_completion_publication(
         primary_fit=object(),
         vectors=(),
     )
+
+    canonical_parent = DEFAULT_PARENT_RUN.resolve()
+
+    def is_protected(path: object) -> bool:
+        if not isinstance(path, (str, Path)):
+            return False
+        return Path(path).resolve(strict=False).is_relative_to(canonical_parent)
+
+    def reject_parent_mutation(path: object) -> None:
+        if is_protected(path):
+            raise AssertionError("committed parent fixture is read-only during publication")
+
+    original_builtin_open = builtins.open
+    original_path_open = Path.open
+
+    def guarded_builtin_open(file, mode="r", *args, **kwargs):
+        if any(token in mode for token in "wax+"):
+            reject_parent_mutation(file)
+        return original_builtin_open(file, mode, *args, **kwargs)
+
+    def guarded_path_open(self: Path, mode="r", *args, **kwargs):
+        if any(token in mode for token in "wax+"):
+            reject_parent_mutation(self)
+        return original_path_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", guarded_builtin_open)
+    monkeypatch.setattr(Path, "open", guarded_path_open)
+
+    for method_name in ("write_bytes", "write_text", "unlink", "rmdir", "touch", "mkdir"):
+        original = getattr(Path, method_name)
+
+        def guarded(self: Path, *args, _original=original, **kwargs):
+            reject_parent_mutation(self)
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, method_name, guarded)
+
+    for method_name in ("rename", "replace"):
+        original = getattr(Path, method_name)
+
+        def guarded_move(self: Path, target, *args, _original=original, **kwargs):
+            reject_parent_mutation(self)
+            reject_parent_mutation(target)
+            return _original(self, target, *args, **kwargs)
+
+        monkeypatch.setattr(Path, method_name, guarded_move)
+
+    with pytest.raises(AssertionError, match="read-only"):
+        (DEFAULT_PARENT_RUN / MANIFEST).write_bytes(b"forbidden")
+    assert _tree_state(DEFAULT_PARENT_RUN) == before
 
     child = completion_script.publish_frozen_k4_diagnosis_completion(
         parent_run=DEFAULT_PARENT_RUN,
