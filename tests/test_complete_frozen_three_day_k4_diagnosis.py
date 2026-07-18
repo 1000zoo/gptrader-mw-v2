@@ -15,6 +15,7 @@ from scripts.complete_frozen_three_day_k4_diagnosis import (
     DEFAULT_PARENT_RUN,
     DEFAULT_OUTPUT_ROOT,
     MANIFEST,
+    PARENT_REPRODUCTION,
     ParentProvenance,
     PublicationError,
     _completion_identity_payload,
@@ -701,6 +702,36 @@ def test_publisher_opens_immutable_parent_read_only_and_publishes_only_to_child(
     assert child.parent == output_root
     assert child != parent_dir
     assert not child.is_relative_to(parent_dir)
+
+
+def test_actual_committed_parent_is_byte_identical_after_completion_publication(
+    tmp_path: Path,
+) -> None:
+    before = _tree_state(DEFAULT_PARENT_RUN)
+    reproduction = json.loads((DEFAULT_PARENT_RUN / PARENT_REPRODUCTION).read_bytes())
+    source = SimpleNamespace(
+        identity=SimpleNamespace(
+            canonical_payload=lambda: dict(reproduction["input_identity"])
+        ),
+        primary_fit=object(),
+        vectors=(),
+    )
+
+    child = completion_script.publish_frozen_k4_diagnosis_completion(
+        parent_run=DEFAULT_PARENT_RUN,
+        model_attempt=tmp_path / "model.json",
+        raw_kline_root=tmp_path / "raw",
+        output_root=tmp_path / "completion-children",
+        source_loader=lambda *_: source,
+        replay_runner=lambda _: _matching_replay(),
+        decomposition_runner=lambda *_: object(),
+        completion_runner=lambda *_: _completion_fixture(),
+    )
+
+    assert child.is_dir()
+    assert child.name != DEFAULT_PARENT_RUN.name
+    assert not child.is_relative_to(DEFAULT_PARENT_RUN)
+    assert _tree_state(DEFAULT_PARENT_RUN) == before
 
 
 def test_publisher_replay_mismatch_stops_before_decomposition_completion_or_publication(

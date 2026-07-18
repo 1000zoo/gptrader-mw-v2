@@ -823,25 +823,65 @@ def test_completion_independently_reconciles_population_contributions_and_offset
     replay, primary_fit, vectors, decomposition = _completion_fixture()
     completed = complete_frozen_k4_diagnosis(replay, primary_fit, vectors, decomposition)
 
-    component_receipts = tuple(
-        row for row in completed.sample_receipts if row.primary_component_index == 0
+    component_indices = tuple(
+        index
+        for index, assignment in enumerate(replay.primary_assignments)
+        if assignment == 0
     )
-    assert len(component_receipts) == 409
-    assert sum(row.ood_exceeds for row in component_receipts) == 24
+    assert len(component_indices) == 409
     component_samples = tuple(
         row for row in decomposition.ood_samples if row.component_index == 0
     )
     assert len(component_samples) == 24
+    component_ood_anchors = {row.anchor_at for row in component_samples}
+    assert len(component_ood_anchors) == 24
+    full_component_zero = next(
+        row for row in completed.full_sample_ood if row.primary_component_index == 0
+    )
+    assert (full_component_zero.numerator, full_component_zero.denominator) == (
+        len(component_ood_anchors),
+        len(component_indices),
+    )
     independently_summed = {
         name: sum(sample.feature_contributions[name] for sample in component_samples)
         for name in primary_fit.feature_names
     }
+    grand_total = sum(independently_summed.values())
+    registry_position = {
+        spec.name: index for index, spec in enumerate(THREE_DAY_CHART_FEATURE_REGISTRY_V1)
+    }
+    raw_top1_counts = dict.fromkeys(primary_fit.feature_names, 0)
+    for sample in component_samples:
+        winner = min(
+            primary_fit.feature_names,
+            key=lambda name: (
+                -sample.feature_contributions[name],
+                registry_position[name],
+            ),
+        )
+        raw_top1_counts[winner] += 1
     feature_by_name = {
         row.feature_name: row for row in completed.component_zero_ood.feature_rows
     }
     assert independently_summed == {
         name: feature_by_name[name].contribution_sum for name in primary_fit.feature_names
     }
+    assert all(
+        math.isclose(
+            feature_by_name[name].contribution_ratio,
+            independently_summed[name] / grand_total,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        )
+        and feature_by_name[name].top1_count == raw_top1_counts[name]
+        and math.isclose(
+            feature_by_name[name].top1_ratio,
+            raw_top1_counts[name] / len(component_samples),
+            rel_tol=0,
+            abs_tol=1e-15,
+        )
+        for name in primary_fit.feature_names
+    )
     expected_top_five = tuple(
         name
         for name, _ in sorted(
@@ -866,9 +906,18 @@ def test_completion_independently_reconciles_population_contributions_and_offset
         abs_tol=1e-12,
     )
     for family in completed.component_zero_ood.family_rows:
+        raw_family_sum = sum(
+            independently_summed[name] for name in family.family_feature_names
+        )
         assert math.isclose(
             family.contribution_sum,
-            sum(independently_summed[name] for name in family.family_feature_names),
+            raw_family_sum,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        )
+        assert math.isclose(
+            family.contribution_ratio,
+            raw_family_sum / grand_total,
             rel_tol=1e-12,
             abs_tol=1e-12,
         )
@@ -934,10 +983,9 @@ def test_completion_independently_reconciles_population_contributions_and_offset
             if row.spacing_days == spacing
         ) == expected_offset_counts
         for scope in (row for row in completed.offset_empirical if row.spacing_days == spacing):
-            selected = tuple(
-                receipt_by_index[index] for index in range(scope.offset, 1641, spacing)
-            )
-            assert scope.selected_sample_count == len(selected)
+            selected_indices = tuple(range(scope.offset, 1641, spacing))
+            selected = tuple(receipt_by_index[index] for index in selected_indices)
+            assert scope.selected_sample_count == len(selected_indices)
             for centroid in scope.centroid_rows:
                 selected_half = tuple(row for row in selected if row.half_label == centroid.half_label)
                 expected_count = sum(
@@ -959,12 +1007,24 @@ def test_completion_independently_reconciles_population_contributions_and_offset
                 if (row.spacing_days, row.offset) == (spacing, scope.offset)
             )
             for ood in offset_ood:
-                assigned = tuple(
-                    row for row in selected if row.primary_component_index == ood.primary_component_index
+                assigned_indices = tuple(
+                    index
+                    for index in selected_indices
+                    if replay.primary_assignments[index] == ood.primary_component_index
+                )
+                raw_ood_anchors = {
+                    row.anchor_at
+                    for row in decomposition.ood_samples
+                    if row.component_index == ood.primary_component_index
+                }
+                expected_numerator = sum(
+                    vectors[index].anchor_at.isoformat().replace("+00:00", "Z")
+                    in raw_ood_anchors
+                    for index in assigned_indices
                 )
                 assert (ood.numerator, ood.denominator) == (
-                    sum(row.ood_exceeds for row in assigned),
-                    len(assigned),
+                    expected_numerator,
+                    len(assigned_indices),
                 )
         for full in completed.full_sample_ood:
             partitions = tuple(
@@ -984,15 +1044,17 @@ def test_completion_independently_reconciles_population_contributions_and_offset
     )
     volatility = next(row for row in analysis.family_rows if row.family_name == "volatility")
     assert volatility.family_feature_names == volatility_names
-    assert analysis.single_feature_concentration is (
-        max(row.contribution_ratio for row in analysis.feature_rows) >= 0.50
+    family_by_name = {row.family_name: row for row in analysis.family_rows}
+    raw_volatility_sum = sum(
+        independently_summed[name] for name in volatility_names
     )
-    assert analysis.volatility_family_concentration is (
-        volatility.contribution_ratio >= 0.70
-    )
-    assert analysis.recurrent_feature_dominance is any(
-        row.top1_ratio >= 0.50 for row in analysis.feature_rows
-    )
+    expected_single = max(independently_summed.values()) / grand_total >= 0.50
+    expected_volatility = raw_volatility_sum / grand_total >= 0.70
+    expected_recurrent = max(raw_top1_counts.values()) / len(component_samples) >= 0.50
+    assert analysis.single_feature_concentration is expected_single
+    assert analysis.volatility_family_concentration is expected_volatility
+    assert analysis.recurrent_feature_dominance is expected_recurrent
+    assert family_by_name["volatility"].contribution_sum == raw_volatility_sum
 
 
 def test_completion_rejects_forged_canonical_receipt_fingerprint() -> None:
