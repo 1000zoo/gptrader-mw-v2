@@ -764,8 +764,26 @@ def test_actual_committed_parent_is_byte_identical_after_completion_publication(
 
         monkeypatch.setattr(Path, method_name, guarded_move)
 
+    original_os_replace = completion_script.os.replace
+    original_rmtree = completion_script.shutil.rmtree
+
+    def guarded_replace(source, target) -> None:
+        reject_parent_mutation(source)
+        reject_parent_mutation(target)
+        original_os_replace(source, target)
+
+    def guarded_rmtree(path, *args, **kwargs) -> None:
+        reject_parent_mutation(path)
+        original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(completion_script.shutil, "rmtree", guarded_rmtree)
+
     with pytest.raises(AssertionError, match="read-only"):
         (DEFAULT_PARENT_RUN / MANIFEST).write_bytes(b"forbidden")
+    with pytest.raises(AssertionError, match="read-only"):
+        guarded_replace(DEFAULT_PARENT_RUN / MANIFEST, tmp_path / "forbidden-move")
+    with pytest.raises(AssertionError, match="read-only"):
+        guarded_rmtree(DEFAULT_PARENT_RUN)
     assert _tree_state(DEFAULT_PARENT_RUN) == before
 
     child = completion_script.publish_frozen_k4_diagnosis_completion(
@@ -777,6 +795,7 @@ def test_actual_committed_parent_is_byte_identical_after_completion_publication(
         replay_runner=lambda _: _matching_replay(),
         decomposition_runner=lambda *_: object(),
         completion_runner=lambda *_: _completion_fixture(),
+        replace_directory=guarded_replace,
     )
 
     assert child.is_dir()
