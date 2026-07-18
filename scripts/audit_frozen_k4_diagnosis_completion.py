@@ -385,6 +385,22 @@ def _parent_half_graph(parent_reproduction: Mapping[str, object], primary: objec
     return graph
 
 
+def _frozen_ood_threshold(source: object) -> float:
+    if tuple(source.primary_fit.distance_thresholds) != ():
+        _fail("frozen GMM fit must not carry per-component distance thresholds")
+    attempt = source.attempt_payload
+    if not isinstance(attempt, dict):
+        _fail("frozen attempt payload is malformed")
+    gates = attempt.get("model_gates")
+    if not isinstance(gates, dict):
+        _fail("frozen attempt model gates are malformed")
+    value = gates.get("distance_threshold")
+    if (not isinstance(value, (int, float)) or isinstance(value, bool)
+            or not math.isfinite(float(value)) or float(value) < 0):
+        _fail("frozen attempt distance threshold is invalid")
+    return float(value)
+
+
 def _verify_receipts(payload: Mapping[str, object], source: object,
                      parent_reproduction: Mapping[str, object]) -> tuple[list[dict[str, object]], list[list[float]]]:
     receipts = payload.get("fixed_sample_receipts")
@@ -395,6 +411,7 @@ def _verify_receipts(payload: Mapping[str, object], source: object,
         _fail("source vector count differs from sample ledger")
     scaled = _transform(source.primary_fit, vectors)
     parent_graph = _parent_half_graph(parent_reproduction, source.primary_fit)
+    threshold = _frozen_ood_threshold(source)
     half_counts = {"A": 0, "B": 0}
     receipt_fields = {
         "global_index", "anchor_at", "half_label", "half_component_index",
@@ -436,7 +453,6 @@ def _verify_receipts(payload: Mapping[str, object], source: object,
         covariance = source.primary_fit.covariances[assigned]
         squared = math.fsum((value - center) ** 2 / max(float(var), 1e-6)
                             for value, center, var in zip(row, mean, covariance))
-        threshold = float(source.primary_fit.distance_thresholds[assigned])
         _close(receipt.get("squared_mahalanobis"), squared, "sample Mahalanobis distance")
         _close(receipt.get("ood_threshold"), threshold, "sample OOD threshold")
         _exact(receipt.get("ood_exceeds"), squared > threshold, "strict OOD flag")

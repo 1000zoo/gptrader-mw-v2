@@ -390,7 +390,9 @@ def _synthetic_end_to_end_fixture(tmp_path: Path, auditor=None):
         medians=(0.0,) * 5, scales=(1.0,) * 5, fingerprints=primary_fps,
         means=tuple((float(component * 10),) * 5 for component in range(4)),
         covariances=((1.0,) * 5,) * 4, weights=(0.25,) * 4,
-        distance_thresholds=(1.0,) * 4,
+        # Frozen GMM fits do not carry per-component thresholds.  The replay
+        # contract pins one squared-Mahalanobis threshold in the attempt gate.
+        distance_thresholds=(),
     )
     counts = (409, 410, 411, 411)
     ood_counts = (24, 17, 17, 18)
@@ -661,6 +663,7 @@ def _synthetic_end_to_end_fixture(tmp_path: Path, auditor=None):
         "diagnostic_only": True, "primary_replacement_allowed": False}
     (child / "manifest.json").write_bytes(_document(child_manifest))
     source = SimpleNamespace(primary_fit=primary, vectors=tuple(vectors),
+                             attempt_payload={"model_gates": {"distance_threshold": 1.0}},
                              identity=SimpleNamespace(canonical_payload=lambda: identity_payload))
     return auditor, parent, child, source
 
