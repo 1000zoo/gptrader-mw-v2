@@ -708,6 +708,22 @@ def _compare_csv(actual: Sequence[Mapping[str, object]], expected: Sequence[Mapp
                 _exact(current, str(value), f"{label}.{key}")
 
 
+def _compare_centroid_csv_cell(
+    actual: str, expected: Sequence[float] | None, label: str
+) -> None:
+    if expected is None:
+        _exact(actual, "", label)
+        return
+    cells = actual.split(";")
+    if len(cells) != len(expected) or any(cell == "" for cell in cells):
+        _fail(f"{label} vector shape differs")
+    for index, (cell, target) in enumerate(zip(cells, expected)):
+        value = _f(cell, f"{label}[{index}]")
+        if cell != format(value, ".17g"):
+            _fail(f"{label}[{index}] is not canonical binary64 text")
+        _close(value, target, f"{label}[{index}]")
+
+
 def _scope_key(scope: Mapping[str, object]) -> tuple[str, int | None, int | None]:
     return str(scope["sample_scope"]), scope.get("spacing_days"), scope.get("offset")
 
@@ -923,7 +939,16 @@ def _verify_empirical_csvs(files: Mapping[str, bytes], centroids: Sequence[Mappi
     centroid_rows = [row for row in rows if row["record_type"] == "centroid"]
     if len(centroid_rows) != len(centroids):
         _fail("diagnostic centroid CSV row count differs")
-    for actual, expected_row in zip(centroid_rows, centroids):
+    published_centroids = [
+        row
+        for scope in [payload["full_sample_empirical"], *payload["offset_empirical"]]
+        for row in scope["centroid_rows"]
+    ]
+    if len(published_centroids) != len(centroids):
+        _fail("published empirical centroid row count differs")
+    for actual, expected_row, published_row in zip(
+        centroid_rows, centroids, published_centroids
+    ):
         for key in ("sample_scope", "half_label", "primary_component_fingerprint",
                     "half_component_fingerprint", "centroid_status", "metric_name",
                     "offset_origin_anchor"):
@@ -935,8 +960,17 @@ def _verify_empirical_csvs(files: Mapping[str, bytes], centroids: Sequence[Mappi
                    f"diagnostic CSV {key}")
         _close(actual["sample_share"], expected_row["sample_share"], "diagnostic sample share")
         centroid = expected_row["empirical_centroid"]
-        expected_text = "" if centroid is None else ";".join(format(float(value), ".17g") for value in centroid)
-        _exact(actual["empirical_centroid"], expected_text, "diagnostic empirical centroid")
+        published_centroid = published_row["empirical_centroid"]
+        published_text = "" if published_centroid is None else ";".join(
+            format(float(value), ".17g") for value in published_centroid
+        )
+        _exact(
+            actual["empirical_centroid"], published_text,
+            "diagnostic/published empirical centroid",
+        )
+        _compare_centroid_csv_cell(
+            actual["empirical_centroid"], centroid, "diagnostic empirical centroid"
+        )
         if expected_row["distance"] is None:
             _exact(actual["distance"], "", "diagnostic null distance")
         else:
@@ -1045,7 +1079,14 @@ def _verify_complete_diagnostic_csv_rows(
             "maximum_ood_primary_component_fingerprint": maximum_ood["primary_component_fingerprint"],
         }
 
-    for row in centroids:
+    published_centroids = [
+        row
+        for scope in [payload["full_sample_empirical"], *payload["offset_empirical"]]
+        for row in scope["centroid_rows"]
+    ]
+    if len(published_centroids) != len(centroids):
+        _fail("diagnostic CSV published centroid row count differs")
+    for row in published_centroids:
         key = (str(row["sample_scope"]), row["spacing_days"], row["offset"])
         centroid = row["empirical_centroid"]
         expected_rows.append(decorate({
@@ -1079,6 +1120,16 @@ def _verify_complete_diagnostic_csv_rows(
         _fail("diagnostic CSV complete row count differs")
     for row_index, (actual, expected) in enumerate(zip(actual_rows, expected_rows)):
         for header in headers:
+            if header == "empirical_centroid" and expected.get("record_type") == "centroid":
+                centroid = expected.get("empirical_centroid")
+                vector = None if centroid is None else [
+                    float(value) for value in str(centroid).split(";")
+                ]
+                _compare_centroid_csv_cell(
+                    actual[header], vector,
+                    f"diagnostic CSV complete row {row_index} field {header}",
+                )
+                continue
             wanted = _csv_expected_cell(expected.get(header))
             if actual[header] != wanted:
                 _fail(

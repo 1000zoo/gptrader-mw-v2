@@ -65,6 +65,43 @@ def test_empirical_centroid_vector_rejects_material_numeric_mutation() -> None:
         )
 
 
+def test_empirical_centroid_csv_cell_rejects_material_numeric_mutation() -> None:
+    auditor = _load()
+
+    with pytest.raises(auditor.AuditError, match="does not numerically reconcile"):
+        auditor._compare_centroid_csv_cell(
+            "-0.53405414777614513;0.25000099999999997",
+            [-0.5340541477761452, 0.25],
+            "empirical centroid CSV",
+        )
+
+
+@pytest.mark.parametrize(
+    ("cell", "expected", "message"),
+    [
+        ("0.25000000000000000", [0.25], "not canonical"),
+        ("0.25;", [0.25], "vector shape"),
+        ("nan", [0.25], "not finite"),
+        ("", [0.25], "vector shape"),
+    ],
+)
+def test_empirical_centroid_csv_cell_rejects_noncanonical_or_invalid_tokens(
+    cell: str, expected: list[float], message: str,
+) -> None:
+    auditor = _load()
+
+    with pytest.raises(auditor.AuditError, match=message):
+        auditor._compare_centroid_csv_cell(cell, expected, "empirical centroid CSV")
+
+
+def test_empirical_centroid_csv_cell_preserves_null_contract() -> None:
+    auditor = _load()
+
+    auditor._compare_centroid_csv_cell("", None, "empirical centroid CSV")
+    with pytest.raises(auditor.AuditError, match="exactly reconcile"):
+        auditor._compare_centroid_csv_cell("0", None, "empirical centroid CSV")
+
+
 def test_canonical_json_rejects_nonfinite_and_noncanonical(tmp_path: Path) -> None:
     module = _load()
     path = tmp_path / "bad.json"
@@ -526,7 +563,13 @@ def _synthetic_end_to_end_fixture(tmp_path: Path, auditor=None):
                     centroid_rows.append({**common, "centroid_status": "insufficient_sample",
                                           "empirical_centroid": None, "distance": None})
                     continue
-                centroid = [sum(vectors[i].values[name] for i in members) / len(members) for name in names]
+                # Mirror the production empirical-mean order: dividing every
+                # binary64 value before ``fsum`` can differ by one ULP from an
+                # independent ``fsum(values) / count`` recomputation.
+                centroid = [
+                    math.fsum(vectors[i].values[name] / len(members) for i in members)
+                    for name in names
+                ]
                 squares = [(value - component_index * 10.0) ** 2 for value in centroid]
                 distance = math.sqrt(sum(squares))
                 centroid_rows.append({**common, "centroid_status": "computed",
