@@ -458,7 +458,7 @@ def _verify_receipts(payload: Mapping[str, object], source: object,
         _close(receipt.get("ood_threshold"), threshold, "sample OOD threshold")
         _exact(receipt.get("ood_exceeds"), squared > threshold, "strict OOD flag")
         _exact(receipt.get("assignment_source"),
-               "frozen_reproduced_assignments_and_ood_rows", "receipt provenance")
+               "existing_reproduced_assignments", "receipt provenance")
     _exact(half_counts, {"A": 820, "B": 821}, "half sample counts")
     return receipts, scaled
 

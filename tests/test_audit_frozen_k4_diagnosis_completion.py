@@ -13,6 +13,7 @@ from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
+from src.application.services.frozen_k4_diagnosis_completion import FixedSampleReceipt
 from src.domain.regime.three_day_chart_features import (
     THREE_DAY_CHART_FEATURE_REGISTRY_V1,
     THREE_DAY_CHART_FEATURE_SCHEMA_VERSION,
@@ -421,7 +422,7 @@ def _synthetic_end_to_end_fixture(tmp_path: Path, auditor=None):
             "primary_component_fingerprint": primary_fps[component],
             "squared_mahalanobis": squared, "ood_threshold": 1.0,
             "ood_exceeds": is_ood,
-            "assignment_source": "frozen_reproduced_assignments_and_ood_rows",
+            "assignment_source": "existing_reproduced_assignments",
         })
 
     registry_payload = {
@@ -684,6 +685,29 @@ def test_synthetic_1641_row_fixture_is_audited_end_to_end(
     assert receipt["status"] == "verified"
     assert receipt["component_0_ood"] == "24/409"
     assert receipt["checked_offsets"] == 10
+
+
+def test_full_audit_accepts_production_sample_receipt_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auditor, parent, child, source = _synthetic_end_to_end_fixture(tmp_path)
+    monkeypatch.setattr(auditor, "load_frozen_k4_diagnostic_source", lambda *_: source)
+    producer_receipt = FixedSampleReceipt(
+        0, "2021-01-01T00:00:00Z", "A", 0, "8" * 24,
+        0, "a" * 24, 0, "a" * 24, 0.5, 1.0, False,
+    )
+    name = "frozen_k4_diagnosis_completion.json"
+    payload = json.loads((child / name).read_bytes())
+    for receipt in payload["fixed_sample_receipts"]:
+        receipt["assignment_source"] = producer_receipt.assignment_source
+    (child / name).write_bytes(_document(payload))
+    _rehash_child_artifact(child, name)
+
+    receipt = auditor.audit_frozen_k4_diagnosis_completion(
+        parent_run=parent, completion_run=child, model_attempt=tmp_path / "model",
+        raw_kline_root=tmp_path / "raw")
+
+    assert receipt["status"] == "verified"
 
 
 @pytest.mark.parametrize("mutation", [
