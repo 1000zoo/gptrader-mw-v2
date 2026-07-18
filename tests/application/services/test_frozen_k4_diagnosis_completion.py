@@ -32,6 +32,7 @@ from src.application.services.frozen_k4_diagnosis_completion import (
     _meets_threshold,
     _global_offset_indices,
     _maximum_ood,
+    _primary_scaled_matrix,
     build_full_sample_empirical_reference,
     complete_frozen_k4_diagnosis,
     summarize_component_zero_ood,
@@ -422,6 +423,42 @@ def test_analysis_rejects_forged_registry_hash_feature_and_family_provenance() -
 
 
 EMPIRICAL_NAMES = NAMES[:6]
+
+
+def test_primary_scaled_matrix_projects_retained_features_from_canonical_registry_vector() -> None:
+    retained_names = tuple(
+        name
+        for name in NAMES
+        if name not in {"atr_ratio_1d", "atr_ratio_3d", "top_decile_volume_share_3d"}
+    )
+    fit = SimpleNamespace(
+        feature_names=retained_names,
+        lower_bounds=(-100.0,) * len(retained_names),
+        upper_bounds=(100.0,) * len(retained_names),
+        medians=(0.0,) * len(retained_names),
+        scales=(1.0,) * len(retained_names),
+    )
+    canonical_values = MappingProxyType(
+        {name: float(index) for index, name in enumerate(NAMES)}
+    )
+
+    scaled = _primary_scaled_matrix(
+        fit,
+        (SimpleNamespace(values=canonical_values),),
+    )
+
+    assert scaled.shape == (1, len(retained_names))
+    assert tuple(scaled[0]) == tuple(canonical_values[name] for name in retained_names)
+
+    missing_retained = MappingProxyType(
+        {name: value for name, value in canonical_values.items() if name != retained_names[0]}
+    )
+    with pytest.raises(ValueError, match="count/order"):
+        _primary_scaled_matrix(fit, (SimpleNamespace(values=missing_retained),))
+
+    reversed_registry = MappingProxyType(dict(reversed(tuple(canonical_values.items()))))
+    with pytest.raises(ValueError, match="count/order"):
+        _primary_scaled_matrix(fit, (SimpleNamespace(values=reversed_registry),))
 
 
 def _empirical_vector(index: int, scaled: tuple[float, ...]) -> SimpleNamespace:

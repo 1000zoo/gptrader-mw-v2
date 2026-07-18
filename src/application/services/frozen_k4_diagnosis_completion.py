@@ -621,7 +621,8 @@ def _primary_scaled_matrix(primary_fit: object, vectors: tuple[object, ...]) -> 
     matrix: list[list[float]] = []
     for vector in vectors:
         values = getattr(vector, "values", None)
-        if values is None or tuple(values) != feature_names:
+        vector_names = tuple(values) if values is not None else ()
+        if vector_names not in (feature_names, registry_names):
             raise ValueError("feature vector count/order does not match primary features")
         row = []
         for name in feature_names:
