@@ -1,0 +1,175 @@
+{
+  "candidate_count": 1,
+  "fold_count": 2,
+  "folds": [
+    {
+      "fold": 1,
+      "results": [
+        {
+          "average_net_trade_roe": "0.003101881945388992101273969773",
+          "candidate": {
+            "candidate_id": "mf-compression-only-wide",
+            "candle_limit": 1442,
+            "equity_ratio": "0.080",
+            "guard": {
+              "max_1m_range_ratio": "0.0120",
+              "max_consecutive_losses": 4,
+              "max_daily_loss_ratio": "0.020",
+              "max_daily_trades": 20,
+              "max_peak_drawdown_ratio": "0.12",
+              "min_1m_range_ratio": "0.0001",
+              "min_minutes_between_entries": 5,
+              "min_signal_confidence": "0.60",
+              "pause_minutes_after_loss": 10
+            },
+            "leverage": "5",
+            "stop_loss_ratio": "0.0300",
+            "strategies": [
+              {
+                "kind": "compression",
+                "params": {
+                  "breakout_buffer": "0.0006",
+                  "compression_period": 45,
+                  "compression_ratio": "0.45",
+                  "direction_filter_period": 1440,
+                  "lookback": 180,
+                  "min_filter_return": "0.002",
+                  "min_volume_ratio": "1.00"
+                }
+              }
+            ],
+            "take_profit_ratio": "0.0195"
+          },
+          "candidate_id": "mf-compression-only-wide",
+          "cost_model": {
+            "fee_rate_per_side": "0.0004",
+            "funding_fee": "excluded",
+            "slippage_rate_per_side": "0.0002",
+            "venue": "binance_usd_m_futures"
+          },
+          "daily_return_ratio": "0.0004618021934884415945429245639",
+          "end_at": "2021-02-01T00:00:00+00:00",
+          "engine": "scheduler_driven",
+          "fee_paid": "234.4700864615411880487666534",
+          "fold": 1,
+          "gross_pnl": "377.6287664429580823570732685",
+          "max_drawdown_ratio": "0.06615008620028153255364767183",
+          "net_pnl": "143.1586799814168943083066148",
+          "net_win_rate": "0.6428571428571428571428571429",
+          "return_ratio": "0.01431586799814168943083066148",
+          "scheduler_path": "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute",
+          "signal_count": 33857,
+          "skipped_by_guard": 1312,
+          "start_at": "2021-01-01T00:00:00+00:00",
+          "symbol": "ETHUSDT",
+          "test_end_at": "2021-02-01T00:00:00+00:00",
+          "test_start_at": "2021-01-01T00:00:00+00:00",
+          "trade_count": 70,
+          "trades_per_day": "2.258064516129032258064516129",
+          "train_end_at": "2021-01-01T00:00:00+00:00",
+          "train_start_at": "2020-07-01T00:00:00+00:00"
+        }
+      ],
+      "test_period": {
+        "end_at": "2021-02-01T00:00:00+00:00",
+        "start_at": "2021-01-01T00:00:00+00:00"
+      },
+      "train_period": {
+        "end_at": "2021-01-01T00:00:00+00:00",
+        "start_at": "2020-07-01T00:00:00+00:00"
+      }
+    },
+    {
+      "fold": 2,
+      "results": [
+        {
+          "average_net_trade_roe": "0.007255254003182926084763851896",
+          "candidate": {
+            "candidate_id": "mf-compression-only-wide",
+            "candle_limit": 1442,
+            "equity_ratio": "0.080",
+            "guard": {
+              "max_1m_range_ratio": "0.0120",
+              "max_consecutive_losses": 4,
+              "max_daily_loss_ratio": "0.020",
+              "max_daily_trades": 20,
+              "max_peak_drawdown_ratio": "0.12",
+              "min_1m_range_ratio": "0.0001",
+              "min_minutes_between_entries": 5,
+              "min_signal_confidence": "0.60",
+              "pause_minutes_after_loss": 10
+            },
+            "leverage": "5",
+            "stop_loss_ratio": "0.0300",
+            "strategies": [
+              {
+                "kind": "compression",
+                "params": {
+                  "breakout_buffer": "0.0006",
+                  "compression_period": 45,
+                  "compression_ratio": "0.45",
+                  "direction_filter_period": 1440,
+                  "lookback": 180,
+                  "min_filter_return": "0.002",
+                  "min_volume_ratio": "1.00"
+                }
+              }
+            ],
+            "take_profit_ratio": "0.0195"
+          },
+          "candidate_id": "mf-compression-only-wide",
+          "cost_model": {
+            "fee_rate_per_side": "0.0004",
+            "funding_fee": "excluded",
+            "slippage_rate_per_side": "0.0002",
+            "venue": "binance_usd_m_futures"
+          },
+          "daily_return_ratio": "0.0009109541080155729735649380289",
+          "end_at": "2021-03-01T00:00:00+00:00",
+          "engine": "scheduler_driven",
+          "fee_paid": "152.7249677444881223326828420",
+          "fold": 2,
+          "gross_pnl": "407.7921179888485549308654900",
+          "max_drawdown_ratio": "0.05627310033215210844696075093",
+          "net_pnl": "255.0671502443604325981826481",
+          "net_win_rate": "0.6595744680851063829787234043",
+          "return_ratio": "0.02550671502443604325981826481",
+          "scheduler_path": "TradeScheduler.run_trade_execution -> ExecuteTradeUseCase.execute",
+          "signal_count": 27897,
+          "skipped_by_guard": 144,
+          "start_at": "2021-02-01T00:00:00+00:00",
+          "symbol": "ETHUSDT",
+          "test_end_at": "2021-03-01T00:00:00+00:00",
+          "test_start_at": "2021-02-01T00:00:00+00:00",
+          "trade_count": 47,
+          "trades_per_day": "1.678571428571428571428571429",
+          "train_end_at": "2021-02-01T00:00:00+00:00",
+          "train_start_at": "2020-08-01T00:00:00+00:00"
+        }
+      ],
+      "test_period": {
+        "end_at": "2021-03-01T00:00:00+00:00",
+        "start_at": "2021-02-01T00:00:00+00:00"
+      },
+      "train_period": {
+        "end_at": "2021-02-01T00:00:00+00:00",
+        "start_at": "2020-08-01T00:00:00+00:00"
+      }
+    }
+  ],
+  "mode": "walk_forward",
+  "results": [
+    {
+      "average_daily_return_ratio": "0.0006863781507520072840539312965",
+      "average_net_trade_roe": "0.005178567974285959093018910835",
+      "average_net_win_rate": "0.6512158054711246200607902735",
+      "average_return_ratio": "0.01991129151128886634532446314",
+      "average_trades_per_day": "1.968317972350230414746543779",
+      "candidate_id": "mf-compression-only-wide",
+      "fold_count": 2,
+      "positive_fold_count": 2,
+      "total_trade_count": 117,
+      "worst_max_drawdown_ratio": "0.06615008620028153255364767183"
+    }
+  ]
+}

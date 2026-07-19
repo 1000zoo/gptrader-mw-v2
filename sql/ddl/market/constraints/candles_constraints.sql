@@ -1,0 +1,1 @@
+-- Constraints are defined inline in sql/ddl/market/tables/candles.sql.

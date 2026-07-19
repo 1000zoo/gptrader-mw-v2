@@ -1,0 +1,1523 @@
+{
+  "cost_model": {
+    "fee_model": "taker_fee_entry_and_exit",
+    "fee_rate_per_side": 0.0004,
+    "funding_fee": "excluded",
+    "slippage_model": "adverse_fill_entry_and_exit",
+    "slippage_rate_per_side": 0.0002,
+    "venue": "binance_usd_m_futures"
+  },
+  "finalists": [
+    {
+      "candidate": {
+        "candidate_id": "fixed-liq-sl0_0100-tp0_0120",
+        "exit_kind": "fixed",
+        "exit_params": {
+          "sl": 0.01,
+          "tp": 0.012
+        },
+        "filters": {
+          "min_volume_ratio": 0.8
+        },
+        "test_average_gross_trade_roe": 0.003479320199028446,
+        "test_average_holding_minutes": 355.9669421487603,
+        "test_average_net_trade_return": -0.0002277433883176899,
+        "test_average_net_trade_roe": -0.0013846798009715545,
+        "test_exit_reasons": {
+          "end_of_data": 1,
+          "stop_loss": 123,
+          "take_profit": 118
+        },
+        "test_fee_paid": 1036.68334978357,
+        "test_gross_pnl": 705.659853939063,
+        "test_gross_win_rate": 0.49173553719008267,
+        "test_max_drawdown_ratio": 0.09099143672927,
+        "test_net_pnl": -331.02349584450616,
+        "test_net_win_rate": 0.48760330578512395,
+        "test_return_ratio": -0.033102349584450165,
+        "test_trade_count": 242,
+        "test_trades_per_day": 3.9672131147540983,
+        "train_average_gross_trade_roe": 0.00023459644669873917,
+        "train_average_holding_minutes": 272.136460554371,
+        "train_average_net_trade_return": -0.00076141505810876,
+        "train_average_net_trade_roe": -0.004629403553301261,
+        "train_exit_reasons": {
+          "end_of_data": 1,
+          "stop_loss": 501,
+          "take_profit": 436
+        },
+        "train_fee_paid": 3384.758407951722,
+        "train_gross_pnl": 98.94573295533583,
+        "train_gross_win_rate": 0.46588486140724944,
+        "train_max_drawdown_ratio": 0.32885169027615485,
+        "train_net_pnl": -3285.812674996383,
+        "train_net_win_rate": 0.46588486140724944,
+        "train_return_ratio": -0.32858126749963784,
+        "train_trade_count": 938,
+        "train_trades_per_day": 5.18232044198895
+      },
+      "period_results": [
+        {
+          "metrics": {
+            "average_gross_trade_roe": 0.0006934256751768906,
+            "average_holding_minutes": 67.32917570498915,
+            "average_net_trade_return": -0.0006859497244774851,
+            "average_net_trade_roe": -0.00417057432482311,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 979,
+              "take_profit": 864
+            },
+            "fee_paid": 5620.045111932532,
+            "gross_pnl": 542.8972389932887,
+            "gross_win_rate": 0.4690889370932755,
+            "max_drawdown_ratio": 0.5887756510975337,
+            "net_pnl": -5077.147872939254,
+            "net_win_rate": 0.4690889370932755,
+            "return_ratio": -0.5077147872939246,
+            "trade_count": 1844,
+            "trades_per_day": 20.043478260869566
+          },
+          "period": "btc-recheck-2020-11-01_2021-01-31",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0007611840450400276,
+            "average_holding_minutes": 74.98922800718132,
+            "average_net_trade_return": -0.0009251947442500047,
+            "average_net_trade_roe": -0.005625184045040028,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 1207,
+              "take_profit": 1020
+            },
+            "fee_paid": 5597.549187819767,
+            "gross_pnl": -1209.0027469304853,
+            "gross_win_rate": 0.4578096947935368,
+            "max_drawdown_ratio": 0.6872671259051824,
+            "net_pnl": -6806.551934750254,
+            "net_win_rate": 0.4578096947935368,
+            "return_ratio": -0.6806551934750249,
+            "trade_count": 2228,
+            "trades_per_day": 18.11382113821138
+          },
+          "period": "btc-recheck-2021-03-10_2021-07-10",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0012056088321981625,
+            "average_holding_minutes": 89.1390937829294,
+            "average_net_trade_return": -0.000998290926348382,
+            "average_net_trade_roe": -0.006069608832198163,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 517,
+              "take_profit": 431
+            },
+            "fee_paid": 3197.1810418210107,
+            "gross_pnl": -877.2616128713166,
+            "gross_win_rate": 0.4541622760800843,
+            "max_drawdown_ratio": 0.413757800822092,
+            "net_pnl": -4074.442654692326,
+            "net_win_rate": 0.4541622760800843,
+            "return_ratio": -0.40744426546923235,
+            "trade_count": 949,
+            "trades_per_day": 15.306451612903226
+          },
+          "period": "btc-recheck-2022-04-25_2022-06-25",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": 0.001004573834774268,
+            "average_holding_minutes": 478.3879781420765,
+            "average_net_trade_return": -0.0006347740403331797,
+            "average_net_trade_roe": -0.003859426165225733,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 96,
+              "take_profit": 86
+            },
+            "fee_paid": 750.6873209965786,
+            "gross_pnl": 118.4546230548189,
+            "gross_win_rate": 0.46994535519125685,
+            "max_drawdown_ratio": 0.10800893840443002,
+            "net_pnl": -632.23269794176,
+            "net_win_rate": 0.46994535519125685,
+            "return_ratio": -0.06322326979417667,
+            "trade_count": 183,
+            "trades_per_day": 2.9516129032258065
+          },
+          "period": "btc-recheck-2022-12-01_2023-01-31",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.004503848020437449,
+            "average_holding_minutes": 499.58522727272725,
+            "average_net_trade_return": -0.001540764477045633,
+            "average_net_trade_roe": -0.00936784802043745,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 100,
+              "take_profit": 75
+            },
+            "fee_paid": 695.6680377156775,
+            "gross_pnl": -681.0870055542752,
+            "gross_win_rate": 0.4318181818181818,
+            "max_drawdown_ratio": 0.13946481538717545,
+            "net_pnl": -1376.7550432699513,
+            "net_win_rate": 0.4318181818181818,
+            "return_ratio": -0.13767550432699555,
+            "trade_count": 176,
+            "trades_per_day": 2.838709677419355
+          },
+          "period": "btc-recheck-2023-09-01_2023-11-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.007974325901892062,
+            "average_holding_minutes": 131.29850746268656,
+            "average_net_trade_return": -0.0021115667601796155,
+            "average_net_trade_roe": -0.012838325901892062,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 199,
+              "take_profit": 135
+            },
+            "fee_paid": 1197.1640926761188,
+            "gross_pnl": -1993.3263186286163,
+            "gross_win_rate": 0.40298507462686567,
+            "max_drawdown_ratio": 0.31904904113047305,
+            "net_pnl": -3190.4904113047364,
+            "net_win_rate": 0.40298507462686567,
+            "return_ratio": -0.31904904113047305,
+            "trade_count": 335,
+            "trades_per_day": 10.46875
+          },
+          "period": "btc-recheck-2024-03-01_2024-04-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0001948475895241245,
+            "average_holding_minutes": 191.6870897155361,
+            "average_net_trade_return": -0.0008320473009085732,
+            "average_net_trade_roe": -0.005058847589524125,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 245,
+              "take_profit": 211
+            },
+            "fee_paid": 1744.7021914979055,
+            "gross_pnl": -160.40948316359228,
+            "gross_win_rate": 0.4617067833698031,
+            "max_drawdown_ratio": 0.25388091396066204,
+            "net_pnl": -1905.1116746614978,
+            "net_win_rate": 0.4617067833698031,
+            "return_ratio": -0.19051116746614824,
+            "trade_count": 457,
+            "trades_per_day": 7.253968253968254
+          },
+          "period": "btc-recheck-2024-07-01_2024-09-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": 0.004364140292329455,
+            "average_holding_minutes": 234.0891364902507,
+            "average_net_trade_return": -8.221376770897138e-05,
+            "average_net_trade_roe": -0.0004998597076705463,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 180,
+              "take_profit": 178
+            },
+            "fee_paid": 1458.1523209379147,
+            "gross_pnl": 1240.5510288848081,
+            "gross_win_rate": 0.4958217270194986,
+            "max_drawdown_ratio": 0.11876212346617136,
+            "net_pnl": -217.60129205310443,
+            "net_win_rate": 0.4958217270194986,
+            "return_ratio": -0.021760129205311386,
+            "trade_count": 359,
+            "trades_per_day": 5.983333333333333
+          },
+          "period": "btc-recheck-2025-01-01_2025-03-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0006567322132791852,
+            "average_holding_minutes": 675.6769230769231,
+            "average_net_trade_return": -0.0009080151666577606,
+            "average_net_trade_roe": -0.005520732213279185,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 70,
+              "take_profit": 59
+            },
+            "fee_paid": 536.9798826530015,
+            "gross_pnl": -96.02987644193176,
+            "gross_win_rate": 0.46153846153846156,
+            "max_drawdown_ratio": 0.07551438586220284,
+            "net_pnl": -633.0097590949333,
+            "net_win_rate": 0.46153846153846156,
+            "return_ratio": -0.06330097590949263,
+            "trade_count": 130,
+            "trades_per_day": 2.096774193548387
+          },
+          "period": "btc-recheck-2025-06-01_2025-08-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.006814873121527584,
+            "average_holding_minutes": 267.2107023411371,
+            "average_net_trade_return": -0.0019208672897249315,
+            "average_net_trade_roe": -0.011678873121527584,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 175,
+              "take_profit": 123
+            },
+            "fee_paid": 1066.2227558446161,
+            "gross_pnl": -1617.3293246883125,
+            "gross_win_rate": 0.411371237458194,
+            "max_drawdown_ratio": 0.27590930762241944,
+            "net_pnl": -2683.5520805329306,
+            "net_win_rate": 0.411371237458194,
+            "return_ratio": -0.2683552080532919,
+            "trade_count": 299,
+            "trades_per_day": 5.245614035087719
+          },
+          "period": "btc-recheck-2025-10-06_2025-12-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        }
+      ]
+    },
+    {
+      "candidate": {
+        "candidate_id": "partial_trailing-nofilter-first_tp0_0100-partial_ratio0_7000-sl0_0080-trail0_0040",
+        "exit_kind": "partial_trailing",
+        "exit_params": {
+          "first_tp": 0.01,
+          "partial_ratio": 0.7,
+          "sl": 0.008,
+          "trail": 0.004
+        },
+        "filters": {},
+        "test_average_gross_trade_roe": 0.003965595269826519,
+        "test_average_holding_minutes": 252.19883040935673,
+        "test_average_net_trade_return": -0.00014776393588379613,
+        "test_average_net_trade_roe": -0.0008984047301734803,
+        "test_exit_reasons": {
+          "end_of_data": 1,
+          "partial_trailing_exit": 168,
+          "stop_loss": 173
+        },
+        "test_fee_paid": 1471.1556508606332,
+        "test_gross_pnl": 1165.6902285618407,
+        "test_gross_win_rate": 0.49122807017543857,
+        "test_max_drawdown_ratio": 0.11125006785012057,
+        "test_net_pnl": -305.4654222987929,
+        "test_net_win_rate": 0.49122807017543857,
+        "test_return_ratio": -0.03054654222987774,
+        "test_trade_count": 342,
+        "test_trades_per_day": 5.60655737704918,
+        "train_average_gross_trade_roe": -0.0011347833799246327,
+        "train_average_holding_minutes": 192.20645645645646,
+        "train_average_net_trade_return": -0.0009866420032770779,
+        "train_average_net_trade_roe": -0.005998783379924633,
+        "train_exit_reasons": {
+          "end_of_data": 1,
+          "partial_trailing_exit": 597,
+          "stop_loss": 734
+        },
+        "train_fee_paid": 4042.173982176564,
+        "train_gross_pnl": -1082.8419797812912,
+        "train_gross_win_rate": 0.44819819819819817,
+        "train_max_drawdown_ratio": 0.5240516840510975,
+        "train_net_pnl": -5125.015961957855,
+        "train_net_win_rate": 0.44819819819819817,
+        "train_return_ratio": -0.5125015961957868,
+        "train_trade_count": 1332,
+        "train_trades_per_day": 7.359116022099448
+      },
+      "period_results": [
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0005294963229141888,
+            "average_holding_minutes": 48.925262748151034,
+            "average_net_trade_return": -0.0008870882110056232,
+            "average_net_trade_roe": -0.005393496322914189,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "partial_trailing_exit": 1159,
+              "stop_loss": 1409
+            },
+            "fee_paid": 5940.9027142917985,
+            "gross_pnl": -1191.4800634229468,
+            "gross_win_rate": 0.45231607629427795,
+            "max_drawdown_ratio": 0.7170893537426632,
+            "net_pnl": -7132.382777714768,
+            "net_win_rate": 0.45231607629427795,
+            "return_ratio": -0.7132382777714742,
+            "trade_count": 2569,
+            "trades_per_day": 27.92391304347826
+          },
+          "period": "btc-recheck-2020-11-01_2021-01-31",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.002220143445364816,
+            "average_holding_minutes": 52.770650813516895,
+            "average_net_trade_return": -0.0011651551719350029,
+            "average_net_trade_roe": -0.007084143445364816,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "partial_trailing_exit": 1386,
+              "stop_loss": 1809
+            },
+            "fee_paid": 5552.167216227771,
+            "gross_pnl": -3134.10800889422,
+            "gross_win_rate": 0.4358573216520651,
+            "max_drawdown_ratio": 0.8691802298762108,
+            "net_pnl": -8686.275225122012,
+            "net_win_rate": 0.4358573216520651,
+            "return_ratio": -0.868627522512201,
+            "trade_count": 3196,
+            "trades_per_day": 25.983739837398375
+          },
+          "period": "btc-recheck-2021-03-10_2021-07-10",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.001325803529347396,
+            "average_holding_minutes": 62.87279411764706,
+            "average_net_trade_return": -0.001018059791011085,
+            "average_net_trade_roe": -0.006189803529347396,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "partial_trailing_exit": 602,
+              "stop_loss": 757
+            },
+            "fee_paid": 4122.211113876863,
+            "gross_pnl": -1185.5141185308262,
+            "gross_win_rate": 0.44338235294117645,
+            "max_drawdown_ratio": 0.5499780142782631,
+            "net_pnl": -5307.7252324076935,
+            "net_win_rate": 0.44338235294117645,
+            "return_ratio": -0.5307725232407715,
+            "trade_count": 1360,
+            "trades_per_day": 21.93548387096774
+          },
+          "period": "btc-recheck-2022-04-25_2022-06-25",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0012131356622615296,
+            "average_holding_minutes": 354.7741935483871,
+            "average_net_trade_return": -0.0009995288918193306,
+            "average_net_trade_roe": -0.0060771356622615295,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "partial_trailing_exit": 109,
+              "stop_loss": 138
+            },
+            "fee_paid": 991.4331657192106,
+            "gross_pnl": -276.39530412382385,
+            "gross_win_rate": 0.43951612903225806,
+            "max_drawdown_ratio": 0.15831407553868693,
+            "net_pnl": -1267.8284698430357,
+            "net_win_rate": 0.43951612903225806,
+            "return_ratio": -0.12678284698430306,
+            "trade_count": 248,
+            "trades_per_day": 4.0
+          },
+          "period": "btc-recheck-2022-12-01_2023-01-31",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0023019518200417233,
+            "average_holding_minutes": 341.8488372093023,
+            "average_net_trade_return": -0.0011786104967173886,
+            "average_net_trade_roe": -0.007165951820041723,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "partial_trailing_exit": 110,
+              "stop_loss": 147
+            },
+            "fee_paid": 1043.4341927129706,
+            "gross_pnl": -484.0263923345238,
+            "gross_win_rate": 0.43410852713178294,
+            "max_drawdown_ratio": 0.1616453471992331,
+            "net_pnl": -1527.460585047496,
+            "net_win_rate": 0.43410852713178294,
+            "return_ratio": -0.15274605850475,
+            "trade_count": 258,
+            "trades_per_day": 4.161290322580645
+          },
+          "period": "btc-recheck-2023-09-01_2023-11-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0025243719858410512,
+            "average_holding_minutes": 102.28899082568807,
+            "average_net_trade_return": -0.0012151927608291203,
+            "average_net_trade_roe": -0.0073883719858410515,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "partial_trailing_exit": 187,
+              "stop_loss": 248
+            },
+            "fee_paid": 1630.996123706602,
+            "gross_pnl": -875.6402702131296,
+            "gross_win_rate": 0.4334862385321101,
+            "max_drawdown_ratio": 0.25141952708062465,
+            "net_pnl": -2506.6363939197313,
+            "net_win_rate": 0.4334862385321101,
+            "return_ratio": -0.250663639391975,
+            "trade_count": 436,
+            "trades_per_day": 13.625
+          },
+          "period": "btc-recheck-2024-03-01_2024-04-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": 0.001301896338223539,
+            "average_holding_minutes": 140.4063492063492,
+            "average_net_trade_return": -0.0005858723127921811,
+            "average_net_trade_roe": -0.003562103661776462,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "partial_trailing_exit": 294,
+              "stop_loss": 335
+            },
+            "fee_paid": 2458.6049717871992,
+            "gross_pnl": 606.5301320815739,
+            "gross_win_rate": 0.46825396825396826,
+            "max_drawdown_ratio": 0.19335851717267558,
+            "net_pnl": -1852.0748397056266,
+            "net_win_rate": 0.46825396825396826,
+            "return_ratio": -0.18520748397056458,
+            "trade_count": 630,
+            "trades_per_day": 10.0
+          },
+          "period": "btc-recheck-2024-07-01_2024-09-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -7.173737600887011e-05,
+            "average_holding_minutes": 160.89904761904762,
+            "average_net_trade_return": -0.0008117989105277749,
+            "average_net_trade_roe": -0.004935737376008871,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "partial_trailing_exit": 241,
+              "stop_loss": 283
+            },
+            "fee_paid": 2013.1969621061985,
+            "gross_pnl": -73.32802745948503,
+            "gross_win_rate": 0.46095238095238095,
+            "max_drawdown_ratio": 0.2463630577621802,
+            "net_pnl": -2086.5249895656834,
+            "net_win_rate": 0.46095238095238095,
+            "return_ratio": -0.20865249895656762,
+            "trade_count": 525,
+            "trades_per_day": 8.75
+          },
+          "period": "btc-recheck-2025-01-01_2025-03-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.005910329195139163,
+            "average_holding_minutes": 462.67894736842106,
+            "average_net_trade_return": -0.001772093617621573,
+            "average_net_trade_roe": -0.010774329195139164,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "partial_trailing_exit": 76,
+              "stop_loss": 113
+            },
+            "fee_paid": 747.438010049348,
+            "gross_pnl": -919.3514841856801,
+            "gross_win_rate": 0.4052631578947368,
+            "max_drawdown_ratio": 0.17995623915541217,
+            "net_pnl": -1666.7894942350272,
+            "net_win_rate": 0.4052631578947368,
+            "return_ratio": -0.1666789494235036,
+            "trade_count": 190,
+            "trades_per_day": 3.064516129032258
+          },
+          "period": "btc-recheck-2025-06-01_2025-08-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0015492214959619225,
+            "average_holding_minutes": 185.7690531177829,
+            "average_net_trade_return": -0.0010548061670990006,
+            "average_net_trade_roe": -0.006413221495961924,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "partial_trailing_exit": 190,
+              "stop_loss": 242
+            },
+            "fee_paid": 1625.293465200328,
+            "gross_pnl": -582.184924839882,
+            "gross_win_rate": 0.44110854503464203,
+            "max_drawdown_ratio": 0.24504578593900797,
+            "net_pnl": -2207.478390040212,
+            "net_win_rate": 0.44110854503464203,
+            "return_ratio": -0.22074783900402162,
+            "trade_count": 433,
+            "trades_per_day": 7.5964912280701755
+          },
+          "period": "btc-recheck-2025-10-06_2025-12-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        }
+      ]
+    },
+    {
+      "candidate": {
+        "candidate_id": "trailing-liq-activation0_0100-sl0_0080-trail0_0020",
+        "exit_kind": "trailing",
+        "exit_params": {
+          "activation": 0.01,
+          "sl": 0.008,
+          "trail": 0.002
+        },
+        "filters": {
+          "min_volume_ratio": 0.8
+        },
+        "test_average_gross_trade_roe": 0.0031441849916812956,
+        "test_average_holding_minutes": 249.1169590643275,
+        "test_average_net_trade_return": -0.0002828643105787344,
+        "test_average_net_trade_roe": -0.0017198150083187044,
+        "test_exit_reasons": {
+          "end_of_data": 1,
+          "stop_loss": 176,
+          "trailing_take_profit": 165
+        },
+        "test_fee_paid": 1478.2966880249319,
+        "test_gross_pnl": 935.283627148585,
+        "test_gross_win_rate": 0.4853801169590643,
+        "test_max_drawdown_ratio": 0.11731146922383269,
+        "test_net_pnl": -543.013060876347,
+        "test_net_win_rate": 0.4853801169590643,
+        "test_return_ratio": -0.05430130608763375,
+        "test_trade_count": 342,
+        "test_trades_per_day": 5.60655737704918,
+        "train_average_gross_trade_roe": -0.0009695570922916279,
+        "train_average_holding_minutes": 186.69378698224853,
+        "train_average_net_trade_return": -0.0009594666270216493,
+        "train_average_net_trade_roe": -0.005833557092291628,
+        "train_exit_reasons": {
+          "end_of_data": 1,
+          "stop_loss": 751,
+          "trailing_take_profit": 600
+        },
+        "train_fee_paid": 4240.267060284883,
+        "train_gross_pnl": -844.4880684269306,
+        "train_gross_win_rate": 0.44452662721893493,
+        "train_max_drawdown_ratio": 0.5332920753664515,
+        "train_net_pnl": -5084.755128711816,
+        "train_net_win_rate": 0.44452662721893493,
+        "train_return_ratio": -0.508475512871184,
+        "train_trade_count": 1352,
+        "train_trades_per_day": 7.469613259668508
+      },
+      "period_results": [
+        {
+          "metrics": {
+            "average_gross_trade_roe": 0.0013133973126662956,
+            "average_holding_minutes": 49.083947583947584,
+            "average_net_trade_return": -0.0005839807051535698,
+            "average_net_trade_roe": -0.0035506026873337046,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 1352,
+              "trailing_take_profit": 1089
+            },
+            "fee_paid": 6186.337785400013,
+            "gross_pnl": 699.2797280501355,
+            "gross_win_rate": 0.44635544635544633,
+            "max_drawdown_ratio": 0.6072788389809185,
+            "net_pnl": -5487.058057349876,
+            "net_win_rate": 0.44635544635544633,
+            "return_ratio": -0.5487058057349878,
+            "trade_count": 2442,
+            "trades_per_day": 26.543478260869566
+          },
+          "period": "btc-recheck-2020-11-01_2021-01-31",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": 0.0005903030483976736,
+            "average_holding_minutes": 53.48976897689769,
+            "average_net_trade_return": -0.00070291068282933,
+            "average_net_trade_roe": -0.004273696951602326,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 1710,
+              "trailing_take_profit": 1319
+            },
+            "fee_paid": 6605.658183044457,
+            "gross_pnl": -326.1067792100566,
+            "gross_win_rate": 0.43531353135313533,
+            "max_drawdown_ratio": 0.69317649622545,
+            "net_pnl": -6931.764962254487,
+            "net_win_rate": 0.43531353135313533,
+            "return_ratio": -0.69317649622545,
+            "trade_count": 3030,
+            "trades_per_day": 24.634146341463413
+          },
+          "period": "btc-recheck-2021-03-10_2021-07-10",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": 0.0017029435286037569,
+            "average_holding_minutes": 63.67438271604938,
+            "average_net_trade_return": -0.0005199106038480663,
+            "average_net_trade_roe": -0.0031610564713962434,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 722,
+              "trailing_take_profit": 573
+            },
+            "fee_paid": 4619.316537448943,
+            "gross_pnl": 1468.290383707985,
+            "gross_win_rate": 0.44212962962962965,
+            "max_drawdown_ratio": 0.4009921571722218,
+            "net_pnl": -3151.026153740963,
+            "net_win_rate": 0.44212962962962965,
+            "return_ratio": -0.31510261537410095,
+            "trade_count": 1296,
+            "trades_per_day": 20.903225806451612
+          },
+          "period": "btc-recheck-2022-04-25_2022-06-25",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": 0.005986372981518195,
+            "average_holding_minutes": 359.1358024691358,
+            "average_net_trade_return": 0.0001846008193286504,
+            "average_net_trade_roe": 0.0011223729815181946,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 129,
+              "trailing_take_profit": 113
+            },
+            "fee_paid": 1041.5396517819795,
+            "gross_pnl": 1246.705109144796,
+            "gross_win_rate": 0.46502057613168724,
+            "max_drawdown_ratio": 0.06487056301066704,
+            "net_pnl": 205.16545736281705,
+            "net_win_rate": 0.46502057613168724,
+            "return_ratio": 0.020516545736280933,
+            "trade_count": 243,
+            "trades_per_day": 3.9193548387096775
+          },
+          "period": "btc-recheck-2022-12-01_2023-01-31",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.001994234663476963,
+            "average_holding_minutes": 329.4962121212121,
+            "average_net_trade_return": -0.0011279991222823953,
+            "average_net_trade_roe": -0.006858234663476963,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 157,
+              "trailing_take_profit": 106
+            },
+            "fee_paid": 1076.6371298645847,
+            "gross_pnl": -431.08541865645935,
+            "gross_win_rate": 0.4053030303030303,
+            "max_drawdown_ratio": 0.16233504142045185,
+            "net_pnl": -1507.7225485210436,
+            "net_win_rate": 0.4053030303030303,
+            "return_ratio": -0.15077225485210438,
+            "trade_count": 264,
+            "trades_per_day": 4.258064516129032
+          },
+          "period": "btc-recheck-2023-09-01_2023-11-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0069891417781611795,
+            "average_holding_minutes": 97.13169642857143,
+            "average_net_trade_return": -0.0019495298977238783,
+            "average_net_trade_roe": -0.01185314177816118,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 275,
+              "trailing_take_profit": 172
+            },
+            "fee_paid": 1584.3422063151907,
+            "gross_pnl": -2183.5375236216714,
+            "gross_win_rate": 0.38392857142857145,
+            "max_drawdown_ratio": 0.376787972993686,
+            "net_pnl": -3767.8797299368675,
+            "net_win_rate": 0.38392857142857145,
+            "return_ratio": -0.376787972993686,
+            "trade_count": 448,
+            "trades_per_day": 14.0
+          },
+          "period": "btc-recheck-2024-03-01_2024-04-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0005485854970663001,
+            "average_holding_minutes": 136.3349131121643,
+            "average_net_trade_return": -0.0008902278778069573,
+            "average_net_trade_roe": -0.005412585497066301,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 352,
+              "trailing_take_profit": 280
+            },
+            "fee_paid": 2424.703991416062,
+            "gross_pnl": -235.4179301490768,
+            "gross_win_rate": 0.4439178515007899,
+            "max_drawdown_ratio": 0.2795979951866348,
+            "net_pnl": -2660.12192156514,
+            "net_win_rate": 0.4439178515007899,
+            "return_ratio": -0.2660121921565147,
+            "trade_count": 633,
+            "trades_per_day": 10.047619047619047
+          },
+          "period": "btc-recheck-2024-07-01_2024-09-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0025115030744375633,
+            "average_holding_minutes": 162.15490196078431,
+            "average_net_trade_return": -0.00121307616355881,
+            "average_net_trade_roe": -0.007375503074437564,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 291,
+              "trailing_take_profit": 218
+            },
+            "fee_paid": 1788.1179610326462,
+            "gross_pnl": -1074.3012403639186,
+            "gross_win_rate": 0.42745098039215684,
+            "max_drawdown_ratio": 0.31271116818292705,
+            "net_pnl": -2862.419201396564,
+            "net_win_rate": 0.42745098039215684,
+            "return_ratio": -0.2862419201396574,
+            "trade_count": 510,
+            "trades_per_day": 8.5
+          },
+          "period": "btc-recheck-2025-01-01_2025-03-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.002167060121844201,
+            "average_holding_minutes": 453.140625,
+            "average_net_trade_return": -0.0011564243621454277,
+            "average_net_trade_roe": -0.007031060121844201,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 108,
+              "trailing_take_profit": 83
+            },
+            "fee_paid": 771.1847106704374,
+            "gross_pnl": -369.0819750058369,
+            "gross_win_rate": 0.4375,
+            "max_drawdown_ratio": 0.11543799118022889,
+            "net_pnl": -1140.2666856762737,
+            "net_win_rate": 0.4375,
+            "return_ratio": -0.11402666856762662,
+            "trade_count": 192,
+            "trades_per_day": 3.096774193548387
+          },
+          "period": "btc-recheck-2025-06-01_2025-08-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0005774530262647744,
+            "average_holding_minutes": 182.6743648960739,
+            "average_net_trade_return": -0.0008949758266882854,
+            "average_net_trade_roe": -0.005441453026264775,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 241,
+              "trailing_take_profit": 191
+            },
+            "fee_paid": 1745.5336727245867,
+            "gross_pnl": -172.54537460471494,
+            "gross_win_rate": 0.44110854503464203,
+            "max_drawdown_ratio": 0.21869866110910002,
+            "net_pnl": -1918.0790473293032,
+            "net_win_rate": 0.44110854503464203,
+            "return_ratio": -0.19180790473293127,
+            "trade_count": 433,
+            "trades_per_day": 7.5964912280701755
+          },
+          "period": "btc-recheck-2025-10-06_2025-12-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        }
+      ]
+    },
+    {
+      "candidate": {
+        "candidate_id": "time-active-max_holding_minutes120-sl0_0080-tp0_0100",
+        "exit_kind": "time",
+        "exit_params": {
+          "max_holding_minutes": 120,
+          "sl": 0.008,
+          "tp": 0.01
+        },
+        "filters": {
+          "min_atr_ratio": 0.001,
+          "min_volume_ratio": 0.8
+        },
+        "test_average_gross_trade_roe": -0.0007230591839208351,
+        "test_average_holding_minutes": 68.93584905660377,
+        "test_average_net_trade_return": -0.0009189242078817164,
+        "test_average_net_trade_roe": -0.005587059183920835,
+        "test_exit_reasons": {
+          "stop_loss": 99,
+          "take_profit": 80,
+          "time_exit": 86
+        },
+        "test_fee_paid": 1044.2515843161873,
+        "test_gross_pnl": -197.1479294706386,
+        "test_gross_win_rate": 0.4377358490566038,
+        "test_max_drawdown_ratio": 0.13133175748110187,
+        "test_net_pnl": -1241.3995137868253,
+        "test_net_win_rate": 0.43018867924528303,
+        "test_return_ratio": -0.12413995137868333,
+        "test_trade_count": 265,
+        "test_trades_per_day": 4.344262295081967,
+        "train_average_gross_trade_roe": -0.0014843450091345074,
+        "train_average_holding_minutes": 64.25201793721973,
+        "train_average_net_trade_return": -0.0010441356922918598,
+        "train_average_net_trade_roe": -0.006348345009134507,
+        "train_exit_reasons": {
+          "stop_loss": 460,
+          "take_profit": 333,
+          "time_exit": 322
+        },
+        "train_fee_paid": 3363.422136891911,
+        "train_gross_pnl": -1325.0038291242013,
+        "train_gross_win_rate": 0.45739910313901344,
+        "train_max_drawdown_ratio": 0.4855946883962332,
+        "train_net_pnl": -4688.425966016105,
+        "train_net_win_rate": 0.43318385650224217,
+        "train_return_ratio": -0.46884259660161015,
+        "train_trade_count": 1115,
+        "train_trades_per_day": 6.1602209944751385
+      },
+      "period_results": [
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.001209239959164133,
+            "average_holding_minutes": 37.12065599375244,
+            "average_net_trade_return": -0.0009988881511783115,
+            "average_net_trade_roe": -0.006073239959164133,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 1300,
+              "take_profit": 1020,
+              "time_exit": 240
+            },
+            "fee_paid": 5598.089547088986,
+            "gross_pnl": -1926.39716548805,
+            "gross_win_rate": 0.4509957048028114,
+            "max_drawdown_ratio": 0.7526767535043151,
+            "net_pnl": -7524.486712577044,
+            "net_win_rate": 0.44279578289730576,
+            "return_ratio": -0.7524486712577027,
+            "trade_count": 2561,
+            "trades_per_day": 27.83695652173913
+          },
+          "period": "btc-recheck-2020-11-01_2021-01-31",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.002542391088678249,
+            "average_holding_minutes": 42.65355749024317,
+            "average_net_trade_return": -0.0012181564290589225,
+            "average_net_trade_roe": -0.007406391088678249,
+            "exit_reasons": {
+              "stop_loss": 1682,
+              "take_profit": 1242,
+              "time_exit": 407
+            },
+            "fee_paid": 4893.639605270959,
+            "gross_pnl": -4004.770454505239,
+            "gross_win_rate": 0.4362053437406184,
+            "max_drawdown_ratio": 0.8898410059776239,
+            "net_pnl": -8898.410059776255,
+            "net_win_rate": 0.4287000900630441,
+            "return_ratio": -0.8898410059776239,
+            "trade_count": 3331,
+            "trades_per_day": 27.08130081300813
+          },
+          "period": "btc-recheck-2021-03-10_2021-07-10",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0033048772437660225,
+            "average_holding_minutes": 38.6875,
+            "average_net_trade_return": -0.0013435653361457275,
+            "average_net_trade_roe": -0.008168877243766023,
+            "exit_reasons": {
+              "stop_loss": 698,
+              "take_profit": 506,
+              "time_exit": 156
+            },
+            "fee_paid": 3662.8794160109023,
+            "gross_pnl": -2628.5734095805306,
+            "gross_win_rate": 0.42720588235294116,
+            "max_drawdown_ratio": 0.6361412895733822,
+            "net_pnl": -6291.452825591432,
+            "net_win_rate": 0.41911764705882354,
+            "return_ratio": -0.6291452825591419,
+            "trade_count": 1360,
+            "trades_per_day": 21.93548387096774
+          },
+          "period": "btc-recheck-2022-04-25_2022-06-25",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0022894626424738813,
+            "average_holding_minutes": 65.46892655367232,
+            "average_net_trade_return": -0.0011765563556700464,
+            "average_net_trade_roe": -0.007153462642473882,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 68,
+              "take_profit": 48,
+              "time_exit": 60
+            },
+            "fee_paid": 722.7742873883718,
+            "gross_pnl": -344.8725298030617,
+            "gross_win_rate": 0.4350282485875706,
+            "max_drawdown_ratio": 0.10717106826707568,
+            "net_pnl": -1067.6468171914337,
+            "net_win_rate": 0.4124293785310734,
+            "return_ratio": -0.10676468171914348,
+            "trade_count": 177,
+            "trades_per_day": 2.8548387096774195
+          },
+          "period": "btc-recheck-2022-12-01_2023-01-31",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.00481782624320756,
+            "average_holding_minutes": 70.12994350282486,
+            "average_net_trade_return": -0.0015924056321065065,
+            "average_net_trade_roe": -0.009681826243207561,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 72,
+              "take_profit": 44,
+              "time_exit": 60
+            },
+            "fee_paid": 706.8105329159594,
+            "gross_pnl": -705.7550385728605,
+            "gross_win_rate": 0.4293785310734463,
+            "max_drawdown_ratio": 0.15334906381613386,
+            "net_pnl": -1412.5655714888203,
+            "net_win_rate": 0.4011299435028249,
+            "return_ratio": -0.14125655714888252,
+            "trade_count": 177,
+            "trades_per_day": 2.8548387096774195
+          },
+          "period": "btc-recheck-2023-09-01_2023-11-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.006072346882101584,
+            "average_holding_minutes": 51.286637931034484,
+            "average_net_trade_return": -0.0017987412635035501,
+            "average_net_trade_roe": -0.010936346882101584,
+            "exit_reasons": {
+              "stop_loss": 230,
+              "take_profit": 140,
+              "time_exit": 94
+            },
+            "fee_paid": 1622.9896657326572,
+            "gross_pnl": -2007.2762188874106,
+            "gross_win_rate": 0.41163793103448276,
+            "max_drawdown_ratio": 0.383702111155587,
+            "net_pnl": -3630.2658846200607,
+            "net_win_rate": 0.3879310344827586,
+            "return_ratio": -0.36302658846200664,
+            "trade_count": 464,
+            "trades_per_day": 14.5
+          },
+          "period": "btc-recheck-2024-03-01_2024-04-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0020393489817492993,
+            "average_holding_minutes": 55.718076285240464,
+            "average_net_trade_return": -0.0011354192404192927,
+            "average_net_trade_roe": -0.0069033489817493,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 264,
+              "take_profit": 189,
+              "time_exit": 149
+            },
+            "fee_paid": 2210.5028664932092,
+            "gross_pnl": -895.1718257036836,
+            "gross_win_rate": 0.4461028192371476,
+            "max_drawdown_ratio": 0.31674447464918043,
+            "net_pnl": -3105.674692196889,
+            "net_win_rate": 0.4361525704809287,
+            "return_ratio": -0.3105674692196915,
+            "trade_count": 603,
+            "trades_per_day": 9.571428571428571
+          },
+          "period": "btc-recheck-2024-07-01_2024-09-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0001567006467233179,
+            "average_holding_minutes": 57.5592841163311,
+            "average_net_trade_return": -0.0008257731326847562,
+            "average_net_trade_roe": -0.005020700646723318,
+            "exit_reasons": {
+              "stop_loss": 188,
+              "take_profit": 145,
+              "time_exit": 114
+            },
+            "fee_paid": 1748.9795809453929,
+            "gross_pnl": -76.949919423686,
+            "gross_win_rate": 0.4720357941834452,
+            "max_drawdown_ratio": 0.21680988274491075,
+            "net_pnl": -1825.9295003690809,
+            "net_win_rate": 0.4608501118568233,
+            "return_ratio": -0.18259295003690995,
+            "trade_count": 447,
+            "trades_per_day": 7.45
+          },
+          "period": "btc-recheck-2025-01-01_2025-03-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": 0.0025942477793614274,
+            "average_holding_minutes": 87.05747126436782,
+            "average_net_trade_return": -0.0003733145099734494,
+            "average_net_trade_roe": -0.002269752220638572,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 23,
+              "take_profit": 21,
+              "time_exit": 42
+            },
+            "fee_paid": 366.4029421372326,
+            "gross_pnl": 188.29337983693463,
+            "gross_win_rate": 0.47126436781609193,
+            "max_drawdown_ratio": 0.03415115085077068,
+            "net_pnl": -178.10956230029785,
+            "net_win_rate": 0.4482758620689655,
+            "return_ratio": -0.017810956230030026,
+            "trade_count": 87,
+            "trades_per_day": 1.403225806451613
+          },
+          "period": "btc-recheck-2025-06-01_2025-08-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0035822662496340805,
+            "average_holding_minutes": 67.53125,
+            "average_net_trade_return": -0.0013891885279003423,
+            "average_net_trade_roe": -0.008446266249634082,
+            "exit_reasons": {
+              "stop_loss": 149,
+              "take_profit": 96,
+              "time_exit": 107
+            },
+            "fee_paid": 1337.60152704473,
+            "gross_pnl": -988.1945552487504,
+            "gross_win_rate": 0.4431818181818182,
+            "max_drawdown_ratio": 0.2328055204603778,
+            "net_pnl": -2325.7960822934806,
+            "net_win_rate": 0.42329545454545453,
+            "return_ratio": -0.23257960822934784,
+            "trade_count": 352,
+            "trades_per_day": 6.175438596491228
+          },
+          "period": "btc-recheck-2025-10-06_2025-12-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        }
+      ]
+    },
+    {
+      "candidate": {
+        "candidate_id": "atr-active-atr_period60-max_sl0_0120-max_tp0_0150-min_sl0_0040-min_tp0_0040-sl_atr_multiple2_0000-tp_atr_multiple3_0000",
+        "exit_kind": "atr",
+        "exit_params": {
+          "atr_period": 60,
+          "max_sl": 0.012,
+          "max_tp": 0.015,
+          "min_sl": 0.004,
+          "min_tp": 0.004,
+          "sl_atr_multiple": 2.0,
+          "tp_atr_multiple": 3.0
+        },
+        "filters": {
+          "min_atr_ratio": 0.001,
+          "min_volume_ratio": 0.8
+        },
+        "test_average_gross_trade_roe": -0.00297144739543649,
+        "test_average_holding_minutes": 23.056798623063685,
+        "test_average_net_trade_return": -0.001288724900565212,
+        "test_average_net_trade_roe": -0.00783544739543649,
+        "test_exit_reasons": {
+          "stop_loss": 326,
+          "take_profit": 255
+        },
+        "test_fee_paid": 2069.2195039309827,
+        "test_gross_pnl": -1243.2800277876347,
+        "test_gross_win_rate": 0.4388984509466437,
+        "test_max_drawdown_ratio": 0.3348686101132381,
+        "test_net_pnl": -3312.4995317186194,
+        "test_net_win_rate": 0.4388984509466437,
+        "test_return_ratio": -0.3312499531718611,
+        "test_trade_count": 581,
+        "test_trades_per_day": 9.524590163934427,
+        "train_average_gross_trade_roe": -0.0021495099943238307,
+        "train_average_holding_minutes": 22.676506267691064,
+        "train_average_net_trade_return": -0.0011535378280137878,
+        "train_average_net_trade_roe": -0.007013509994323831,
+        "train_exit_reasons": {
+          "stop_loss": 1356,
+          "take_profit": 1117
+        },
+        "train_fee_paid": 5276.65707947817,
+        "train_gross_pnl": -2567.103920027649,
+        "train_gross_win_rate": 0.45167812373635263,
+        "train_max_drawdown_ratio": 0.7856412133114095,
+        "train_net_pnl": -7843.760999505805,
+        "train_net_win_rate": 0.45167812373635263,
+        "train_return_ratio": -0.784376099950581,
+        "train_trade_count": 2473,
+        "train_trades_per_day": 13.662983425414364
+      },
+      "period_results": [
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0011896383838435425,
+            "average_holding_minutes": 16.459550325698675,
+            "average_net_trade_return": -0.0009956642078690037,
+            "average_net_trade_roe": -0.006053638383843542,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 2693,
+              "take_profit": 2065
+            },
+            "fee_paid": 7163.199252857307,
+            "gross_pnl": -2064.756263544214,
+            "gross_win_rate": 0.4341248161378441,
+            "max_drawdown_ratio": 0.9229515009873679,
+            "net_pnl": -9227.955516401511,
+            "net_win_rate": 0.4341248161378441,
+            "return_ratio": -0.922795551640156,
+            "trade_count": 4759,
+            "trades_per_day": 51.72826086956522
+          },
+          "period": "btc-recheck-2020-11-01_2021-01-31",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0020920931320233464,
+            "average_holding_minutes": 17.768769668814627,
+            "average_net_trade_return": -0.0011440942651354188,
+            "average_net_trade_roe": -0.006956093132023347,
+            "exit_reasons": {
+              "stop_loss": 3799,
+              "take_profit": 2874
+            },
+            "fee_paid": 6281.888052366296,
+            "gross_pnl": -3555.171816320516,
+            "gross_win_rate": 0.4306908436984864,
+            "max_drawdown_ratio": 0.983738447960823,
+            "net_pnl": -9837.059868686845,
+            "net_win_rate": 0.4306908436984864,
+            "return_ratio": -0.9837059868686845,
+            "trade_count": 6673,
+            "trades_per_day": 54.2520325203252
+          },
+          "period": "btc-recheck-2021-03-10_2021-07-10",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0016850800188268282,
+            "average_holding_minutes": 18.933501683501685,
+            "average_net_trade_return": -0.0010771513188859915,
+            "average_net_trade_roe": -0.006549080018826828,
+            "exit_reasons": {
+              "stop_loss": 1342,
+              "take_profit": 1034
+            },
+            "fee_paid": 5620.535552844563,
+            "gross_pnl": -1868.1625446839269,
+            "gross_win_rate": 0.4351851851851852,
+            "max_drawdown_ratio": 0.750768438802162,
+            "net_pnl": -7488.698097528473,
+            "net_win_rate": 0.4351851851851852,
+            "return_ratio": -0.7488698097528486,
+            "trade_count": 2376,
+            "trades_per_day": 38.32258064516129
+          },
+          "period": "btc-recheck-2022-04-25_2022-06-25",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.00329638695738421,
+            "average_holding_minutes": 29.196923076923078,
+            "average_net_trade_return": -0.0013421689074645084,
+            "average_net_trade_roe": -0.00816038695738421,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 185,
+              "take_profit": 139
+            },
+            "fee_paid": 1244.5182490372233,
+            "gross_pnl": -845.4685704321312,
+            "gross_win_rate": 0.4276923076923077,
+            "max_drawdown_ratio": 0.20899868194693555,
+            "net_pnl": -2089.986819469356,
+            "net_win_rate": 0.4276923076923077,
+            "return_ratio": -0.20899868194693555,
+            "trade_count": 325,
+            "trades_per_day": 5.241935483870968
+          },
+          "period": "btc-recheck-2022-12-01_2023-01-31",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0014643756664423988,
+            "average_holding_minutes": 26.570605187319885,
+            "average_net_trade_return": -0.0010408512609280263,
+            "average_net_trade_roe": -0.0063283756664423985,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 181,
+              "take_profit": 165
+            },
+            "fee_paid": 1358.9342311660203,
+            "gross_pnl": -407.11118588157154,
+            "gross_win_rate": 0.4755043227665706,
+            "max_drawdown_ratio": 0.18326351652605175,
+            "net_pnl": -1766.0454170475925,
+            "net_win_rate": 0.4755043227665706,
+            "return_ratio": -0.1766045417047586,
+            "trade_count": 347,
+            "trades_per_day": 5.596774193548387
+          },
+          "period": "btc-recheck-2023-09-01_2023-11-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0039213460485430845,
+            "average_holding_minutes": 18.536,
+            "average_net_trade_return": -0.0014449582316682706,
+            "average_net_trade_roe": -0.008785346048543084,
+            "exit_reasons": {
+              "stop_loss": 589,
+              "take_profit": 411
+            },
+            "fee_paid": 3008.511690957045,
+            "gross_pnl": -2393.4165110616154,
+            "gross_win_rate": 0.411,
+            "max_drawdown_ratio": 0.5513793500834558,
+            "net_pnl": -5401.928202018654,
+            "net_win_rate": 0.411,
+            "return_ratio": -0.5401928202018647,
+            "trade_count": 1000,
+            "trades_per_day": 31.25
+          },
+          "period": "btc-recheck-2024-03-01_2024-04-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0010338504798667228,
+            "average_holding_minutes": 20.527800161160354,
+            "average_net_trade_return": -0.0009700411973465005,
+            "average_net_trade_roe": -0.005897850479866723,
+            "exit_reasons": {
+              "end_of_data": 1,
+              "stop_loss": 656,
+              "take_profit": 584
+            },
+            "fee_paid": 3857.7815360342274,
+            "gross_pnl": -914.6655440870142,
+            "gross_win_rate": 0.47058823529411764,
+            "max_drawdown_ratio": 0.4787010277712158,
+            "net_pnl": -4772.447080121254,
+            "net_win_rate": 0.47058823529411764,
+            "return_ratio": -0.47724470801212354,
+            "trade_count": 1241,
+            "trades_per_day": 19.6984126984127
+          },
+          "period": "btc-recheck-2024-07-01_2024-09-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.0014088029237413811,
+            "average_holding_minutes": 20.390268123138032,
+            "average_net_trade_return": -0.001031711007194306,
+            "average_net_trade_roe": -0.006272802923741382,
+            "exit_reasons": {
+              "stop_loss": 539,
+              "take_profit": 468
+            },
+            "fee_paid": 3316.1573603295733,
+            "gross_pnl": -968.4191392650291,
+            "gross_win_rate": 0.464746772591857,
+            "max_drawdown_ratio": 0.4315017693643086,
+            "net_pnl": -4284.576499594607,
+            "net_win_rate": 0.464746772591857,
+            "return_ratio": -0.4284576499594591,
+            "trade_count": 1007,
+            "trades_per_day": 16.783333333333335
+          },
+          "period": "btc-recheck-2025-01-01_2025-03-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.005338764799235546,
+            "average_holding_minutes": 32.15934065934066,
+            "average_net_trade_return": -0.001678086315663741,
+            "average_net_trade_roe": -0.010202764799235545,
+            "exit_reasons": {
+              "stop_loss": 108,
+              "take_profit": 74
+            },
+            "fee_paid": 723.7405779116444,
+            "gross_pnl": -788.0419159740175,
+            "gross_win_rate": 0.4065934065934066,
+            "max_drawdown_ratio": 0.15252286898254308,
+            "net_pnl": -1511.7824938856616,
+            "net_win_rate": 0.4065934065934066,
+            "return_ratio": -0.15117824938856556,
+            "trade_count": 182,
+            "trades_per_day": 2.935483870967742
+          },
+          "period": "btc-recheck-2025-06-01_2025-08-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        },
+        {
+          "metrics": {
+            "average_gross_trade_roe": -0.002777495938526648,
+            "average_holding_minutes": 20.01939393939394,
+            "average_net_trade_return": -0.0012568249898892514,
+            "average_net_trade_roe": -0.007641495938526648,
+            "exit_reasons": {
+              "stop_loss": 462,
+              "take_profit": 363
+            },
+            "fee_paid": 2801.1378129908308,
+            "gross_pnl": -1471.5129474028004,
+            "gross_win_rate": 0.44,
+            "max_drawdown_ratio": 0.43072878128987335,
+            "net_pnl": -4272.650760393627,
+            "net_win_rate": 0.44,
+            "return_ratio": -0.427265076039365,
+            "trade_count": 825,
+            "trades_per_day": 14.473684210526315
+          },
+          "period": "btc-recheck-2025-10-06_2025-12-01",
+          "status": "ok",
+          "symbol": "BTCUSDT"
+        }
+      ]
+    }
+  ]
+}

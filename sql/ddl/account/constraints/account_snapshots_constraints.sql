@@ -1,0 +1,1 @@
+-- Constraints are defined inline in sql/ddl/account/tables/account_snapshots.sql.

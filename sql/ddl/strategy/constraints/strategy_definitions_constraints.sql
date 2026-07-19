@@ -1,0 +1,7 @@
+-- Table DDL owns the first strategy_definitions constraints so SQLite can
+-- apply them during table creation.
+--
+-- Required constraints:
+-- - strategy_definitions.strategy_id is the primary key.
+-- - strategy_definitions.use_yn is restricted to 'Y' or 'N'.
+-- - strategy_definitions requires reg_ymd, reg_dt, upd_dt, and use_yn.

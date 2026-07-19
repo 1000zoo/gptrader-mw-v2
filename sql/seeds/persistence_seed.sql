@@ -1,0 +1,3 @@
+-- No default persistence seed data is required for Module O.
+-- Local development may insert strategy_definitions and signal_generator_definitions
+-- after concrete strategies are available.

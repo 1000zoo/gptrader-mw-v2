@@ -1,0 +1,1 @@
+-- Constraints are defined inline in sql/ddl/market/tables/market_snapshots.sql.

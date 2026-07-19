@@ -1,0 +1,22 @@
+CREATE TABLE IF NOT EXISTS indicator_values (
+    indicator_value_id TEXT NOT NULL PRIMARY KEY,
+    indicator_set_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    timeframe TEXT NOT NULL,
+    measured_at TEXT NOT NULL,
+    indicator_name TEXT NOT NULL,
+    indicator_key TEXT NOT NULL,
+    value NUMERIC NOT NULL,
+    parameters TEXT,
+    reg_ymd TEXT NOT NULL,
+    reg_dt TEXT NOT NULL,
+    upd_dt TEXT NOT NULL,
+    use_yn TEXT NOT NULL DEFAULT 'Y' CHECK (use_yn IN ('Y', 'N')),
+    UNIQUE (indicator_set_id, indicator_key),
+    FOREIGN KEY (indicator_set_id) REFERENCES indicator_sets (indicator_set_id),
+    CHECK (indicator_value_id <> ''),
+    CHECK (symbol <> ''),
+    CHECK (timeframe <> ''),
+    CHECK (indicator_name <> ''),
+    CHECK (indicator_key <> '')
+);

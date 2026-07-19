@@ -1,0 +1,7 @@
+-- Table DDL owns the first signal_logs constraints so SQLite can apply them
+-- during table creation.
+--
+-- Required constraints:
+-- - signal_logs.signal_id is the primary key.
+-- - signal_logs.use_yn is restricted to 'Y' or 'N'.
+-- - signal_logs requires reg_ymd, reg_dt, upd_dt, and use_yn.

@@ -1,0 +1,1 @@
+-- Constraints are defined inline in sql/ddl/execution/tables/execution_reports.sql.
