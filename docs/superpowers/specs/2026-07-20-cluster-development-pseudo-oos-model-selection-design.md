@@ -12,6 +12,7 @@
 - gate는 선택된 후보의 pseudo-OOS 역사 분포만으로 산출한다.
 - 선택이 끝날 때까지 load 가능한 새 모델 artifact를 만들지 않는다.
 - 어떤 Strategy Mapping, Strategy Evidence, Validation, Test 데이터나 성과도 읽지 않는다.
+- 절대 품질 정책이 사전에 승인되지 않은 run은 순위를 만들 수 있어도 `ranked_but_not_qualified`에서 멈춘다.
 
 이 설계는 모델 선택까지만 다룬다. 전략 후보 생성, 수익률, 손익, 거래 비용, Mapping, Evidence, Validation, Test는 명시적인 비범위다.
 
@@ -29,7 +30,7 @@
 
 표본이 큰 3~4개 validation fold만 사용한다. 계산은 가장 싸고 component별 covariance 추정은 쉽지만, p95/p05 gate를 만들 역사 관측치가 너무 적고 일부 시작 시점에만 발생하는 불안정을 놓칠 가능성이 크다.
 
-따라서 접근 B를 고정한다. rolling과 expanding은 서로 대체하지 않으며 동일한 validation anchors를 공유하는 두 개의 독립 학습 관점이다.
+따라서 접근 B를 고정한다. rolling과 expanding은 서로 대체하지 않으며 동일한 validation anchors를 공유하는 두 개의 독립 학습 관점이다. 실행 비용을 통제하기 위해 capability 검증과 정식 selection run을 분리하되, 검증 결과로 후보를 제거하거나 정식 grid를 변경할 수 없다.
 
 ## 3. 데이터 접근 경계
 
@@ -117,6 +118,8 @@ Feature set은 결과 계산 전에 이름, 순서, registry/schema hash와 함�
 
 축소안은 절대 변동성 수준 `rv_1d`, term-structure `rv_ratio_1d_3d`, range 내 위치 `close_location_3d`를 남긴다. 다른 family는 건드리지 않는다. 결과를 본 뒤 제거 목록을 바꾸거나 제3의 feature set을 추가하지 않는다.
 
+이 feature set은 frozen K4 진단에서 변동성·range 계열 drift가 반복 관찰된 뒤 생성된 개발 가설이다. 무관한 사전 가설로 표현하지 않는다. 다만 후보 정의와 비교는 Cluster Development 내부에서만 수행하며 Mapping, Validation, Test 또는 전략 성과의 영향을 받지 않았다.
+
 ## 6. 모델 후보와 seed
 
 K는 `2, 3, 4, 5, 6, 8`로 고정한다.
@@ -125,11 +128,24 @@ K는 `2, 3, 4, 5, 6, 8`로 고정한다.
 - K-Means: K 6개 = 6 구조
 - feature set 2개를 적용한 총 후보 수 = `(24 + 6) × 2 = 60`
 
-seed는 정수 `20260720`부터 `20260739`까지 정확히 20개를 사용한다. 각 fit은 단일 initialization으로 실행하여 seed 하나를 독립 관측치로 남긴다. 라이브/runtime artifact 타입의 현재 K 및 covariance 제약을 완화하지 않고, 이 grid는 research-only candidate config로 표현한다.
+seed는 정수 `20260720`부터 `20260739`까지 정확히 20개를 사용한다. 구조·seed 안정성 grid의 각 fit은 `n_init=1`로 실행하여 seed 하나를 독립 관측치로 남긴다. 라이브/runtime artifact 타입의 현재 K 및 covariance 제약을 완화하지 않고, 이 grid는 research-only candidate config로 표현한다.
 
 GMM의 `reg_covar=1e-6`, 수렴 tolerance, 최대 iteration, initialization 방식과 K-Means의 initialization 및 최대 iteration은 candidate registry에 한 번 고정한다. 수렴 실패 후 parameter를 완화한 자동 재시도는 금지한다.
 
-## 7. 계산량과 실행 단위
+상대 순위와 사전 승인된 절대 품질 기준을 모두 통과한 후보만 별도 qualification pass에 들어간다. qualification은 후보의 representative seed를 RNG root로 사용하되 GMM과 K-Means 모두 `n_init=20`으로 24개 fold context를 다시 fit한다. qualification gate와 최종 full-development freeze도 동일한 `n_init=20` 계약을 사용한다. 따라서 seed 안정성 관찰용 `n_init=1` 결과를 운영 fit 결과인 것처럼 freeze하지 않는다. qualification에는 24 fits가 추가된다.
+
+## 7. 단계별 실행과 계산량
+
+### 7.1 Capability 검증 단계
+
+정식 결과를 만들기 전에 다음 두 검증을 수행한다.
+
+1. synthetic contract fixture: 60 candidates × sentinel seeds `{20260720, 20260739}` = 120 fits
+2. real-data capability check: 첫 2 origins × 2 schemes × 60 candidates × 같은 sentinel seeds 2개 = 480 fits
+
+최대 600 fits의 capability 검증은 shape, covariance type, K=2, preprocessing isolation, metric availability, serialization과 resource estimate만 확인한다. 결과는 selection score, gate, 후보 제거에 사용할 수 없다. capability와 formal checkpoint namespace를 분리하고 formal 단계는 겹치는 480 real-data fits도 다시 계산한다. capability 결과를 이유로 정식 candidate registry를 변경하려면 이 설계를 새 version으로 다시 승인해야 한다.
+
+### 7.2 정식 selection 단계
 
 고정 workload는 다음과 같다.
 
@@ -142,7 +158,9 @@ GMM의 `reg_covar=1e-6`, 수렴 tolerance, 최대 iteration, initialization 방�
 - seed pair: 후보/fold당 `20 choose 2 = 190`
 - ARI/NMI pair 비교: 지표별 `24 × 60 × 190 = 273,600`
 
-실행 단위는 `(fold_scheme, fold_origin, feature_set, model_type, covariance_type, K, seed)`의 immutable job이다. job은 독립적으로 병렬 실행할 수 있지만 BLAS thread는 worker당 1개로 고정해 이중 병렬화를 막는다. full grid 전 동일한 synthetic fixture와 첫 fold 일부로 runtime/memory calibration을 수행하되, calibration 결과로 후보를 제거할 수는 없다. 자원 한도를 넘으면 전체 run을 `resource_budget_exceeded`로 종료하고 부분 결과로 선택하지 않는다.
+실행 단위는 `(fold_scheme, fold_origin, feature_set, model_type, covariance_type, K, seed)`의 immutable job이다. job은 독립적으로 병렬 실행할 수 있지만 BLAS thread는 worker당 1개로 고정해 이중 병렬화를 막는다.
+
+각 job receipt는 input/config/code hash를 key로 content-addressed checkpoint에 원자적으로 저장한다. 중단 후 재실행은 hash가 완전히 일치하고 receipt 검증에 성공한 completed/rejected job만 재사용할 수 있다. 후보 자체의 convergence 또는 수치 실패는 rejected job으로 집계하며 전체 run을 폐기하지 않는다. 반면 grid job key 누락, 데이터 경계 위반, schema/manifest 손상, resource 중단처럼 결과 완전성을 보장할 수 없는 상태에서는 선택을 금지한다. 28,800개 모든 key가 completed 또는 rejected terminal receipt를 가져야만 집계를 시작한다.
 
 ## 8. 공통 비교 공간과 component 정렬
 
@@ -159,13 +177,23 @@ covariance는 fold scale의 대각행렬로 원본 단위로 되돌린 뒤 refer
 
 centroid projection에는 reference clipping을 다시 적용하지 않는다. 그래야 earliest bounds를 벗어난 실제 drift가 포화되어 숨지 않는다. 이 방식은 미래 fold 정보를 reference에 사용하지 않으며, 서로 다른 fold의 scale 변화와 centroid 변화가 섞이지 않게 한다. 원본 단위 centroid도 함께 저장해 feature 의미 해석에 사용한다.
 
+최초 reference 의존성을 분리하기 위해 centroid distance는 두 계열로 저장한다.
+
+- `within_fold_scaled_empirical_centroid_distance`: 각 fold의 train scaler 좌표에서 train fitted centroid와 validation empirical centroid를 비교하고 feature 수로 나눈 값
+- `earliest_reference_centroid_distance`: 서로 다른 fold의 centroids를 최초 공통 reference 공간에서 비교한 값
+
+Primary score에는 첫 번째 within-fold distance만 사용한다. earliest-reference distance와 successive-fold distance는 장기 좌표 이동 및 설명용이며 primary score와 절대 qualification 기준에 넣지 않는다.
+
 ### 8.2 정렬
 
 - 같은 fold 안의 train component와 validation empirical component는 fitted assignment identity를 그대로 사용한다.
 - seed 간 component는 같은 fold의 가장 작은 seed를 기준으로 common-reference centroid Hungarian matching한다.
 - fold 간 component는 후보별 첫 expanding fold의 대표-seed centroids를 canonical reference로 삼아 직접 Hungarian matching한다. 연쇄 matching은 오류 누적 때문에 사용하지 않는다.
 - cost는 component별 common-reference centroid squared Euclidean distance다.
-- 최적 비용과 차선 permutation 비용이 `1e-12` 이내로 같으면 정렬이 비식별적이므로 해당 job을 거부한다.
+- matching relative margin은 `(second_best_cost - best_cost) / max(abs(best_cost), 1e-12)`로 정의한다.
+- relative margin이 `0.05` 미만이면 정렬이 실질적으로 비식별적이므로 해당 matching을 `unavailable`로 표시한다. second-best cost는 최적 assignment의 각 선택 edge를 하나씩 금지하고 Hungarian을 다시 실행한 결과 중 최소값으로 구하며 permutation을 brute-force하지 않는다.
+
+후보별 `matching_coverage`는 요구된 seed/fold matching 중 relative margin을 통과한 비율이다. unavailable matching을 identity로 간주하거나 semantic metric에서 조용히 제외하지 않는다.
 
 fingerprint는 model parameters의 hash와 별도로 `(candidate_id, fold_id, seed, aligned_component_index, common_reference_hash)`를 포함한다. report의 모든 component metric에는 fingerprint와 aligned index를 함께 기록한다.
 
@@ -175,7 +203,8 @@ fingerprint는 model parameters의 hash와 별도로 `(candidate_id, fold_id, se
 
 ### 9.1 Centroid drift
 
-- within-fold pseudo-OOS drift: fitted train centroid와 고정 assignment로 계산한 validation empirical centroid의 common-reference squared Euclidean distance
+- primary within-fold pseudo-OOS drift: fitted train centroid와 고정 assignment로 계산한 validation empirical centroid의 fold-scaled squared Euclidean distance를 feature 수로 정규화
+- earliest-reference drift: common-reference 공간에서의 장기 비교용 squared Euclidean distance
 - maximum, median, component별 distance
 - successive-fold fitted centroid drift와 earliest-reference semantic drift
 - distance의 feature별 squared contribution과 상위 5개 feature
@@ -184,7 +213,9 @@ fingerprint는 model parameters의 hash와 별도로 `(candidate_id, fold_id, se
 
 train과 validation assigned samples를 common-reference 공간에 놓고 deterministic Ledoit-Wolf covariance를 계산한다. GMM은 fitted covariance와 train empirical covariance를 모두 보존한다. drift는 ridge `1e-9 I`를 더한 SPD matrix의 normalized log-Euclidean distance `||log(A)-log(B)||F / sqrt(d)`로 정의한다.
 
-component 표본이 2개 미만이면 covariance metric을 만들지 않고 job을 거부한다. 2개 이상이지만 5개 미만이면 `component_collapse`로 처리한다.
+component 표본이 2개 미만이면 해당 component의 covariance drift만 `unavailable`로 기록한다. assignment, prevalence, OOD와 계산 가능한 다른 component metric은 유지하며 job 전체를 거부하지 않는다. component 표본이 5개 미만이면 covariance 계산 가능 여부와 별개로 `component_collapse=true`를 기록한다.
+
+fold covariance summary는 available components의 maximum/median과 `covariance_component_coverage = available_component_count / K`를 함께 가진다. unavailable을 0 drift로 대체하지 않는다. Primary score의 covariance 항목은 drift loss와 coverage loss를 각각 절반씩 반영한다.
 
 ### 9.3 군집 비중과 collapse
 
@@ -194,7 +225,7 @@ component 표본이 2개 미만이면 covariance metric을 만들지 않고 job�
 - empty component count
 - validation component count가 5 미만이면 collapse
 
-대표 seed에서 empty 또는 collapse가 한 fold라도 발생한 후보는 선택 대상에서 제외한다. 다른 seed의 collapse 빈도는 seed instability metric으로 남긴다.
+대표 seed의 fold별 collapse component 수와 24개 context 중 collapse가 발생한 fold 수를 기록한다. collapse만으로 technical job 또는 candidate를 즉시 거부하지 않고, assignment 구조 불안정 metric과 절대 품질 정책의 입력으로 사용한다. empty component에서도 가능한 전체 OOD와 prevalence metric은 유지하되 해당 component의 empirical centroid, covariance, component OOD rate는 unavailable로 기록한다.
 
 ### 9.4 OOD
 
@@ -204,16 +235,19 @@ pseudo-train에서 각 component에 assign된 sample의 distance p99를 componen
 - K-Means: squared Euclidean distance
 - validation: assigned component threshold를 초과한 numerator/denominator/rate
 - overall rate와 maximum component rate를 별도 기록
+- pseudo-train assigned sample이 없어 threshold를 만들 수 없는 component는 threshold와 component rate를 unavailable로 기록
+- `ood_assignment_coverage`: 정의된 component threshold로 판정할 수 있었던 validation assignments / 전체 validation assignments
 
-validation을 이용한 distance threshold 재추정은 금지한다. clipping 전 bound exceedance rate도 별도 보조 지표로 저장해 clipping이 tail을 숨기는지 확인한다.
+overall OOD rate는 covered assignments의 numerator/denominator와 coverage를 항상 함께 제시한다. uncovered assignment를 정상 또는 OOD로 impute하지 않는다. validation을 이용한 distance threshold 재추정은 금지한다. clipping 전 bound exceedance rate도 별도 보조 지표로 저장해 clipping이 tail을 숨기는지 확인한다.
 
 ### 9.5 Assignment confidence와 margin
 
 - GMM: maximum posterior와 top-1 minus top-2 posterior margin
-- K-Means: `exp(-distance)` 정규화 confidence와 margin을 `distance_softmax_*`로 명시
+- K-Means: pseudo-train에서 component별 assigned squared-distance median `m_j`를 fit하고 각 centroid까지의 squared distance를 `q_j = d_j^2 / max(m_j, 1e-12)`로 정규화한다. `exp(-q_j)` 정규화 값은 descriptive `normalized_distance_softmax_*`로만 기록하고 probability라고 부르지 않는다.
+- K-Means ambiguity metric: 가장 작은 두 normalized distances의 `normalized_distance_margin = (q_2 - q_1) / max(q_2, 1e-12)`
 - median, p05, ambiguous candidate rate를 저장
 
-K-Means 값을 posterior라고 부르지 않는다. 서로 정의가 다른 confidence를 GMM과 K-Means 사이의 primary 점수에 직접 섞지 않는다.
+K-Means 값을 posterior라고 부르지 않는다. 서로 정의가 다른 confidence를 GMM과 K-Means 사이의 primary 점수에 직접 섞지 않는다. K-Means가 qualification 대상이면 운영 ambiguity gate에는 softmax 값이 아니라 normalized-distance margin만 사용한다.
 
 ### 9.6 Seed 안정성 및 label switching
 
@@ -241,12 +275,13 @@ daily argmax assignment sequence에서 다음을 계산한다.
 
 aligned component별 원본 feature centroid를 common-reference z profile로 표현한다.
 
-- earliest fold profile과의 Pearson correlation
+- within-fold train profile과 validation empirical profile의 Pearson correlation
+- earliest fold profile과의 descriptive Pearson correlation
 - `abs(z) >= 0.5`인 salient feature의 sign agreement
 - top-5 absolute profile feature의 Jaccard overlap
 - registry family별 centroid contribution
 
-평균 correlation, 최소 correlation, sign agreement, top-5 overlap을 기록한다. component 명칭은 자동으로 경제적 의미를 붙이지 않고 fingerprint와 상위 원본 feature만 보고한다.
+평균 correlation, 최소 correlation, sign agreement, top-5 overlap을 기록한다. Primary score에는 within-fold correlation과 sign agreement만 사용하며 earliest-reference semantic 값은 descriptive로 제한한다. component 명칭은 자동으로 경제적 의미를 붙이지 않고 fingerprint와 상위 원본 feature만 보고한다.
 
 ## 10. 기술적 fail-closed 조건
 
@@ -260,7 +295,7 @@ aligned component별 원본 feature centroid를 common-reference z profile로 �
 - common reference가 최초 expanding train 외 데이터로 fit됨
 - job key 중복, 결과 누락, manifest/hash 불일치
 - 결과 계산 후 candidate registry, seed, metric, weight, tie-break 변경
-- compute budget 초과로 일부 grid만 완료
+- compute budget 초과 또는 중단으로 terminal receipt가 일부 grid에 없음. 이 경우 verified checkpoint는 보존하지만 run은 `incomplete`이며 집계·선택·publish를 금지
 
 ### 10.2 job 거부
 
@@ -269,35 +304,36 @@ aligned component별 원본 feature centroid를 common-reference z profile로 �
 - model non-convergence 또는 maximum iteration 도달
 - GMM covariance 비대칭, non-SPD, regularization floor 위반
 - probability 합/순서 오류 또는 assignment 누락
-- empty component, component sample 2개 미만, 비식별 Hungarian match
+- count와 무관하게 계산 가능해야 하는 필수 assignment/OOD/prevalence 값의 누락 또는 비정상 값
 
-거부 job의 metric은 대체하거나 impute하지 않는다.
+component count 때문에 정의할 수 없는 centroid/covariance/component OOD/matching은 metric-level `unavailable`이며 job rejection이 아니다. 거부 job의 metric은 대체하거나 impute하지 않는다.
 
 ### 10.3 candidate 탈락
 
 - 24개 fold context에서 모두 valid한 globally-valid seed가 18/20 미만
 - representative seed가 하나의 fold context라도 거부됨
-- representative seed validation에서 component count 5 미만 또는 empty component 발생
-- 필수 metric이 하나라도 누락됨
+- candidate score에 필요한 전체 assignment, prevalence, overall OOD, seed ARI/NMI가 누락됨
 
-모든 후보가 탈락하면 selection status는 `no_eligible_candidate`다. threshold를 완화하거나 가장 덜 나쁜 후보를 강제 선택하지 않으며 모델 artifact를 만들지 않는다.
+모든 후보가 기술적으로 탈락하면 selection status는 `no_eligible_candidate`다. threshold를 완화하거나 가장 덜 나쁜 후보를 강제 선택하지 않으며 모델 artifact를 만들지 않는다.
 
 ## 11. 결과 확인 전에 고정하는 모델 선택 규칙
 
 ### 11.1 Primary score
 
-탈락하지 않은 후보만 비교한다. 각 metric은 후보별로 24 fold contexts의 representative-seed 값을 집계한다. 손실 metric은 p95, 이득 metric은 p05를 사용한 뒤 eligible candidates 사이에서 `[0, 1]` percentile loss rank로 변환한다. 동률에는 average rank를 부여하고, eligible candidate가 하나뿐이면 모든 rank를 `0.0`으로 둔다. 낮을수록 좋다.
+기술적으로 탈락하지 않은 후보만 비교한다. 각 metric은 후보별로 24 fold contexts의 representative-seed 값을 집계한다. 손실 metric은 p95, 이득 metric은 p05를 사용한 뒤 비교 후보 사이에서 `[0, 1]` percentile loss rank로 변환한다. 동률에는 average rank를 부여하고, 비교 후보가 하나뿐이면 모든 rank를 `0.0`으로 둔다. 낮을수록 좋다. relative rank는 후보 grid에 종속된 비교값이며 절대 품질 판정으로 해석하지 않는다.
 
 | Domain | Weight | 입력 |
 |---|---:|---|
-| centroid/covariance 안정성 | 25% | max centroid drift 12.5%, covariance drift 12.5% |
-| 비중/collapse 안정성 | 20% | prevalence TV drift 10%, minimum share 10% |
-| OOD | 15% | overall OOD 7.5%, maximum component OOD 7.5% |
+| centroid/covariance 안정성 | 25% | within-fold max centroid drift 12.5%, covariance drift 6.25%, covariance coverage 6.25% |
+| 비중/collapse 안정성 | 20% | prevalence TV drift 7%, minimum share 7%, collapse-fold rate 6% |
+| OOD | 15% | overall OOD 5%, maximum component OOD 5%, OOD assignment coverage 5% |
 | seed 안정성 | 20% | p05 ARI 10%, p05 NMI 10% |
 | temporal 안정성 | 10% | switching drift 5%, duration log-ratio 5% |
-| 원본 feature 의미 유지 | 10% | semantic correlation 5%, salient-sign agreement 5% |
+| 원본 feature 의미 유지 | 10% | within-fold semantic correlation 3.5%, salient-sign agreement 3.5%, matching coverage 3% |
 
 Primary score는 위 loss rank의 가중합이다. confidence와 margin은 모델-native scale이 달라 primary cross-family score에 넣지 않고 report 및 선택 후 gate calibration에 사용한다. BIC, likelihood, silhouette은 descriptive output일 뿐 선택 점수에 넣지 않는다.
+
+metric-level unavailable은 0이나 중앙값으로 impute하지 않는다. covariance는 명시된 coverage loss로 반영하고, component-level OOD unavailable은 minimum share와 collapse-fold rate가 별도로 불이익을 포착하게 한다. candidate 전체에서 집계 metric을 계산할 관측치가 하나도 없으면 해당 loss rank를 `1.0`으로 고정한다.
 
 ### 11.2 Tie-break
 
@@ -312,16 +348,49 @@ Primary score는 위 loss rank의 가중합이다. confidence와 margin은 모�
 
 GMM free parameter 수는 means, mixture weights, covariance parameters의 합이며 covariance type별 실제 자유도를 사용한다. K-Means는 centroid parameter 수를 사용한다. 선택 규칙이나 `0.01` tie band는 결과 확인 후 바꾸지 않는다.
 
+### 11.3 절대 최소 품질 정책
+
+상대 순위 1등만으로 모델을 선택하지 않는다. 정식 selection run이 자동 선택을 허용하려면 run 시작 전에 별도 `absolute_quality_policy`가 존재해야 하며 policy version, threshold 값, 근거 문서와 hash가 candidate registry와 run_id에 포함되어야 한다.
+
+정책은 최소한 다음 기준을 모두 가져야 한다.
+
+- `p05_seed_ari_min`
+- `p05_seed_nmi_min`
+- `minimum_validation_component_share_min`
+- `maximum_collapse_fold_count`
+- `maximum_overall_ood_rate`
+- `maximum_component_ood_rate`
+- `minimum_ood_assignment_coverage`
+- `maximum_within_fold_centroid_distance`
+- `minimum_covariance_component_coverage`
+
+구체적인 숫자는 현재 설계에서 임의로 만들지 않는다. 별도로 승인된 Cluster Development pseudo-OOS baseline run에서만 정하고, 이 formal leaderboard를 본 뒤 같은 run에 소급 적용할 수 없다. Mapping 이후 자료나 외부 성과 기준은 근거로 사용할 수 없다.
+
+- policy가 없으면 기술적으로 유효한 후보의 provisional ranking만 만들고 status를 `ranked_but_not_qualified`로 고정한다.
+- policy가 있으면 절대 기준을 모두 통과한 후보만 qualified ranking에 들어간다.
+- 절대 기준을 통과한 후보가 없으면 `no_eligible_candidate`다.
+- 한 후보만 남아 percentile rank가 모두 0이더라도 절대 기준 통과가 선택의 필수 조건이다.
+
+qualified ranking의 1위 후보만 `n_init=20` qualification pass를 수행한다. seed ARI/NMI 기준은 `n_init=1` 구조 안정성 grid에서 이미 판정했으므로 qualification에서 재계산하지 않는다. 나머지 centroid, covariance coverage, share, collapse, OOD, temporal, semantic 기준은 24개 qualification folds에서 다시 통과해야 status가 `selected`가 된다. 실패하면 차순위 후보로 자동 fallback하지 않고 `no_eligible_candidate`로 종료한다.
+
 ## 12. Gate calibration
 
-모델 후보가 선택된 뒤, 아직 full-development 모델을 fit하기 전에 선택 후보의 대표 seed pseudo-OOS 결과만 사용한다.
+모델 후보가 절대 품질 정책과 `n_init=20` qualification을 통과한 뒤, 아직 full-development 모델을 fit하기 전에 qualification fold 결과만 사용한다. `n_init=1` seed-stability grid의 gate를 운영 threshold로 재사용하지 않는다.
 
 - high-side fold gate: `max(expanding p95, rolling p95)`
 - low-side fold gate: `min(expanding p05, rolling p05)`
 - quantile method: NumPy-compatible linear interpolation로 고정
-- 대상: maximum centroid drift, maximum covariance drift, prevalence TV drift, minimum share, overall/max-component OOD, switching drift, duration drift
+- 대상: within-fold maximum centroid drift, maximum covariance drift와 covariance coverage, prevalence TV drift, minimum share, overall/max-component OOD와 OOD assignment coverage, switching drift, duration drift
 - GMM sample ambiguity: 중복 validation을 피하기 위해 expanding validation assignments만 pool하여 maximum posterior p05와 posterior margin p05
-- K-Means sample ambiguity: 같은 방식으로 distance-softmax confidence p05와 margin p05
+- K-Means sample ambiguity: 같은 방식으로 normalized-distance margin p05. normalized distance softmax는 gate에 사용하지 않음
+
+각 fold-level gate record에는 threshold만 저장하지 않고 다음 provenance를 함께 저장한다.
+
+- expanding raw values 12개와 rolling raw values 12개
+- scheme별 p95/p05, maximum, minimum, median, MAD
+- p95/p05 linear interpolation에 사용된 두 order-statistic folds와 interpolation weights
+- maximum을 만든 fold
+- 최종 threshold를 지배한 scheme
 
 gate threshold를 계산할 fold 수가 scheme별 12개가 아니거나 expanding pooled validation anchor가 기대 집합과 다르면 calibration을 거부한다. 현재 frozen K4의 `0.5`, `2%`, 관측 실패값 또는 후속 구간 결과는 calibration에 사용하지 않는다.
 
@@ -343,8 +412,10 @@ gate threshold를 계산할 fold 수가 scheme별 12개가 아니거나 expandin
 - `seed_stability.csv`: ARI/NMI와 matching receipts
 - `candidate_summary.json`: eligibility와 precommitted score 입력
 - `leaderboard.csv`: score, domain ranks, rejection reason
-- `gate_calibration.json`: 선택 후보의 역사 분포와 고정 thresholds
-- `selection_receipt.json`: selected candidate 또는 `no_eligible_candidate`, tie-break trace
+- `absolute_quality_policy.json`: optional precommitted 절대 기준, 근거와 hash. 없으면 명시적 null receipt
+- `qualification_receipts.jsonl`: qualified ranking 1위 후보의 24개 `n_init=20` fold fits. qualification 미실행 시 사유 receipt
+- `gate_calibration.json`: qualification 역사 원시값, 분포 요약, 지배 fold/scheme와 고정 thresholds
+- `selection_receipt.json`: `ranked_but_not_qualified`, `selected` 또는 `no_eligible_candidate`, 절대 기준과 tie-break trace
 - `report.md`: 최소 사람이 읽을 수 있는 결론
 - `manifest.json`: 파일별 SHA-256, implementation hash, parent input hashes
 
@@ -352,9 +423,9 @@ gate threshold를 계산할 fold 수가 scheme별 12개가 아니거나 expandin
 
 ### 13.2 선택 후 freeze
 
-`selection_receipt.status == "selected"`와 manifest 검증이 성공한 뒤에만 별도의 deterministic freeze run을 시작할 수 있다. 그때 선택된 feature set, model config, 대표 seed를 사용해 1,641 Cluster Development anchors 전체에서 clipping, RobustScaler, model, OOD threshold를 한 번 fit한다.
+`selection_receipt.status == "selected"`, 절대 품질 policy hash, `n_init=20` qualification과 manifest 검증이 모두 성공한 뒤에만 별도의 deterministic freeze run을 시작할 수 있다. 그때 선택된 feature set, model config, representative seed를 RNG root로 사용하고 qualification과 동일한 `n_init=20` 계약으로 1,641 Cluster Development anchors 전체에서 clipping, RobustScaler, model, OOD threshold를 한 번 fit한다.
 
-freeze artifact에는 feature 목록/순서와 registry hash, preprocessing parameters, K/covariance, model parameters, posterior 또는 distance-softmax ambiguity thresholds, OOD thresholds, monitoring gates, component fingerprints, implementation hash, source/fold/selection receipt hashes를 포함한다. 선택 run 자체에는 runtime-loadable model artifact를 넣지 않는다.
+freeze artifact에는 feature 목록/순서와 registry hash, preprocessing parameters, K/covariance, `n_init`, model parameters, posterior 또는 normalized-distance-margin ambiguity thresholds, OOD thresholds, monitoring gates, component fingerprints, implementation hash, source/fold/qualification/selection receipt hashes를 포함한다. 선택 run 자체에는 runtime-loadable model artifact를 넣지 않는다.
 
 ## 14. 검증 전략
 
@@ -362,15 +433,22 @@ freeze artifact에는 feature 목록/순서와 registry hash, preprocessing para
 
 - exact 1,641 anchors와 24 fold contexts
 - 3일 purge가 raw candle overlap을 제거함
+- capability 단계가 정확히 600 fits 이하이고 그 결과로 candidate registry를 변경할 수 없음
+- verified checkpoint resume와 28,800 terminal job-key completeness
 - validation 변조가 train bounds/scaler/model/OOD threshold를 바꾸지 않음
 - validation 변조는 validation metrics만 바꿈
 - common-reference projection round trip과 covariance congruence transform
+- primary within-fold distance와 descriptive earliest-reference distance 분리
 - four GMM covariance shapes와 K=2 포함 research-only config
 - 60 candidates, 20 seeds, 28,800 unique job keys
-- component matching, ambiguous matching rejection, fingerprint 안정성
+- component count 2/5 경계에서 covariance unavailable, collapse, job validity가 독립적으로 변함
+- Hungarian relative margin `0.05`, matching unavailable/coverage와 fingerprint 안정성
 - OOD numerator/denominator, posterior와 K-Means confidence 명칭 분리
+- K-Means component distance normalization과 normalized-distance margin
 - score와 tie-break golden fixture
-- 모든 후보 탈락 시 no-selection 및 artifact 부재
+- policy 부재 시 `ranked_but_not_qualified`, 절대 기준 실패 시 no-selection 및 artifact 부재
+- `n_init=1` seed grid와 `n_init=20` qualification/freeze 계약 분리
+- gate raw 12+12 values, median/MAD, interpolation folds와 지배 scheme provenance
 - forbidden range/module/data access 즉시 실패
 - 동일 입력/config/code에서 byte-identical outputs와 동일 run_id
 
